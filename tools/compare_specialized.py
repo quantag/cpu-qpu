@@ -6,7 +6,9 @@ Interpreter: the quantum machine running the compiled binary (full decoder, and 
 to the classes the function uses). Specialised: a reversible circuit for this one function, built
 from the same adder and multiplier primitives (compute, copy the result, uncompute), which is what
 partial evaluation of the interpreter for this program would aim at. Both are checked against Python.
-Run: python3 tools/compare_specialized.py"""
+Run: python3 tools/compare_specialized.py [--comparator]
+--comparator builds the interpreter with one comparator per program slot (the original circuit, as in the
+paper) instead of the default decoder tree."""
 import os, random, subprocess, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from collections import Counter
@@ -28,7 +30,8 @@ rows = []
 for name, classes in (("interpreter, full decoder", None),
                       ("interpreter, reduced decoder", ("addsub_reg", "logic_reg", "madd", "bra", "hlt"))):
     kw = dict(classes=classes) if classes else {}
-    m = QuantumARM(Config(W=W, regs=(0, 1, 8, 9, 30), SLOTS=8, STEPS=5, MEM=0, **kw))
+    m = QuantumARM(Config(W=W, regs=(0, 1, 8, 9, 30), SLOTS=8, STEPS=5, MEM=0,
+                          select="comparator" if "--comparator" in sys.argv else "tree", **kw))
     name += f" ({len(m.cfg.classes)} classes)"
     # Bennett cleanup, as in the specialised circuit: U, copy X0 to a fresh register, U^-1
     n0 = m.n
