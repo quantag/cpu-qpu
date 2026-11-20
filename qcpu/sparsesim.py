@@ -1,5 +1,5 @@
 """Exact sparse state-vector simulator for circuits made of X, CX, CCX, CSWAP (permutations of basis
-states) plus a few H, Z and controlled-phase gates.
+states) plus H, Z, controlled-phase and controlled-RY gates.
 
 The quantum ARM machine is a permutation circuit: it maps each basis state to one basis state. A
 superposition over k input qubits therefore stays a superposition of at most 2^k basis states however
@@ -53,6 +53,16 @@ class SparseState:
         sign = np.where(self.bits[:, t] == 1, -1.0, 1.0)
         self._merge(np.vstack([b0, b1]), np.concatenate([self.amp * s, self.amp * s * sign]))
 
+    def cry(self, theta, control, target):
+        """Controlled RY, including interference between existing basis states."""
+        enabled = self.bits[:, control] == 1
+        t = self.bits[:, target]
+        same = self.amp * np.where(enabled, np.cos(theta / 2), 1.0)
+        flipped = self.bits[enabled].copy()
+        flipped[:, target] ^= 1
+        other = self.amp[enabled] * np.sin(theta / 2) * np.where(t[enabled] == 0, 1.0, -1.0)
+        self._merge(np.vstack([self.bits, flipped]), np.concatenate([same, other]))
+
     def _merge(self, bits, amp):
         """Add the amplitudes of equal basis states (interference) and drop the ones that cancel."""
         packed = np.packbits(bits, axis=1)
@@ -64,14 +74,25 @@ class SparseState:
         self.amp = acc[keep]
 
     def apply(self, gates, inverse=False, fast=True):
-        """gates: list of (name, args...) as in QuantumARM.g, plus ("h", q), ("z", q), ("cp", theta, a, b).
-        inverse=True applies the inverse circuit: reversed order, phases negated (the other gates are
+        """gates: list of (name, args...) as in QuantumARM.g, plus ("h", q), ("z", q), ("cp", theta, a, b), ("cry", theta, a, b).
+        inverse=True applies the inverse circuit: reversed order, rotation/phase angles negated (the other gates are
         self-inverse). A list of permutation gates only is run by the bit-parallel routine below."""
-        if fast and len(gates) > 64 and all(g[0] in PERMUTATION for g in gates):
-            return self._permute(reversed(gates) if inverse else gates)
+        if fast and len(gates) > 64:
+            block = []
+            for g in (reversed(gates) if inverse else gates):
+                if g[0] in PERMUTATION:
+                    block.append(g)
+                else:
+                    if block:
+                        self._permute(block)
+                        block = []
+                    self.apply([g], inverse=inverse, fast=False)
+            if block:
+                self._permute(block)
+            return
         for g in (reversed(gates) if inverse else gates):
-            if g[0] == "cp" and inverse:
-                self.cp(-g[1], g[2], g[3])
+            if g[0] in ("cp", "cry") and inverse:
+                getattr(self, g[0])(-g[1], g[2], g[3])
             else:
                 getattr(self, g[0])(*g[1:])
 

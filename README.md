@@ -1,5 +1,14 @@
 # arm-qpu: run an ARM64 binary on a quantum computer
 
+> **Q-ARM experimental branch:** OpenQASM 2 unitary gates can now be embedded in
+> CPU-skippable AArch64 packets. The quantum interpreter executes them; a normal
+> ARM CPU branches over them. See [Q-ARM guide and packet ABI](docs/qarm.md).
+>
+> Quick start: `python qarm.py compile examples/qarm/bell.qasm -o bell`, then
+> `python qarm.py run bell.bin`. Reset, mid-circuit measurement and feedback are
+> not supported in this first coherent version. Plain ARM behavior is unchanged.
+
+
 Write an ordinary C program, compile it to an AArch64 binary with clang or gcc, and run that
 binary on a **quantum stored-program (von Neumann) processor** made entirely of quantum gates.
 The program's output appears as if you had run it locally:

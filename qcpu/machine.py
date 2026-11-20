@@ -319,6 +319,10 @@ class QuantumARM:
         G = lambda *names: self.fresh_xor(*[f[n] for n in names if n in f])
         anyf = G(*c.classes)
         trap = self.fresh_match([(r, 1), (anyf, 0)])
+        # Optional coherent extension fault; asserted only on a recognized B packet.
+        extension_fault = getattr(self, "_extension_fault", self.ZERO)
+        if extension_fault >= 0:
+            self.cx(extension_fault, trap)
         op30, s29, sf = ir[30], ir[29], ir[31]
         fadd = G(*ADDSUB)                       # adder-result classes
         fcc = f.get("ccmp", Z)
