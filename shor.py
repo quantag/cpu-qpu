@@ -132,6 +132,7 @@ def main():
     bases = [A.a] if A.a is not None else [b for b in range(2, N - 1) if math.gcd(b, N) == 1]
     t = A.bits or (N * N - 1).bit_length()
     cfg = load_config(A.config)
+    A.select = cfg.get("memory_select", "tree")
     prog, code, slots, checks = prepare(A.binary, A.entry, cfg, A.cc, A.opt)
     runs, status = [], "failed"
     for a in bases:
@@ -183,7 +184,7 @@ def run_base(a, N, t, prog, code, slots, checks, A):
     used.discard(31)
     classes = tuple(sorted({c.cls for c in checks} | {"hlt"}))
     m = QuantumARM(Config(W=W, regs=tuple(sorted(used)), sp=any(c.uses_sp for c in checks),
-                          SLOTS=slots, STEPS=T, MEM=0, classes=classes))
+                          SLOTS=slots, STEPS=T, MEM=0, classes=classes, select=A.select))
     ones = m.load_bits(words, {0: a, 2: N, 30: 4 * (slots - 1)}, pc=prog["entry_index"])
     cnt = m.counts()
     nb = N.bit_length()

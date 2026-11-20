@@ -27,9 +27,12 @@ class RVConfig:
     MEM: int = 0                            # data memory: 4-byte cells (W bits each); power of two
     classes: tuple = ALL_CLASSES            # instruction classes the decoder implements
     xlen: int = 64                          # 64 = RV64IM, 32 = RV32IM
+    select: str = "tree"                    # program slot / data cell selection: "tree" (binary decoder) or
+                                            # "comparator" (one comparator per slot: the original circuit)
 
     def __post_init__(self):
         assert 8 <= self.W <= 16 and self.xlen in (32, 64)
+        assert self.select in ("tree", "comparator")
         assert self.SLOTS & (self.SLOTS - 1) == 0
         self.regs = tuple(sorted(r for r in self.regs if 1 <= r <= 31))
         self.pbits = max(1, (self.SLOTS - 1).bit_length())
@@ -64,9 +67,14 @@ class QuantumRISCV(Machine):
 
         # FETCH: IR = MEM[PC]
         ir = self.alloc(32)
-        for slot in range(c.SLOTS):
-            self.local(lambda: self.fresh_match(self.field_eq(self.pc, 0, p, slot)),
-                       lambda sel: self.gated_copy(sel, self.mem[slot], ir))
+        tree = c.select == "tree"
+        if tree:
+            for slot, sel in enumerate(self.onehot(self.pc, ONE)[:c.SLOTS]):
+                self.gated_copy(sel, self.mem[slot], ir)
+        else:
+            for slot in range(c.SLOTS):
+                self.local(lambda: self.fresh_match(self.field_eq(self.pc, 0, p, slot)),
+                           lambda sel: self.gated_copy(sel, self.mem[slot], ir))
 
         # DECODE: one flag per class, set by exactly one of its patterns, only while running
         pats = rv_classes(c.xlen)
@@ -164,17 +172,28 @@ class QuantumRISCV(Machine):
         if has(*MEMOPS):
             m = c.mbits
             idx = [S[2 + j] for j in range(m)]
-            idx1 = self.add(idx, [ONE] + [Z] * (m - 1), Z, m)[0]
-            sel_eq = lambda ix, slot: [(ix[j], (slot >> j) & 1) for j in range(m)]
-            if has("load"):
+            if not tree:
+                idx1 = self.add(idx, [ONE] + [Z] * (m - 1), Z, m)[0]
+                sel_eq = lambda ix, slot: [(ix[j], (slot >> j) & 1) for j in range(m)]
+            if has("load") and tree:
+                for cell, sl in enumerate(self.onehot(idx, fld)[:c.MEM]):
+                    self.gated_copy(sl, self.ram[cell], R)
+            elif has("load"):
                 for slot in range(c.MEM):
                     self.local(lambda: self.fresh_match([(fld, 1)] + sel_eq(idx, slot)),
                                lambda sl: self.gated_copy(sl, self.ram[slot], R))
             if has("store"):
                 sd = self.fresh_and(fst, f3[0]) if c.xlen == 64 else Z
-                wm = [[self.fresh_match([(fst, 1)] + sel_eq(idx, slot)) for slot in range(c.MEM)]]
+                if tree:
+                    dec = self.onehot(idx, fst)
+                    wm = [dec[:c.MEM]]
+                else:
+                    wm = [[self.fresh_match([(fst, 1)] + sel_eq(idx, slot)) for slot in range(c.MEM)]]
                 dm = [B]
-                if c.xlen == 64:
+                if c.xlen == 64 and tree:               # sd: the cell after idx gets the sign
+                    wm.append([self.fresh_and(dec[(cell - 1) % (1 << m)], sd) for cell in range(c.MEM)])
+                    dm.append([B[W - 1]] * W)
+                elif c.xlen == 64:
                     wm.append([self.fresh_match([(sd, 1)] + sel_eq(idx1, slot)) for slot in range(c.MEM)])
                     dm.append([B[W - 1]] * W)
 

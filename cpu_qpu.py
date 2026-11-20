@@ -31,6 +31,7 @@ DEFAULTS = {
     "memory_words": "auto",          # data memory cells (4 bytes each); auto = sized to log + data + stack
     "max_steps": "auto",             # auto = number of steps the CPU reference needs
     "isa": "full",                   # full = every implemented class in the decoder | auto = only classes used
+    "memory_select": "tree",         # tree = binary decoder per address | comparator = one comparator per slot (the original circuit)
     "compiler": "auto",              # for .c input: auto | clang | gcc | a command name / path
     "cflags": ["-O1", "-fno-stack-protector"],
     "output_records": 32,            # printf/puts/putchar calls kept in the output log
@@ -225,7 +226,13 @@ def main():
 
     # ---- quantum machine
     t0 = time.time()
-    m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"]), defer=True)
+    if cfg["memory_select"] not in ("tree", "comparator"):
+        sys.exit(f"error: memory_select must be 'tree' or 'comparator' (it is '{cfg['memory_select']}')")
+    try:
+        m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"],
+                                   select=cfg["memory_select"]), defer=True)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
     init = {isa.arg_regs[i]: v for i, v in enumerate(qpu_args)}
     # the entry function returns to the halt slot: return address in the link register or on the stack
     init, cells0 = isa.entry(init, cells, slots, sp_off, isa.sp_reg in m.X)
@@ -262,6 +269,7 @@ def main():
     gc = m.counts()
     report["machine"] = dict(W=W, registers=[isa.reg_name(k) for k in m.X], program_slots=slots,
                              steps=steps, data_memory_cells=MEM, decoder_classes=list(m.cfg.classes), slot_bits=8 * isa.unit,
+                             memory_select=getattr(m.cfg, "select", "tree"),
                              qubits=getattr(m, "n_total", m.n), gates=gc, toffoli=gc.get("ccx", 0))
     report["backend"]["seconds"] = round(time.time() - t0, 2)
     if q is None:
@@ -449,6 +457,7 @@ def markdown(r, W):
               f"- {mc['steps']} machine steps, {mc['program_slots']} program-memory slots x {mc.get('slot_bits', 32)} qubits, "
               f"{mc['data_memory_cells']} data cells, registers {', '.join(mc['registers'])}",
               f"- data memory layout (byte offsets): {r.get('layout')}",
+              f"- program slots and data cells are selected by: {mc.get('memory_select', 'comparator')}",
               f"- decoder implements {len(mc['decoder_classes'])} instruction classes: {', '.join(mc['decoder_classes'])}", ""]
     bk = r.get("backend")
     if bk:

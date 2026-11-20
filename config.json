@@ -5,6 +5,7 @@
   "memory_words": "auto",
   "max_steps": "auto",
   "isa": "full",
+  "memory_select": "tree",
   "compiler": "auto",
   "cflags": ["-O1", "-fno-stack-protector"],
   "shots": 1024,
