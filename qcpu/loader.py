@@ -1,13 +1,16 @@
-"""Load and link AArch64 machine code for the quantum machine.
+"""Load and link machine code for the quantum machine (AArch64 and RISC-V).
 
 Reads an ELF or Mach-O object/executable (or a raw .bin), merges all executable sections into
 one code image, lays out the data sections (.rodata, .data, .bss, string literals) in data
-memory, and applies the relocations a linker would: BL/B (CALL26/JUMP26, BRANCH26), ADRP
-(ADR_PREL_PG_HI21, PAGE21), :lo12: (ADD_ABS_LO12_NC, LDSTxx_ABS_LO12_NC, PAGEOFF12), ABS64.
+memory, and applies the relocations a linker would.
+  AArch64: BL/B (CALL26/JUMP26, BRANCH26), ADRP (ADR_PREL_PG_HI21, PAGE21), :lo12:
+           (ADD_ABS_LO12_NC, LDSTxx_ABS_LO12_NC, PAGEOFF12), ABS64.
+  RISC-V:  CALL/CALL_PLT (auipc + jalr), JAL, BRANCH, HI20 / LO12_I / LO12_S,
+           PCREL_HI20 / PCREL_LO12_I / PCREL_LO12_S, 64 / 32 (pointers in data).
 
-printf / puts / putchar are bound to OUTPUT_STUB, a few A64 instructions that run on the
-machine like any other code and append one record per call to the output log in data memory
-(see qcpu/console.py, which turns the log into text after the run).
+printf / puts / putchar are bound to an output stub: a few instructions of the same architecture
+that run on the machine like any other code and append one record per call to the output log in
+data memory (see qcpu/console.py, which turns the log into text after the run).
 """
 import os
 from .reference import CODE_BASE, DATA_BASE
@@ -23,6 +26,15 @@ OUTPUT_STUB = [   # assembled from docs/output_stub.s
 ]
 STUB_ENTRY = {"printf": 0, "puts": 3, "putchar": 6, "printf@apple": 26}
 STUB_CAPACITY_WORD = 11
+# RISC-V machine code of the output stub (assembled from docs/output_stub_riscv.s; the same words for
+# RV32 and RV64). Entry points and the capacity word are at the same indices as in the A64 stub.
+OUTPUT_STUB_RV = [
+    0x00100293, 0x00000313, 0x01c0006f, 0x00200293, 0x00000313, 0x0100006f,
+    0x00300293, 0x0ff57313, 0x0040006f, 0x100003b7, 0x0003ae03, 0x7ff00e93,
+    0x03de7a63, 0x001e0e13, 0x01c3a023, 0x005e1e13, 0x007e0e33, 0x005e2023,
+    0x00ae2223, 0x00be2423, 0x00ce2623, 0x00de2823, 0x00ee2a23, 0x00fe2c23,
+    0x010e2e23, 0x00030513, 0x00008067,
+]
 OUTPUT_FUNCS = ("printf", "puts", "putchar")
 
 
@@ -41,8 +53,10 @@ def _get(code, off):
 class ObjectImage:
     """Sections, symbols and relocations of one object file, before layout."""
 
-    def __init__(self, path):
+    def __init__(self, path, arch=None):
+        """arch: architecture of a raw binary; an ELF or Mach-O file carries its own."""
         self.path = path
+        self.arch = arch or "arm64"
         data = open(path, "rb").read()
         magic = data[:4]
         self.code = bytearray()
@@ -67,8 +81,13 @@ class ObjectImage:
         import lief
         lief.logging.disable()
         b = lief.parse(self.path)
-        if b.header.machine_type != lief.ELF.ARCH.AARCH64:
-            raise LinkError("not an AArch64 ELF file")
+        if b.header.machine_type == lief.ELF.ARCH.AARCH64:
+            self.arch, prefix = "arm64", "AARCH64_"
+        elif b.header.machine_type == lief.ELF.ARCH.RISCV:
+            self.arch = "riscv64" if b.header.identity_class == lief.ELF.Header.CLASS.ELF64 else "riscv32"
+            prefix = "RISCV_"
+        else:
+            raise LinkError("unsupported ELF machine type (supported: AArch64, RISC-V)")
         rel = b.header.file_type == lief.ELF.Header.FILE_TYPE.REL
         secs = list(b.sections)
         X = lief.ELF.Section.FLAGS.EXECINSTR
@@ -81,7 +100,7 @@ class ObjectImage:
                 while len(self.code) % 4: self.code += b"\0"
                 sec_place[i] = ("code", len(self.code), s.virtual_address)
                 self.code += bytes(s.content)
-            elif s.name.startswith((".rodata", ".data", ".bss", ".sdata", ".sbss")):
+            elif s.name.startswith((".rodata", ".data", ".bss", ".sdata", ".sbss", ".srodata")):
                 content = bytes(s.content) if s.type != lief.ELF.Section.TYPE.NOBITS else bytes(s.size)
                 self.data_secs.append((s.name + f"#{i}", content, max(4, s.alignment)))
                 sec_place[i] = ("data", s.name + f"#{i}", s.virtual_address)
@@ -115,7 +134,9 @@ class ObjectImage:
                     tgt = ("code", w2 + sym.value) if k2 == "code" else ("data", w2, sym.value)
             else:
                 tgt = ("sym", sym.name)
-            t = str(r.type).split(".")[-1].replace("AARCH64_", "")
+            t = str(r.type).split(".")[-1].replace(prefix, "")
+            if t == "RELAX":                    # RISC-V linker-relaxation hint: nothing to apply
+                continue
             if kind == "code":
                 self.relocs.append((where + r.address, t, tgt, r.addend))
             else:
@@ -196,10 +217,15 @@ class ObjectImage:
         externs = sorted({t[1] for _, _, t, _ in self.relocs if t[0] == "sym" and t[1] not in self.syms})
         uses_output = any(e in OUTPUT_FUNCS for e in externs)
         stub_base = None
+        riscv = self.arch.startswith("riscv")
         if uses_output:
             stub_base = len(code)
-            stub = list(OUTPUT_STUB)
-            stub[STUB_CAPACITY_WORD] = (stub[STUB_CAPACITY_WORD] & ~(0xFFF << 10)) | ((log_capacity & 0xFFF) << 10)
+            if riscv:
+                stub = list(OUTPUT_STUB_RV)             # li t4, capacity: I-type immediate
+                stub[STUB_CAPACITY_WORD] = (stub[STUB_CAPACITY_WORD] & 0x000FFFFF) | ((min(log_capacity, 2047) & 0xFFF) << 20)
+            else:
+                stub = list(OUTPUT_STUB)                # cmp w10, #capacity: imm12
+                stub[STUB_CAPACITY_WORD] = (stub[STUB_CAPACITY_WORD] & ~(0xFFF << 10)) | ((log_capacity & 0xFFF) << 10)
             code += b"".join(w.to_bytes(4, "little") for w in stub)
         # data layout
         place = {}
@@ -229,7 +255,9 @@ class ObjectImage:
             return None
 
         unresolved = []
-        for off, t, tgt, addend in self.relocs:
+        if riscv:
+            self._relocate_riscv(code, addr, unresolved)
+        for off, t, tgt, addend in ([] if riscv else self.relocs):
             S = addr(tgt, addend)
             if S is None:
                 unresolved.append(f"code+{off}: {t} {tgt[1]}")
@@ -253,11 +281,12 @@ class ObjectImage:
                 unresolved.append(f"code+{off}: {t} {tgt[1]}")
         for key, off, t, tgt, addend in self.data_relocs:
             S = addr(tgt, addend)
-            if S is None or t not in ("ABS64", "UNSIGNED"):
+            if S is None or t not in ("ABS64", "UNSIGNED", "64", "32"):
                 unresolved.append(f"{key}+{off}: {t} {tgt[1]}")
                 continue
             o = place[key] - data_offset + off
-            image[o:o + 8] = S.to_bytes(8, "little")
+            nb = 4 if t == "32" else 8
+            image[o:o + nb] = S.to_bytes(nb, "little")
         funcs = dict(self.funcs)
         if not funcs:
             raise LinkError("no function symbols found in the code section")
@@ -272,7 +301,62 @@ class ObjectImage:
         return dict(words=words, entry=entry, entry_index=funcs[entry] // 4, functions=functions,
                     data_image=bytes(image), data_offset=data_offset, data_end=data_offset + len(image),
                     externs=externs, uses_output=uses_output, unresolved=unresolved,
-                    sections={k: place[k] for k in place}, apple=self.apple)
+                    sections={k: place[k] for k in place}, apple=self.apple, arch=self.arch)
+
+    def _relocate_riscv(self, code, addr, unresolved):
+        """Apply the RISC-V relocations to the code image."""
+        def put_u(off, hi):                                   # U-type: imm[31:12]
+            _put(code, off, (_get(code, off) & 0xFFF) | ((hi & 0xFFFFF) << 12))
+
+        def put_i(off, lo):                                   # I-type: imm[11:0]
+            _put(code, off, (_get(code, off) & 0x000FFFFF) | ((lo & 0xFFF) << 20))
+
+        def put_s(off, lo):                                   # S-type: imm[11:5|4:0]
+            _put(code, off, (_get(code, off) & 0x01FFF07F) | (((lo >> 5) & 0x7F) << 25) | ((lo & 0x1F) << 7))
+
+        def put_b(off, d):                                    # B-type: imm[12|10:5|4:1|11]
+            _put(code, off, (_get(code, off) & 0x01FFF07F) | (((d >> 12) & 1) << 31) | (((d >> 5) & 0x3F) << 25)
+                 | (((d >> 1) & 0xF) << 8) | (((d >> 11) & 1) << 7))
+
+        def put_j(off, d):                                    # J-type: imm[20|10:1|11|19:12]
+            _put(code, off, (_get(code, off) & 0xFFF) | (((d >> 20) & 1) << 31) | (((d >> 1) & 0x3FF) << 21)
+                 | (((d >> 11) & 1) << 20) | (((d >> 12) & 0xFF) << 12))
+        hi_delta, later = {}, []          # code offset of an auipc with PCREL_HI20 -> target - PC
+        for off, t, tgt, addend in self.relocs:
+            if t in ("PCREL_LO12_I", "PCREL_LO12_S"):
+                later.append((off, t, tgt))
+                continue
+            S = addr(tgt, addend)
+            if S is None:
+                unresolved.append(f"code+{off}: {t} {tgt[1]}")
+                continue
+            P = CODE_BASE + off
+            if t in ("CALL", "CALL_PLT"):                     # auipc ra, hi ; jalr ra, lo(ra)
+                hi = (S - P + 0x800) >> 12
+                put_u(off, hi); put_i(off + 4, S - P - (hi << 12))
+            elif t == "JAL":
+                put_j(off, S - P)
+            elif t == "BRANCH":
+                put_b(off, S - P)
+            elif t == "HI20":
+                put_u(off, (S + 0x800) >> 12)
+            elif t == "LO12_I":
+                put_i(off, S)
+            elif t == "LO12_S":
+                put_s(off, S)
+            elif t == "PCREL_HI20":
+                hi_delta[off] = S - P
+                put_u(off, (S - P + 0x800) >> 12)
+            else:
+                unresolved.append(f"code+{off}: {t} {tgt[1]}")
+        for off, t, tgt in later:                             # the symbol is the label of the matching auipc
+            A = addr(tgt, 0)
+            d = hi_delta.get(A - CODE_BASE) if A is not None else None
+            if d is None:
+                unresolved.append(f"code+{off}: {t} {tgt[1]}")
+                continue
+            lo = d - (((d + 0x800) >> 12) << 12)
+            (put_i if t.endswith("_I") else put_s)(off, lo)
 
 
 def load_program(path, entry=None):

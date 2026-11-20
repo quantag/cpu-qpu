@@ -1,6 +1,6 @@
-# arm-qpu: run an ARM64 binary on a quantum computer
+# cpu-qpu: run ARM64 and RISC-V binaries on a quantum computer
 
-Write an ordinary C program, compile it to an AArch64 binary with clang or gcc, and run that
+Write an ordinary C program, compile it to an AArch64 or RISC-V binary with clang or gcc, and run that
 binary on a **quantum stored-program (von Neumann) processor** made entirely of quantum gates.
 The program's output appears as if you had run it locally:
 
@@ -18,6 +18,11 @@ The binary is **not compiled into the circuit**: its 32-bit instruction words ar
 the initial state of the program-memory qubits. Nothing inside the circuit is measured or
 classically dispatched. The same bytes also run on an ARM CPU emulator as a reference, so
 every run is checked.
+
+**Architectures.** The same tool runs AArch64 (`arm64`), RISC-V RV64IM (`riscv64`) and RV32IM
+(`riscv32`) binaries; it reads the architecture from the file header. `cpu_qpu.py` is the command;
+`arm_qpu.py` is the same tool under its original name. Most of this README uses AArch64 for its
+examples; see "RISC-V" below for what differs. x86-64 is planned (`docs/x86_plan.md`).
 
 ## Quick start
 
@@ -134,6 +139,72 @@ Classic algorithms on a quantum von Neumann machine
 The inputs go through a `volatile` variable, so the compiler cannot compute the answers in
 advance: the QPU computes them. `factor.c` and `algorithms.c` each take about 20 seconds to
 simulate on a laptop; `hello.c` about 7 seconds.
+
+## RISC-V
+
+```bash
+python3 cpu_qpu.py examples/hello.c --arch riscv64        # compile for RV64IM and run
+python3 cpu_qpu.py examples/factor.c --arch riscv32       # RV32IM
+python3 cpu_qpu.py hello_rv.o                             # an object file: architecture from its header
+python3 cpu_qpu.py hello_rv.o -v                          # + comparison with the CPU, resources, report
+```
+
+To compile yourself (clang is a cross-compiler for every architecture; no extra package is needed):
+
+```bash
+clang --target=riscv64-unknown-linux-gnu -march=rv64im -mabi=lp64  -mno-relax -fno-pic -O1 -fno-stack-protector -Iinclude -c examples/hello.c -o hello_rv.o
+clang --target=riscv32-unknown-elf       -march=rv32im -mabi=ilp32 -mno-relax -fno-pic -O1 -fno-stack-protector -Iinclude -c examples/hello.c -o hello_rv32.o
+```
+
+`-march=rv64im` / `rv32im` selects the base integer instructions plus multiply/divide, without the
+16-bit compressed instructions; `-mno-relax -fno-pic` gives plain relocations.
+
+The RISC-V machine is a second front end on the same core as the AArch64 machine (below). It has
+registers x1..x31 (x0 reads as zero), no flags, and one write port, so it is smaller:
+
+| program (clang -O1, W = 12) | | AArch64 | RV64IM | RV32IM |
+|---|---|---|---|---|
+| `hello.c` | cycles | 228 | 236 | 236 |
+| | qubits | 520 364 | 269 902 | 145 724 |
+| | gates | 91.9 million | 39.2 million | 31.0 million |
+| `factor.c` | cycles | 606 | 610 | 607 |
+| | qubits | 1 367 842 | 681 527 | 359 678 |
+| | gates | 257.7 million | 113.8 million | 92.1 million |
+
+**Implemented:** LUI, AUIPC, JAL, JALR, BEQ/BNE/BLT/BGE/BLTU/BGEU, ADDI/SLTI/SLTIU/XORI/ORI/ANDI,
+SLLI/SRLI/SRAI, ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND, MUL, DIV/DIVU/REM/REMU, LW/SW, EBREAK (ends
+the run); on RV64 also the W forms (ADDIW, ADDW, SUBW, SLLIW/SRLIW/SRAIW, SLLW/SRLW/SRAW, MULW,
+DIVW/DIVUW/REMW/REMUW), LD/SD and LWU. `printf`, `puts` and `putchar` work as on AArch64.
+
+**Not implemented** (reported before the run, and the circuit itself traps on them): byte and
+halfword loads and stores, MULH/MULHSU/MULHU, compressed instructions, ECALL and CSRs, floating
+point, atomics.
+
+**Known limits of the W-bit model on RISC-V** (detected and reported, never returned as exact):
+
+- RV64 code that turns an unsigned 32-bit value into a 64-bit index uses the pair
+  `slli x, x, 32; srli x, x, 30`. The intermediate value does not fit a narrow register. clang emits
+  it for some array loops at `-O1`/`-O2` (`bubble_sort`, `factor.c` at `-O2`). RV32 code has no such
+  pair. Supporting the Zba extension (`sh2add.uw` and friends) would remove this limit.
+- Division by a constant becomes a multiplication by a 32-bit constant (`digit_sum`), as on AArch64.
+- clang `-O0` keeps boolean temporaries in single bytes (`collatz_steps`, `power_mod` at `-O0`).
+
+The decoder accepts exactly the instruction patterns listed in `qcpu/rv.py`; every other word traps
+in the circuit, also when the program is in superposition (`tests/test_riscv.py` runs a
+superposition of a valid and an invalid instruction word).
+
+### How architectures are organised
+
+| file | role |
+|---|---|
+| `qcpu/core.py` | shared core: qubit allocation, gate helpers, adder, shifter, multiplier, dividers, the compute / copy / uncompute / commit cycle, simulation hooks |
+| `qcpu/machine.py`, `qcpu/a64.py`, `qcpu/reference.py` | AArch64: circuit front end, class table and checker, CPU reference |
+| `qcpu/rv_machine.py`, `qcpu/rv.py`, `qcpu/rv_reference.py` | RISC-V: the same three parts |
+| `qcpu/isa.py` | registry: one entry per architecture (machine, checker, reference, calling convention, compiler flags) |
+| `qcpu/loader.py` | ELF / Mach-O loading, relocations and the output stub for each architecture |
+
+A front end supplies fetch, decode and execute for one cycle; everything else is shared. The split
+left the AArch64 circuits unchanged gate for gate (`tests/test_fingerprint.py`).
 
 ## Grover search with a C function as the oracle
 
@@ -503,6 +574,9 @@ non-negative W-bit values, which is why `register_width: auto` grows W with prog
 ```bash
 python3 -m tests.test_c_programs clang   # C cases x -O0/-O1/-O2 + whole programs with printf
 python3 -m tests.test_c_programs gcc     # the same with aarch64-linux-gnu-gcc
+python3 -m tests.test_c_programs clang riscv64   # the same C cases compiled for RV64IM (riscv32: RV32IM)
+python3 -m tests.test_riscv 150 7 8,12,16        # RISC-V: decoder, traps, boundary cases, random programs
+python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
 python3 -m tests.test_edges 8,12,16      # boundary cases: extensions, flags, shifts, W/X forms, memory, mul/div
 python3 -m tests.test_simulators         # fast replay == fully materialised circuit == Qiskit Aer
@@ -560,6 +634,8 @@ simulator), `arm_qpu.py` (CLI and reports), `include/stdio.h`.
   The smallest real program (`subs; cneg; ret`, `isa: auto`) needs 666 qubits and about 9 000
   Toffoli gates; `hello.c` needs about 500 000 qubits and 56 million Toffoli gates. Running on a QPU means a much smaller
   machine profile, or fault-tolerant hardware.
+* x86-64 is not implemented yet. Its variable-length instructions, memory operands and stack-based
+  calls need a different fetch and decode stage; the design is in `docs/x86_plan.md`.
 * There is no speed-up: a classical program on a QPU is a very expensive reversible computer.
   The value is a verified bridge from ordinary binaries to quantum circuits: reversible oracles,
   resource estimation, and a quantum control-flow test bed. See `docs/prior_work.md` and the

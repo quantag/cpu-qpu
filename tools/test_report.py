@@ -30,10 +30,12 @@ L = ["# Test results", "", f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')} by `
      f"- {sh('aarch64-linux-gnu-gcc --version')[1].splitlines()[0]}", "",
      "Outcome classes: **match** (QPU = CPU after every cycle, model check clean); **match-flagged** (equal, "
      "but the model check reported values outside the W-bit model); **flagged** (different, and the model "
-     "check reported it); **UNFLAGGED** (different, model check silent: a bug; required to be 0); "
+     "check reported an issue at or before the first cycle where they differ); **UNFLAGGED** (different, and "
+     "the model check silent or only about a later instruction: a bug; required to be 0); "
      "**discarded** (the CPU run did not halt normally, the program did not assemble, or it is too long).", ""]
 
 sections = [
+    ("Circuit fingerprints (no front end changed by accident)", [sys.executable, "-m", "tests.test_fingerprint"]),
     ("Differential fuzzing", [sys.executable, "-m", "tests.test_fuzz", "60" if quick else "300", "7", "8,12,16"]),
     ("Boundary cases", [sys.executable, "-m", "tests.test_edges", "8,12,16"]),
     ("Fast simulator vs full circuit vs Aer", [sys.executable, "-m", "tests.test_simulators", "30" if quick else "100", "5"]),
@@ -42,10 +44,14 @@ sections = [
     ("Grover search with compiled C oracles", [sys.executable, "-m", "tests.test_grover"]),
     ("Shor's algorithm with modexp compiled from C", [sys.executable, "-m", "tests.test_shor"]),
     ("Interpreter vs specialised circuit", [sys.executable, "tools/compare_specialized.py"]),
+    ("RISC-V: decoder, traps, boundary cases, random programs",
+     [sys.executable, "-m", "tests.test_riscv", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
 ]
 if not quick:
     sections += [("C programs, clang", [sys.executable, "-m", "tests.test_c_programs", "clang"]),
-                 ("C programs, gcc", [sys.executable, "-m", "tests.test_c_programs", "gcc"])]
+                 ("C programs, gcc", [sys.executable, "-m", "tests.test_c_programs", "gcc"]),
+                 ("C programs, clang, RISC-V RV64IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv64"]),
+                 ("C programs, clang, RISC-V RV32IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv32"])]
 ok_all = True
 for title, cmd in sections:
     t0 = time.time()
