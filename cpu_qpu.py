@@ -5,9 +5,11 @@
     python3 cpu_qpu.py factor.o --entry factorize --args 84 '&0'
     python3 cpu_qpu.py hello.o -v                       # + CPU/QPU comparison, resources, report
     python3 cpu_qpu.py hello.c --arch riscv64           # compile a C file for an architecture, then run it
+    python3 cpu_qpu.py hello.c --arch x86_64
 
-Architectures: AArch64 (arm64), RISC-V (riscv64 = RV64IM, riscv32 = RV32IM). The architecture of an
-object file is read from its header; for a C file or a raw binary it comes from --arch (default: arm64).
+Architectures: AArch64 (arm64), RISC-V (riscv64 = RV64IM, riscv32 = RV32IM), x86-64 (x86_64). The
+architecture of an object file is read from its header; for a C file or a raw binary it comes from
+--arch (default: arm64).
 
 The machine code runs on the quantum interpreter circuit of that architecture (backend from
 config.json: simulator | aer | ibm) and, as a reference, on a CPU emulator (Unicorn). printf, puts
@@ -23,7 +25,7 @@ from qcpu.reference import DATA_BASE, CODE_BASE
 
 DEFAULTS = {
     "backend": "simulator",          # simulator | aer | ibm
-    "arch": "arm64",                 # architecture for .c input and raw binaries: arm64 | riscv64 | riscv32
+    "arch": "arm64",                 # architecture for .c input and raw binaries: arm64 | riscv64 | riscv32 | x86_64
     "register_width": "auto",        # W: bits per register; auto = smallest W >= 8 the code layout allows
     "registers": "auto",             # auto | all | [0, 1, 2, ...]
     "memory_words": "auto",          # data memory cells (4 bytes each); auto = sized to log + data + stack
@@ -141,12 +143,12 @@ def main():
         sys.exit(f"error: {e}")
     code = prog["words"]
     n = len(code)
-    slots = 2
+    slots = isa.min_slots
     while slots < n + 1:
         slots *= 2
     words = isa.layout(code, slots)
-    asm = isa.disassemble(b"".join(w.to_bytes(4, "little") for w in code), CODE_BASE)
-    checks = [isa.check(w, i, slots) for i, w in enumerate(code)]
+    listing = isa.listing(code, slots, CODE_BASE)       # one entry per instruction
+    checks = [e["check"] for e in listing]
     names_at = {v: k for k, v in prog["functions"].items()}
 
     # ---- data memory: [output log][data sections][user cells][stack]
@@ -155,7 +157,7 @@ def main():
     user_off = (prog["data_end"] + 15) // 16 * 16
     user_cells = max(len(mem_init), 16 if any(t == "ptr" for t, _ in raw_args) else 0)
     uses_mem = (any(c.ok and c.cls in isa.MEMOPS for c in checks) or user_cells or prog["uses_output"]
-                or prog["data_end"] > prog["data_offset"])
+                or prog["data_end"] > prog["data_offset"] or isa.always_mem)
     stack = int(cfg["stack_bytes"]) if uses_mem else 0
     need = user_off + 4 * user_cells + stack + (64 if uses_mem else 0)
     if cfg["memory_words"] == "auto":
@@ -167,12 +169,13 @@ def main():
         MEM = int(cfg["memory_words"])
         if 4 * MEM < need:
             sys.exit(f"error: memory_words = {MEM} is too small; the layout needs {need} bytes")
-    need_w = max((4 * slots - 1).bit_length() + 1, (4 * MEM).bit_length() if MEM else 0)
+    need_w = max((isa.unit * slots - 1).bit_length() + 1, (4 * MEM).bit_length() if MEM else 0)
     W = max(8, need_w) if cfg["register_width"] == "auto" else int(cfg["register_width"])
     if W < need_w:
         sys.exit(f"error: code/data addresses need register_width >= {need_w} (it is {W})")
     if W > 16:
-        sys.exit(f"error: program too large ({n} instructions, {4 * MEM} bytes of data) for the W <= 16 machine")
+        sys.exit(f"error: program too large ({n} {'instructions' if isa.unit == 4 else 'bytes of code'}, "
+                 f"{4 * MEM} bytes of data) for the W <= 16 machine")
     cells = [0] * MEM
     img = prog["data_image"]
     for i in range(0, len(img), 4):
@@ -184,8 +187,8 @@ def main():
     cpu_args = [DATA_BASE + user_off + 4 * v if t == "ptr" else v for t, v in raw_args]
     qpu_args = [user_off + 4 * v if t == "ptr" else v for t, v in raw_args]
 
-    # registers to instantiate: arguments, return value, link register, and what the code touches
-    used = {isa.arg_regs[i] for i in range(len(raw_args))} | {isa.ret_reg, isa.link_reg}
+    # registers to instantiate: arguments, return value, link register / stack pointer, and what the code touches
+    used = {isa.arg_regs[i] for i in range(len(raw_args))} | {isa.ret_reg} | set(isa.entry_regs)
     for c in checks:
         if c.ok:
             used |= set(c.reads) | set(c.writes)
@@ -197,15 +200,15 @@ def main():
     for i in ref["trace"]:
         executed[i] = executed.get(i, 0) + 1
     steps = ref["steps"] if cfg["max_steps"] == "auto" else int(cfg["max_steps"])
-    report = dict(arch=dict(name=isa.name, title=isa.title, ret=isa.ret_label), binary=a.binary, source=source,
+    report = dict(arch=dict(name=isa.name, title=isa.title, ret=isa.ret_label, flags=isa.flag_names), binary=a.binary, source=source,
                   compiled_with=compiled_with, entry=prog["entry"],
                   entry_index=prog["entry_index"], args=a.args, memory_init=mem_init, config=cfg,
                   unresolved_relocations=prog["unresolved"], externs=prog["externs"],
                   layout=dict(output_log=[0, log_bytes], data=[prog["data_offset"], prog["data_end"]],
                               user=[user_off, user_off + 4 * user_cells], stack_top=sp_off, memory_bytes=4 * MEM))
-    report["code"] = [dict(index=i, address=f"0x{CODE_BASE + 4 * i:x}", word=f"{w:08x}", asm=asm[i],
-                           function=names_at.get(i), cls=checks[i].cls, supported=checks[i].ok,
-                           reason=checks[i].reason, executed=executed.get(i, 0)) for i, w in enumerate(code)]
+    report["code"] = [dict(index=e["index"], address=f"0x{CODE_BASE + isa.unit * e['index']:x}", word=e["word"], asm=e["asm"],
+                           function=names_at.get(e["index"]), cls=e["check"].cls, supported=e["check"].ok,
+                           reason=e["check"].reason, executed=executed.get(e["index"], 0)) for e in listing]
     report["unsupported"] = [x for x in report["code"] if not x["supported"]]
     report["cpu"] = dict(steps=ref["steps"], halted=ref["halted"], error=ref["error"], issues=ref["issues"],
                          x0=ref["regs"][isa.ret_reg])
@@ -224,10 +227,9 @@ def main():
     t0 = time.time()
     m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"]), defer=True)
     init = {isa.arg_regs[i]: v for i, v in enumerate(qpu_args)}
-    init[isa.link_reg] = 4 * (slots - 1)             # the entry function returns to the halt slot
-    if isa.sp_reg in m.X:
-        init[isa.sp_reg] = sp_off
-    ones = m.load_bits(words, init, cells, pc=prog["entry_index"])
+    # the entry function returns to the halt slot: return address in the link register or on the stack
+    init, cells0 = isa.entry(init, cells, slots, sp_off, isa.sp_reg in m.X)
+    ones = m.load_bits(words, init, cells0, pc=prog["entry_index"])
     backend = cfg["backend"]
     if backend == "simulator":
         mk = (1 << W) - 1
@@ -242,7 +244,7 @@ def main():
                 if value(st, q) != sn["regs"][r] & mk:
                     lock["first_divergence"] = f"cycle {k}: {isa.reg_name(r)}"; return
             if [st[x] for x in m.nzcv] != sn["flags"]:
-                lock["first_divergence"] = f"cycle {k}: NZCV"; return
+                lock["first_divergence"] = f"cycle {k}: {isa.flag_names or 'flags'}"; return
             for i, cell in enumerate(m.ram):
                 if value(st, cell) != int.from_bytes(sn["mem"][4 * i:4 * i + 4], "little") & mk:
                     lock["first_divergence"] = f"cycle {k}: memory cell {i}"; return
@@ -259,7 +261,7 @@ def main():
         q = run_sampled(m, ones, cfg, backend, report, isa)
     gc = m.counts()
     report["machine"] = dict(W=W, registers=[isa.reg_name(k) for k in m.X], program_slots=slots,
-                             steps=steps, data_memory_cells=MEM, decoder_classes=list(m.cfg.classes),
+                             steps=steps, data_memory_cells=MEM, decoder_classes=list(m.cfg.classes), slot_bits=8 * isa.unit,
                              qubits=getattr(m, "n_total", m.n), gates=gc, toffoli=gc.get("ccx", 0))
     report["backend"]["seconds"] = round(time.time() - t0, 2)
     if q is None:
@@ -406,11 +408,12 @@ def markdown(r, W):
     arch = r.get("arch", dict(name="arm64", title="AArch64", ret="X0"))
     L = [f"# {'ARM' if arch['name'] == 'arm64' else arch['title']} on QPU: `{os.path.basename(r['binary'])}` :: `{r['entry']}`", "",
          f"**{r['verdict']}**", ""]
+    enc = "bytes" if arch["name"] == "x86_64" else "word"
     res = r.get("result")
     if res:
         L += [f"Return value {arch['ret']}: CPU = **{res['return_value']['cpu']}**, QPU = **{res['return_value']['qpu']}**", ""]
     L += ["## Input", ""] + ([f"- source: `{r['source']}`, compiled with `{r['compiled_with']}`"] if r.get("compiled_with") else []) + [
-          f"- binary: `{r['binary']}`, function `{r['entry']}` (instruction {r['entry_index']})",
+          f"- binary: `{r['binary']}`, function `{r['entry']}` ({'byte offset' if arch['name'] == 'x86_64' else 'instruction'} {r['entry_index']})",
           f"- arguments: {' '.join(r['args']) or '(none)'}; data memory init: {r['memory_init'] or '(none)'}",
           f"- architecture: {arch['title']}; backend: `{r['config']['backend']}`, register width W = {W}", ""]
     out = (res or {}).get("output") or {}
@@ -423,7 +426,7 @@ def markdown(r, W):
         L += ["## Unsupported instructions", "",
               "These instructions are in the loaded code but not implemented by the quantum machine. "
               "A run that reaches one stops with a trap.", "",
-              "| # | address | word | instruction | reason | executed by CPU |", "|---|---|---|---|---|---|"]
+              f"| # | address | {enc} | instruction | reason | executed by CPU |", "|---|---|---|---|---|---|"]
         for x in r["unsupported"]:
             L.append(f"| {x['index']} | {x['address']} | `{x['word']}` | `{x['asm']}` | {x['reason']} | {x['executed']} |")
         L.append("")
@@ -433,7 +436,8 @@ def markdown(r, W):
         L += ["## Result: CPU vs QPU", "", "| register | CPU (low W bits, signed) | QPU | match |", "|---|---|---|---|"]
         for x in res["registers"]:
             L.append(f"| {x['reg']} | {x['cpu_signed']} | {x['qpu_signed']} | {'yes' if x['match'] else '**NO**'} |")
-        L += [""] + ([f"- NZCV flags: CPU {res['flags']['cpu']}, QPU {res['flags']['qpu']}"] if res['flags']['cpu'] else []) + [
+        fl = (arch.get("flags") or "NZCV") + " flags"
+        L += [""] + ([f"- {fl}: CPU {res['flags']['cpu']}, QPU {res['flags']['qpu']}"] if res['flags']['cpu'] else []) + [
               f"- data memory equal: {res['memory_match']}",
               f"- control-flow trace (PC per step) equal: {res['trace_match']}",
               f"- lockstep (registers, flags and memory compared after every cycle): {r.get('lockstep')}",
@@ -442,7 +446,7 @@ def markdown(r, W):
     if mc:
         L += ["## Quantum machine", "",
               f"- one fixed interpreter circuit: {mc['qubits']} qubits, gates {mc['gates']} ({mc['toffoli']} Toffoli)",
-              f"- {mc['steps']} machine steps, {mc['program_slots']} program-memory slots x 32 qubits, "
+              f"- {mc['steps']} machine steps, {mc['program_slots']} program-memory slots x {mc.get('slot_bits', 32)} qubits, "
               f"{mc['data_memory_cells']} data cells, registers {', '.join(mc['registers'])}",
               f"- data memory layout (byte offsets): {r.get('layout')}",
               f"- decoder implements {len(mc['decoder_classes'])} instruction classes: {', '.join(mc['decoder_classes'])}", ""]
@@ -457,7 +461,7 @@ def markdown(r, W):
         L += [f"- {x}" for x in cpu["issues"][:30]]
     else:
         L += [f"Every value of the run fits the {W}-bit model, so the QPU computes the exact low {W} bits of the {arch['title']} result."]
-    L += ["", "## Code", "", "| # | address | word | instruction | class | supported | executed |", "|---|---|---|---|---|---|---|"]
+    L += ["", "## Code", "", f"| # | address | {enc} | instruction | class | supported | executed |", "|---|---|---|---|---|---|---|"]
     for x in r["code"]:
         fn = f"**{x['function']}:** " if x["function"] else ""
         L.append(f"| {x['index']} | {x['address']} | `{x['word']}` | {fn}`{x['asm']}` | {x['cls'] or '-'} | "

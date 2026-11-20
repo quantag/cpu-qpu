@@ -19,16 +19,18 @@ ARM = isas.get("arm64")
 
 
 def assemble(lines, isa=ARM):
-    """lines: assembly source lines -> list of 32-bit words, or None if clang rejects them."""
+    """lines: assembly source lines -> list of program-memory slots (32-bit words; bytes for x86-64),
+    or None if clang rejects them."""
     with tempfile.TemporaryDirectory() as d:
         s, o, b = (os.path.join(d, n) for n in ("p.s", "p.o", "p.bin"))
         open(s, "w").write(".text\n" + "\n".join(lines) + "\n")
-        r = subprocess.run(["clang"] + [f for f in isa.clang if f != "-fno-pic"] + ["-c", s, "-o", o], capture_output=True)
+        r = subprocess.run(["clang", isa.clang[0]] + [f for f in isa.clang[1:] if f.startswith("-m")] + ["-c", s, "-o", o],
+                           capture_output=True)
         if r.returncode:
             return None
         subprocess.run(["llvm-objcopy", "-O", "binary", "--only-section=.text", o, b], check=True)
         code = open(b, "rb").read()
-        return [int.from_bytes(code[i:i + 4], "little") for i in range(0, len(code), 4)]
+        return [int.from_bytes(code[i:i + isa.unit], "little") for i in range(0, len(code), isa.unit)]
 
 
 def run_case(m, code_words, args=(), mem=(), data_ptr_reg=None, isa=ARM, info=None):
@@ -43,15 +45,16 @@ def run_case(m, code_words, args=(), mem=(), data_ptr_reg=None, isa=ARM, info=No
     cpu_args = list(args)
     if data_ptr_reg is not None:
         cpu_args[data_ptr_reg] = DATA_BASE
-    ref = isa.run_reference(words, W, 0, cpu_args, c.MEM, mem, max_steps=c.STEPS, snapshots=True,
-                        sp_off=4 * c.MEM - 64 if c.MEM else None)
+    sp_off = 4 * c.MEM - 64 if c.MEM else None
+    ref = isa.run_reference(words, W, 0, cpu_args, c.MEM, mem, max_steps=c.STEPS, snapshots=True, sp_off=sp_off)
     if not ref["halted"]:
         return "discarded", ref["error"] or "did not halt"
     init = {isa.arg_regs[i]: (0 if i == data_ptr_reg else a) for i, a in enumerate(args) if isa.arg_regs[i] in m.X}
-    init[isa.link_reg] = 4 * (c.SLOTS - 1)
-    if isa.sp_reg in m.X:
-        init[isa.sp_reg] = 4 * c.MEM - 64
-    ones = m.load_bits(words, init, [v & 0xFFFFFFFF for v in mem], pc=0)
+    cells = [v & 0xFFFFFFFF for v in mem]
+    if isa.always_mem:
+        cells += [0] * (c.MEM - len(cells))
+    init, cells = isa.entry(init, cells, c.SLOTS, sp_off, isa.sp_reg in m.X)
+    ones = m.load_bits(words, init, cells, pc=0)
     diverged = []
 
     def on_cycle(k, st):

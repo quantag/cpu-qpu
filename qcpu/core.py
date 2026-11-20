@@ -385,7 +385,7 @@ class Machine:
         ones += [self.pc_hist[0][i] for i in range(c.pbits) if (pc >> i) & 1]
         assert len(words) <= c.SLOTS
         for s, w in enumerate(words):
-            ones += [self.mem[s][b] for b in range(32) if (w >> b) & 1]
+            ones += [self.mem[s][b] for b in range(len(self.mem[s])) if (w >> b) & 1]
         ones.append(self.run[0])
         mask = (1 << c.W) - 1
         for k, v in (regs_init or {}).items():
