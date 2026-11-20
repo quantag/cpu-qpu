@@ -1,6 +1,6 @@
-# cpu-qpu: run ARM64 and RISC-V binaries on a quantum computer
+# cpu-qpu: run ARM64, RISC-V and x86-64 binaries on a quantum computer
 
-Write an ordinary C program, compile it to an AArch64 or RISC-V binary with clang or gcc, and run that
+Write an ordinary C program, compile it to an AArch64, RISC-V or x86-64 binary with clang or gcc, and run that
 binary on a **quantum stored-program (von Neumann) processor** made entirely of quantum gates.
 The program's output appears as if you had run it locally:
 
@@ -20,9 +20,9 @@ classically dispatched. The same bytes also run on an ARM CPU emulator as a refe
 every run is checked.
 
 **Architectures.** The same tool runs AArch64 (`arm64`), RISC-V RV64IM (`riscv64`) and RV32IM
-(`riscv32`) binaries; it reads the architecture from the file header. `cpu_qpu.py` is the command;
-`arm_qpu.py` is the same tool under its original name. Most of this README uses AArch64 for its
-examples; see "RISC-V" below for what differs. x86-64 is planned (`docs/x86_plan.md`).
+(`riscv32`), and x86-64 (`x86_64`) binaries; it reads the architecture from the file header.
+`cpu_qpu.py` is the command; `arm_qpu.py` is the same tool under its original name. Most of this
+README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what differs.
 
 ## Quick start
 
@@ -193,6 +193,74 @@ The decoder accepts exactly the instruction patterns listed in `qcpu/rv.py`; eve
 in the circuit, also when the program is in superposition (`tests/test_riscv.py` runs a
 superposition of a valid and an invalid instruction word).
 
+## x86-64
+
+```bash
+python3 cpu_qpu.py examples/hello.c --arch x86_64         # compile for x86-64 and run
+python3 cpu_qpu.py examples/factor.c --arch x86_64 --cc gcc
+python3 cpu_qpu.py hello_x86.o -v                         # an object file: architecture from its header
+```
+
+To compile yourself:
+
+```bash
+clang --target=x86_64-linux-gnu -fno-pic -mno-sse -fno-asynchronous-unwind-tables -ffunction-sections -falign-loops=1 -O1 -fno-stack-protector -Iinclude -c examples/hello.c -o hello_x86.o
+# or, on an x86-64 Linux machine, the native gcc:
+gcc -fno-pic -mno-sse -fno-asynchronous-unwind-tables -ffunction-sections -falign-loops=1 -falign-functions=1 -falign-jumps=1 -falign-labels=1 -fcf-protection=none -O1 -fno-stack-protector -Iinclude -c examples/hello.c -o hello_x86.o
+```
+
+`-mno-sse` keeps the code to integer instructions and `-fno-pic` gives absolute addresses.
+`-ffunction-sections` and the `-falign-...=1` flags keep alignment padding out of the code: assemblers
+pad with prefixed multi-byte NOPs, which the machine does not implement. `-fcf-protection=none` stops
+gcc from starting every function with ENDBR64.
+
+x86-64 instructions are 1 to 15 bytes long, so this machine differs from the other two in its first
+stages. Program memory holds bytes and the program counter is a byte offset. Each cycle fetches an
+11-byte window at the PC, removes the REX prefix and the 0F escape byte, recognises the instruction
+from its opcode and ModRM byte, works out where the displacement and the immediate are and how long
+the instruction is, and adds that length to the PC. All of it is gates: with program memory in
+superposition, instructions of different lengths are parsed in the same run. Operands can be in
+memory, results overwrite the first operand, a byte result keeps the upper bits of its register, and
+calls push the return address on the stack. `docs/x86.md` describes the circuit.
+
+| program (clang -O1, W = 12) | | AArch64 | RV64IM | RV32IM | x86-64 |
+|---|---|---|---|---|---|
+| `hello.c` | cycles | 228 | 236 | 236 | 258 |
+| | qubits | 520 364 | 269 902 | 145 724 | 301 029 |
+| | gates | 91.9 million | 39.2 million | 31.0 million | 15.8 million |
+| `factor.c` | cycles | 606 | 610 | 607 | 701 |
+| | qubits | 1 367 842 | 681 527 | 359 678 | 803 886 |
+| | gates | 257.7 million | 113.8 million | 92.1 million | 57.7 million |
+
+The x86-64 machine has the most complex decoder and still the fewest gates. That comes from how its
+front end selects memory, not from the instruction set: it uses a binary decoder tree for program
+blocks and data cells, where the two older front ends use one comparator per slot. The tree would
+shrink those machines too; they are left as they are, so the AArch64 numbers stay those of the paper.
+
+**Implemented:** MOV (register, memory, immediate; 8, 32 and 64 bits), MOVSXD, MOVZX/MOVSX from a byte
+register, LEA, ADD/OR/AND/SUB/XOR/CMP, TEST, NEG, NOT, INC, DEC, IMUL (two- and three-operand),
+CDQ/CQO, CDQE, DIV, IDIV, SHL/SHR/SAR (immediate, 1, CL), SETcc, CMOVcc, Jcc, JMP and CALL (relative,
+register, memory), RET, PUSH, POP, LEAVE, NOP, HLT (ends the run). `printf`, `puts` and `putchar` work
+as on the other architectures.
+
+**Not implemented** (reported before the run, and the circuit itself traps on them): 16-bit operand
+size and every other prefix, byte and word memory operands, AH/CH/DH/BH, ADC/SBB, rotates, one-operand
+MUL/IMUL, XCHG, string instructions, x87/SSE/AVX, system instructions.
+
+**Known limits of the W-bit model on x86-64** (detected and reported, never returned as exact):
+
+- Flags the machine does not model: CF and OF after a shift, all four after IMUL, DIV and IDIV. It
+  leaves them unchanged; a run that goes on to read one is reported. Compilers do not rely on them.
+- A comparison whose difference does not fit W bits has other SF and OF values than on the CPU.
+- Division by a constant becomes a multiplication by a 32-bit constant (`digit_sum`), as elsewhere.
+- gcc `-O2` without SSE swaps two adjacent `int`s by packing both into one 64-bit word (`bubble_sort`).
+
+The tests check this machine in two steps. First, single cycles on random byte strings: the circuit
+must do exactly what the instruction model in `qcpu/x86.py` says, and trap on everything that is not a
+valid instruction. This covers encodings no assembler emits. Second, boundary cases and random
+programs against the CPU after every cycle, where a difference that the model check does not explain
+fails the test.
+
 ### How architectures are organised
 
 | file | role |
@@ -200,11 +268,12 @@ superposition of a valid and an invalid instruction word).
 | `qcpu/core.py` | shared core: qubit allocation, gate helpers, adder, shifter, multiplier, dividers, the compute / copy / uncompute / commit cycle, simulation hooks |
 | `qcpu/machine.py`, `qcpu/a64.py`, `qcpu/reference.py` | AArch64: circuit front end, class table and checker, CPU reference |
 | `qcpu/rv_machine.py`, `qcpu/rv.py`, `qcpu/rv_reference.py` | RISC-V: the same three parts |
-| `qcpu/isa.py` | registry: one entry per architecture (machine, checker, reference, calling convention, compiler flags) |
+| `qcpu/x86_machine.py`, `qcpu/x86.py`, `qcpu/x86_reference.py` | x86-64: the same three parts |
+| `qcpu/isa.py` | registry: one entry per architecture (machine, checker, reference, calling convention, entry state, compiler flags) |
 | `qcpu/loader.py` | ELF / Mach-O loading, relocations and the output stub for each architecture |
 
-A front end supplies fetch, decode and execute for one cycle; everything else is shared. The split
-left the AArch64 circuits unchanged gate for gate (`tests/test_fingerprint.py`).
+A front end supplies fetch, decode and execute for one cycle; everything else is shared. Adding a
+front end leaves the others unchanged gate for gate (`tests/test_fingerprint.py`).
 
 ## Grover search with a C function as the oracle
 
@@ -521,6 +590,7 @@ python3 arm_qpu.py hello.o
 | key | meaning |
 |---|---|
 | `backend` | `simulator`: exact simulation of the circuit on its basis-state input (fast, any size). `aer`: Qiskit Aer, sampled with `shots`. `ibm`: IBM Quantum hardware through Qiskit Runtime (`token` may be `env:VAR`). |
+| `arch` | architecture for `.c` input and raw binaries when `--arch` is not given: `arm64` (default), `riscv64`, `riscv32`, `x86_64`. Object files carry their own. |
 | `register_width` | W, bits per register (8 to 16). `auto` = smallest W that holds the code and data addresses. |
 | `registers` | `auto` = only registers the code uses; `all` = X0..X30; or a list. |
 | `memory_words` | data memory in 4-byte cells; `auto` = enough for the output log, data sections, user cells and stack. |
@@ -576,6 +646,8 @@ python3 -m tests.test_c_programs clang   # C cases x -O0/-O1/-O2 + whole program
 python3 -m tests.test_c_programs gcc     # the same with aarch64-linux-gnu-gcc
 python3 -m tests.test_c_programs clang riscv64   # the same C cases compiled for RV64IM (riscv32: RV32IM)
 python3 -m tests.test_riscv 150 7 8,12,16        # RISC-V: decoder, traps, boundary cases, random programs
+python3 -m tests.test_c_programs clang x86_64    # the same C cases compiled for x86-64 (also: gcc x86_64)
+python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs instruction model, traps, boundary cases, random programs
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
 python3 -m tests.test_edges 8,12,16      # boundary cases: extensions, flags, shifts, W/X forms, memory, mul/div
@@ -634,8 +706,8 @@ simulator), `arm_qpu.py` (CLI and reports), `include/stdio.h`.
   The smallest real program (`subs; cneg; ret`, `isa: auto`) needs 666 qubits and about 9 000
   Toffoli gates; `hello.c` needs about 500 000 qubits and 56 million Toffoli gates. Running on a QPU means a much smaller
   machine profile, or fault-tolerant hardware.
-* x86-64 is not implemented yet. Its variable-length instructions, memory operands and stack-based
-  calls need a different fetch and decode stage; the design is in `docs/x86_plan.md`.
+* x86-64 covers the integer instructions that clang and gcc emit for C code without SSE. Byte and
+  16-bit memory operands, prefixes, and the instructions listed under "x86-64" are not implemented.
 * There is no speed-up: a classical program on a QPU is a very expensive reversible computer.
   The value is a verified bridge from ordinary binaries to quantum circuits: reversible oracles,
   resource estimation, and a quantum control-flow test bed. See `docs/prior_work.md` and the

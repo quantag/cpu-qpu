@@ -10,6 +10,8 @@
      orders, every ModRM / SIB form) and the whole space of invalid ones.
   3. Trap: a named list of unsupported instructions traps in the circuit and changes nothing.
   4. Superposition of a valid and an invalid instruction: the valid branch computes, the other traps.
+     Superposition of two instructions of different lengths (2 and 5 bytes): each branch parses its
+     own instruction, continues at its own address, and returns.
   5. Boundary cases: every implemented instruction on operands at the edges of the W-bit model,
      against the CPU. Never an unflagged mismatch; equal to the CPU wherever the operands and the
      results are representable; when the circuit equals the CPU the model check must not claim otherwise.
@@ -201,6 +203,26 @@ def superposed_valid_and_invalid():
         got[int(row[m.mem[0][4]])] = (v(m.X[x86.RAX]), any(row[t] for t in m.trap), round(float(abs(a)) ** 2, 6))
     assert got == {0: (42, False, 0.5), 1: (20, True, 0.5)}, got
     return got
+
+
+def superposed_lengths():
+    """Bit 2 of the opcode in byte 0 in superposition: 01 F0 is 'add eax, esi' (2 bytes), and
+    05 F0 C3 00 00 is 'add eax, imm32' (5 bytes; at W = 8 the immediate is 0xF0). After the first
+    cycle the two branches are at different addresses; both then execute a RET and halt."""
+    m = QuantumX86(X86Config(W=8, regs=(x86.RAX, x86.RSI), SLOTS=16, STEPS=3, MEM=4))
+    prog = ISA.layout([0x01, 0xF0, 0xC3, 0x00, 0x00, 0xC3], 16)
+    assert x86.decode(prog)["length"] == 2 and x86.decode([0x05] + prog[1:])["length"] == 5
+    init, cells = ISA.entry({x86.RAX: 20, x86.RSI: 22}, [0] * 4, 16, 16, True)
+    st = SparseState(m.n, m.load_bits(prog, init, cells))
+    st.h(m.mem[0][2])
+    st.apply(m.g)
+    got = {}
+    for row, a in zip(st.bits, st.amp):
+        v = lambda q: int(sum(int(row[x]) << i for i, x in enumerate(q)))
+        got[int(row[m.mem[0][2]])] = (v(m.X[x86.RAX]), [v(pc) for pc in m.pc_hist], any(row[t] for t in m.trap),
+                                      round(float(abs(a)) ** 2, 6))
+    assert got == {0: (42, [0, 2, 15, 15], False, 0.5), 1: (4, [0, 5, 15, 15], False, 0.5)}, got
+    return {k: dict(rax=v[0], pc_trace=v[1], probability=v[3]) for k, v in got.items()}
 
 
 # ------------------------------------------------------------------ 5. boundary cases
@@ -430,6 +452,7 @@ if __name__ == "__main__":
         print(f"2) circuit == model, one cycle, W={W}: {20 * N} random byte strings {circuit_vs_model(W, 20 * N, seed + W)}")
     print(f"3) trap: {traps()} unsupported instructions trap in the circuit and change no register, flag, memory cell or PC")
     print(f"4) superposition of a valid and an invalid instruction: {superposed_valid_and_invalid()}")
+    print(f"   superposition of a 2-byte and a 5-byte instruction: {superposed_lengths()}")
     total = 0
     for W in widths:
         s = edges(W)
