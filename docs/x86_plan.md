@@ -1,8 +1,31 @@
 # x86-64 on the quantum machine: design and plan
 
-Status: not implemented. AArch64 and RISC-V run today; this note says what x86-64 needs and in which
-order it will be built. The ISA layer (`qcpu/isa.py`, `qcpu/core.py`) is in place, so x86-64 is one
-more front end.
+Status: in progress on branch `x86`.
+
+- Done: `qcpu/x86.py` (instruction table, byte decoder, W-bit model of every instruction),
+  `qcpu/x86_reference.py` (Unicorn reference with the per-instruction model check), ELF x86-64 loading
+  and relocations, the output stub (`docs/output_stub_x86.s`). The decoder gives the same instruction
+  lengths as capstone on all 2 396 instructions of the compiled examples (clang -O0/-O1/-O2, gcc -O1),
+  and the model agrees with the CPU on every instruction of 13 compiled functions at W = 12 and 16.
+- Next: the circuit `qcpu/x86_machine.py`, which implements the same decode and the same model with
+  gates; then the command-line tool, tests and README.
+
+Decisions taken (see the docstrings of `x86.py` and `x86_reference.py` for details):
+
+- Program memory is bytes; the PC is a byte offset; the circuit fetches an 11-byte window, which
+  holds the low 16 bits of every field of any supported instruction.
+- 8-, 32- and 64-bit operand sizes. Byte operands must be registers. No 16-bit size, no other prefix.
+- Registers are W bits. A byte write keeps the upper bits; 32-bit and 64-bit writes replace all W bits.
+- Flags ZF, SF, CF, OF. CF and OF after shifts and all four after IMUL and DIV/IDIV are not modelled:
+  the machine leaves them unchanged, and the reference reports a run that later reads one.
+- DIV/IDIV use RAX only; RDX must be its zero or sign extension (the reference checks the result).
+  Division by zero traps.
+- Calls use the stack: the run starts with RSP pointing at a return address that leads to an HLT in
+  the last byte of program memory, so every x86-64 run needs data memory.
+- The model check compares every register, flag, memory cell and the next PC with the CPU after each
+  instruction, in their low W bits, and checks that written values fit at the operation's width.
+
+The rest of this note is the original plan.
 
 ## Why it is a separate step
 

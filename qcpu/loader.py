@@ -1,4 +1,4 @@
-"""Load and link machine code for the quantum machine (AArch64 and RISC-V).
+"""Load and link machine code for the quantum machine (AArch64, RISC-V and x86-64).
 
 Reads an ELF or Mach-O object/executable (or a raw .bin), merges all executable sections into
 one code image, lays out the data sections (.rodata, .data, .bss, string literals) in data
@@ -7,6 +7,7 @@ memory, and applies the relocations a linker would.
            (ADD_ABS_LO12_NC, LDSTxx_ABS_LO12_NC, PAGEOFF12), ABS64.
   RISC-V:  CALL/CALL_PLT (auipc + jalr), JAL, BRANCH, HI20 / LO12_I / LO12_S,
            PCREL_HI20 / PCREL_LO12_I / PCREL_LO12_S, 64 / 32 (pointers in data).
+  x86-64:  PLT32 / PC32 (calls, RIP-relative data), 32 / 32S / 64 (absolute addresses).
 
 printf / puts / putchar are bound to an output stub: a few instructions of the same architecture
 that run on the machine like any other code and append one record per call to the output log in
@@ -35,6 +36,13 @@ OUTPUT_STUB_RV = [
     0x00ae2223, 0x00be2423, 0x00ce2623, 0x00de2823, 0x00ee2a23, 0x00fe2c23,
     0x010e2e23, 0x00030513, 0x00008067,
 ]
+# x86-64 machine code of the output stub (assembled from docs/output_stub_x86.s). Entry points and the
+# position of the capacity immediate are byte offsets.
+OUTPUT_STUB_X86 = bytes.fromhex(
+    "41ba010000004531dbeb1541ba020000004531dbeb0a41ba03000000440fb6dfb8000000108138ff070000732cff008b00c1e005"
+    "050000001044891089780489700889500c8948104489401444894818448b5424084489501c4489d8c3")
+STUB_ENTRY_X86 = {"printf": 0, "puts": 11, "putchar": 22}
+STUB_CAPACITY_X86 = 39
 OUTPUT_FUNCS = ("printf", "puts", "putchar")
 
 
@@ -86,8 +94,10 @@ class ObjectImage:
         elif b.header.machine_type == lief.ELF.ARCH.RISCV:
             self.arch = "riscv64" if b.header.identity_class == lief.ELF.Header.CLASS.ELF64 else "riscv32"
             prefix = "RISCV_"
+        elif b.header.machine_type == lief.ELF.ARCH.X86_64:
+            self.arch, prefix = "x86_64", "X86_64_"
         else:
-            raise LinkError("unsupported ELF machine type (supported: AArch64, RISC-V)")
+            raise LinkError("unsupported ELF machine type (supported: AArch64, RISC-V, x86-64)")
         rel = b.header.file_type == lief.ELF.Header.FILE_TYPE.REL
         secs = list(b.sections)
         X = lief.ELF.Section.FLAGS.EXECINSTR
@@ -97,7 +107,7 @@ class ObjectImage:
             if not s.has(A) or s.size == 0:
                 continue
             if s.has(X):
-                while len(self.code) % 4: self.code += b"\0"
+                while len(self.code) % 4 and self.arch != "x86_64": self.code += b"\0"
                 sec_place[i] = ("code", len(self.code), s.virtual_address)
                 self.code += bytes(s.content)
             elif s.name.startswith((".rodata", ".data", ".bss", ".sdata", ".sbss", ".srodata")):
@@ -213,20 +223,26 @@ class ObjectImage:
         """Place data sections at data_offset (bytes from DATA_BASE) and resolve relocations.
         Returns dict(words, entry, entry_index, functions, data_image, data_end, externs, unresolved)."""
         code = bytearray(self.code)
-        while len(code) % 4: code += b"\0"
+        x86 = self.arch == "x86_64"
+        unit = 1 if x86 else 4                     # bytes per program-memory slot
+        while len(code) % unit: code += b"\0"
         externs = sorted({t[1] for _, _, t, _ in self.relocs if t[0] == "sym" and t[1] not in self.syms})
         uses_output = any(e in OUTPUT_FUNCS for e in externs)
         stub_base = None
         riscv = self.arch.startswith("riscv")
         if uses_output:
             stub_base = len(code)
-            if riscv:
+            if x86:
+                stub = None                             # cmp dword [rax], capacity: imm32
+                code += OUTPUT_STUB_X86[:STUB_CAPACITY_X86] + log_capacity.to_bytes(4, "little") + OUTPUT_STUB_X86[STUB_CAPACITY_X86 + 4:]
+            elif riscv:
                 stub = list(OUTPUT_STUB_RV)             # li t4, capacity: I-type immediate
                 stub[STUB_CAPACITY_WORD] = (stub[STUB_CAPACITY_WORD] & 0x000FFFFF) | ((min(log_capacity, 2047) & 0xFFF) << 20)
             else:
                 stub = list(OUTPUT_STUB)                # cmp w10, #capacity: imm12
                 stub[STUB_CAPACITY_WORD] = (stub[STUB_CAPACITY_WORD] & ~(0xFFF << 10)) | ((log_capacity & 0xFFF) << 10)
-            code += b"".join(w.to_bytes(4, "little") for w in stub)
+            if stub is not None:
+                code += b"".join(w.to_bytes(4, "little") for w in stub)
         # data layout
         place = {}
         image = bytearray()
@@ -251,13 +267,21 @@ class ObjectImage:
                 return DATA_BASE + place[sy[1]] + sy[2] + addend
             if stub_base is not None and name in OUTPUT_FUNCS:
                 k = "printf@apple" if (self.apple and name == "printf") else name
-                return CODE_BASE + stub_base + 4 * STUB_ENTRY[k] + addend
+                return CODE_BASE + stub_base + (STUB_ENTRY_X86[k] if x86 else 4 * STUB_ENTRY[k]) + addend
             return None
 
         unresolved = []
         if riscv:
             self._relocate_riscv(code, addr, unresolved)
-        for off, t, tgt, addend in ([] if riscv else self.relocs):
+        for off, t, tgt, addend in (self.relocs if x86 else []):
+            S = addr(tgt, addend)                      # S already includes the addend
+            if S is None or t not in ("PLT32", "PC32", "32", "32S", "64"):
+                unresolved.append(f"code+{off}: {t} {tgt[1]}")
+            elif t == "64":
+                code[off:off + 8] = (S & (1 << 64) - 1).to_bytes(8, "little")
+            else:
+                _put(code, off, S - (CODE_BASE + off) if t in ("PLT32", "PC32") else S)
+        for off, t, tgt, addend in ([] if riscv or x86 else self.relocs):
             S = addr(tgt, addend)
             if S is None:
                 unresolved.append(f"code+{off}: {t} {tgt[1]}")
@@ -294,11 +318,11 @@ class ObjectImage:
             entry = "main" if "main" in funcs else min(funcs, key=funcs.get)
         if entry not in funcs:
             raise LinkError(f"function '{entry}' not found; available: {', '.join(sorted(funcs, key=funcs.get))}")
-        words = [_get(code, i) for i in range(0, len(code), 4)]
-        functions = {n: o // 4 for n, o in sorted(funcs.items(), key=lambda t: t[1])}
+        words = list(code) if x86 else [_get(code, i) for i in range(0, len(code), 4)]   # program-memory slots
+        functions = {n: o // unit for n, o in sorted(funcs.items(), key=lambda t: t[1])}
         if stub_base is not None:
-            functions["<output stub>"] = stub_base // 4
-        return dict(words=words, entry=entry, entry_index=funcs[entry] // 4, functions=functions,
+            functions["<output stub>"] = stub_base // unit
+        return dict(words=words, entry=entry, entry_index=funcs[entry] // unit, functions=functions,
                     data_image=bytes(image), data_offset=data_offset, data_end=data_offset + len(image),
                     externs=externs, uses_output=uses_output, unresolved=unresolved,
                     sections={k: place[k] for k in place}, apple=self.apple, arch=self.arch)
