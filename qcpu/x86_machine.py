@@ -4,7 +4,9 @@ Quantum stored-program (von Neumann) interpreter for a subset of x86-64.
 The third front end on the shared core (core.py). Program memory holds bytes, the program counter is
 a byte offset, and every cycle parses one variable-length instruction with gates:
 
-  fetch      an 11-byte window at the PC
+  fetch      an 11-byte window at the PC: the 16-byte block that contains the PC and the start of the
+             next block are selected with a one-hot decode of the upper PC bits, then a byte shifter
+             controlled by the low four PC bits aligns the window
   normalise  drop the REX prefix and the 0F escape byte (controlled byte shifts), which puts the
              opcode and the bytes after it at fixed positions
   decode     exact patterns over the opcode and the next byte (the table KINDS in x86.py), then the
@@ -70,6 +72,19 @@ class QuantumX86(Machine):
         for s_, d in zip(src, dst):
             self.mcx([(ctrl, 1), (s_, 1)], d)
 
+    def onehot(self, bits, enable):
+        """Binary decoder: 2^len(bits) qubits, entry k is 1 iff enable and the value of bits (LSB first) is k.
+        A tree: each level splits every entry with one Toffoli and two CNOTs."""
+        sel = [enable]
+        for b in reversed(bits):
+            nxt = []
+            for s_ in sel:
+                hi = self.a1(); self.mcx([(s_, 1), (b, 1)], hi)
+                lo = self.a1(); self.xor_into(lo, [s_, hi])
+                nxt += [lo, hi]
+            sel = nxt
+        return sel
+
     def OR(self, *qs):
         t = self.a1(); self.x(t); self.mcx([(q, 0) for q in qs], t); return t
 
@@ -107,13 +122,20 @@ class QuantumX86(Machine):
         XOR = self.fresh_xor
         NOT = self.fresh_not
 
-        # FETCH: an 11-byte window at the PC
-        win = [self.alloc(8) for _ in range(WINDOW)]
-        for slot in range(c.SLOTS):
-            def copy(sel, slot=slot):
-                for k in range(WINDOW):
-                    self.gated_copy(sel, self.mem[(slot + k) % c.SLOTS], win[k])
-            self.local(lambda: self.fresh_match(self.field_eq(self.pc, 0, p, slot)), copy)
+        # FETCH: an 11-byte window at the PC. Blocks of 16 bytes: copy the block that holds the PC and the
+        # first 10 bytes of the block after it (26 bytes), then shift left by the low four PC bits.
+        blk = self.onehot(self.pc[4:], ONE)
+        cur = [self.alloc(8) for _ in range(26)]
+        for j in range(c.SLOTS // 16):
+            for k in range(26):
+                self.gated_copy(blk[j], self.mem[(16 * j + k) % c.SLOTS], cur[k])
+        for bit, keep in ((3, 18), (2, 14), (1, 12), (0, WINDOW)):
+            sh, stay = self.pc[bit], NOT(self.pc[bit])
+            nxt = [self.alloc(8) for _ in range(keep)]
+            for i in range(keep):
+                self.gated_copy(stay, cur[i], nxt[i]); self.gated_copy(sh, cur[i + (1 << bit)], nxt[i])
+            cur = nxt
+        win = cur
 
         # NORMALISE: REX prefix, then the 0F escape byte
         hasrex = AND((win[0][4], 0), (win[0][5], 0), (win[0][6], 1), (win[0][7], 0))
@@ -239,10 +261,9 @@ class QuantumX86(Machine):
         for j in range(m):
             self.ccx(ldrm, EA[2 + j], RAi[j]); self.mcx([(fpop, 1), (X[RSP][2 + j], 1)], RAi[j])
             self.mcx([(fleave, 1), (X[RBP][2 + j], 1)], RAi[j])
-        sel_eq = lambda ix, cell: [(ix[j], (cell >> j) & 1) for j in range(m)]
         MEMV = self.alloc(W)
-        for cell in range(c.MEM):
-            self.local(lambda: self.fresh_match([(ld, 1)] + sel_eq(RAi, cell)), lambda sl: self.gated_copy(sl, self.ram[cell], MEMV))
+        for cell, sl in enumerate(self.onehot(RAi, ld)):
+            self.gated_copy(sl, self.ram[cell], MEMV)
         RMV = self.alloc(W)                                      # value of the r/m operand (or the value read from the stack)
         self.bus(RMV, [(modrm, 1), (mod11, 1)], PORTV)
         self.xor_into_each(RMV, MEMV)
@@ -387,11 +408,10 @@ class QuantumX86(Machine):
         WAi = self.alloc(m)
         for j in range(m):
             self.ccx(d_mem, EA[2 + j], WAi[j]); self.ccx(fpush, SPV[2 + j], WAi[j])
-        WAi1 = self.add(WAi, [ONE] + [Z] * (m - 1), Z, m)[0]
         st = XOR(d_mem, fpush)
-        wide = XOR(AND((d_mem, 1), (rw, 1)), fpush)                                           # 8-byte store: second cell = sign
-        wm = [[self.fresh_match([(st, 1)] + sel_eq(WAi, cell)) for cell in range(c.MEM)],
-              [self.fresh_match([(wide, 1)] + sel_eq(WAi1, cell)) for cell in range(c.MEM)]]
+        wide = XOR(AND((d_mem, 1), (rw, 1)), fpush)                                           # 8-byte store: the next cell gets the sign
+        wsel = self.onehot(WAi, st)
+        wm = [wsel, [self.fresh_and(wsel[cell - 1], wide) for cell in range(c.MEM)]]
         dm = [WD, [WD[W - 1]] * W]
 
         # FLAGS: [ZF, SF, CF, OF]; a flag that the instruction does not write keeps its value

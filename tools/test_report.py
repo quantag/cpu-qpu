@@ -21,13 +21,14 @@ def ver(mod):
 
 
 commit = sh("git rev-parse HEAD")[1].strip()
-dirty = bool(sh("git status --porcelain -- qcpu arm_qpu.py tests tools include")[1].strip())
+dirty = bool(sh("git status --porcelain -- qcpu arm_qpu.py cpu_qpu.py tests tools include")[1].strip())
 L = ["# Test results", "", f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')} by `tools/test_report.py`.", "",
      f"- code: commit `{commit}`" + (" (with uncommitted changes)" if dirty else ""),
      f"- Python {platform.python_version()} on {platform.platform()}",
      f"- qiskit {ver('qiskit')}, qiskit-aer {ver('qiskit-aer')}, unicorn {ver('unicorn')}, lief {ver('lief')}, capstone {ver('capstone')}",
      f"- {sh('clang --version')[1].splitlines()[0]}",
-     f"- {sh('aarch64-linux-gnu-gcc --version')[1].splitlines()[0]}", "",
+     f"- {sh('aarch64-linux-gnu-gcc --version')[1].splitlines()[0]}",
+     f"- {sh('gcc --version')[1].splitlines()[0]} (x86-64, {platform.machine()} host)", "",
      "Outcome classes: **match** (QPU = CPU after every cycle, model check clean); **match-flagged** (equal, "
      "but the model check reported values outside the W-bit model); **flagged** (different, and the model "
      "check reported an issue at or before the first cycle where they differ); **UNFLAGGED** (different, and "
@@ -46,12 +47,16 @@ sections = [
     ("Interpreter vs specialised circuit", [sys.executable, "tools/compare_specialized.py"]),
     ("RISC-V: decoder, traps, boundary cases, random programs",
      [sys.executable, "-m", "tests.test_riscv", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
+    ("x86-64: decoder, circuit against the instruction model, traps, boundary cases, random programs",
+     [sys.executable, "-m", "tests.test_x86", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
 ]
 if not quick:
     sections += [("C programs, clang", [sys.executable, "-m", "tests.test_c_programs", "clang"]),
                  ("C programs, gcc", [sys.executable, "-m", "tests.test_c_programs", "gcc"]),
                  ("C programs, clang, RISC-V RV64IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv64"]),
-                 ("C programs, clang, RISC-V RV32IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv32"])]
+                 ("C programs, clang, RISC-V RV32IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv32"]),
+                 ("C programs, clang, x86-64", [sys.executable, "-m", "tests.test_c_programs", "clang", "x86_64"]),
+                 ("C programs, gcc, x86-64", [sys.executable, "-m", "tests.test_c_programs", "gcc", "x86_64"])]
 ok_all = True
 for title, cmd in sections:
     t0 = time.time()

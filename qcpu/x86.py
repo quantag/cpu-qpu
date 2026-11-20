@@ -233,7 +233,7 @@ def model(d, W, reg, flags, load, pc, slots):
     mk = (1 << W) - 1
     sx = lambda v: sext(v, W)
     k, op = d["kind"], d["op"]
-    nxt = pc + d["length"]
+    nxt = (pc + d["length"]) & (slots - 1)
     out = dict(regs={}, flags={}, unknown=set(), uses=set(), stores=[], loads=[], npc=nxt & (slots - 1), trap=False)
     ds = 64 if d["w"] else 32
     wide = d["w"] or k in ("push", "pop", "pushrm", "pushi", "call", "callr", "ret", "leave", "jmpr")     # 8-byte memory access
