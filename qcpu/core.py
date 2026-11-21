@@ -38,6 +38,21 @@ class Machine:
     def _step(self, s):
         raise NotImplementedError
 
+    def cycle_template(self):
+        """The gate list of one machine cycle, generated once: (gates, pc_in, run_in, next_pc, run_out,
+        trap, step_ids). Replaying it with step_ids reset to 0 before each cycle, then pc_in <- next_pc
+        and run_in <- run_out, is the whole machine (run_fast; the C engine of qpu_dll.py)."""
+        if not hasattr(self, "_tmpl"):                    # generate the cycle once, reuse it for every input
+            pc_in, run_in = self.pc, self.run[0]
+            n0 = self.n
+            self._step(0)
+            tmpl = self.g
+            self.g = []
+            pool = set(self.pool)
+            step_ids = [q for q in range(n0, self.n) if q not in pool]  # per-cycle qubits (scratch excluded)
+            self._tmpl = (tmpl, pc_in, run_in, self.pc, self.run[1], self.trap[0], step_ids)
+        return self._tmpl
+
     def run_fast(self, ones, on_cycle=None):
         """Exact basis-state simulation without materialising every cycle.
 
@@ -49,16 +64,7 @@ class Machine:
         PC trace, trap and running bits. Qubit/gate totals are those of the full circuit."""
         from .bitsim import Streamer
         c = self.cfg
-        if not hasattr(self, "_tmpl"):                    # generate the cycle once, reuse it for every input
-            pc_in, run_in = self.pc, self.run[0]
-            n0 = self.n
-            self._step(0)
-            tmpl = self.g
-            self.g = []
-            pool = set(self.pool)
-            step_ids = [q for q in range(n0, self.n) if q not in pool]  # per-cycle qubits (scratch excluded)
-            self._tmpl = (tmpl, pc_in, run_in, self.pc, self.run[1], self.trap[0], step_ids)
-        tmpl, pc_in, run_in, npc, run_out, trap, step_ids = self._tmpl
+        tmpl, pc_in, run_in, npc, run_out, trap, step_ids = self.cycle_template()
         per_step = len(step_ids)
         self.template_gates = len(tmpl)
         sim = Streamer(ones)

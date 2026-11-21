@@ -26,6 +26,5 @@ int main(void) {
     for (int i = 0; i < 8; i++) printf(" %d", sq[i]);
     printf("\n");
 
-    printf("report(21)        = %d\n", report(21));
     return 0;
 }

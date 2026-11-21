@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Quantag IT Solutions GmbH */
 /* mathlib: ordinary C. Compiled for the QPU by qpu_dll.py, or for the host for comparison. */
-#include <stdio.h>
 #include "mathlib.h"
 
 int gcd(int a, int b) {
@@ -41,9 +40,4 @@ void sort(int *v, int n) {             /* bubble sort; pointers instead of int i
 
 void squares(int *v, int n) {
     for (int i = 0; i < n; i++) v[i] = i * i;
-}
-
-int report(int x) {
-    printf("  (printed on the QPU: x = %d)\n", x);
-    return 2 * x;
 }

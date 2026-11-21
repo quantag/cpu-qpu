@@ -103,14 +103,12 @@ def parse_val(s):
     return ("int", int(s, 0))
 
 
-def execute(binary, isa, cfg, entry=None, arg_strs=(), mem_init=(), source=None, compiled_with=None,
-            machine_cache=None, round_steps=False, qpu=True):
+def execute(binary, isa, cfg, entry=None, arg_strs=(), mem_init=(), source=None, compiled_with=None):
     """Link a binary, run the entry function on the CPU reference and on the quantum machine, compare.
     Returns a dict: report (as written by -v), prog, ref (CPU), q (QPU state), W, ok (QPU == CPU in
     every register, flag, memory cell and PC), exact (no model-check issue), ret (QPU return value),
     qtext (program output), mem (final data cells), user_off (byte offset of the user cells),
-    stop (None, or the exit code when the run could not be completed).
-    Used by the command line and by qpu_server.py (machine_cache: reuse circuits between calls)."""
+    stop (None, or the exit code when the run could not be completed)."""
     # ---- link: output log at data offset 0, then the program's data sections
     try:
         obj = ObjectImage(binary, isa.name)
@@ -179,8 +177,6 @@ def execute(binary, isa, cfg, entry=None, arg_strs=(), mem_init=(), source=None,
     for i in ref["trace"]:
         executed[i] = executed.get(i, 0) + 1
     steps = ref["steps"] if cfg["max_steps"] == "auto" else int(cfg["max_steps"])
-    if round_steps:                     # fewer distinct machines, so a cached circuit can serve many calls
-        steps = max(16, 1 << (max(steps, 1) - 1).bit_length())
     report = dict(arch=dict(name=isa.name, title=isa.title, ret=isa.ret_label, flags=isa.flag_names), binary=binary, source=source,
                   compiled_with=compiled_with, entry=prog["entry"],
                   entry_index=prog["entry_index"], args=list(arg_strs), memory_init=mem_init, config=cfg,
@@ -203,27 +199,16 @@ def execute(binary, isa, cfg, entry=None, arg_strs=(), mem_init=(), source=None,
         report["verdict"] = f"NOT RUN on QPU: {ref['error']}"
         ctx["stop"] = 1
         return ctx
-    if not qpu:                         # CPU reference only
-        report["backend"] = dict(name="cpu", note="CPU reference only; the quantum machine was not run")
-        ctx.update(q=None, ok=None, exact=not ref["issues"], qtext=report["cpu"].get("output"),
-                   ret=sx(ref["regs"][isa.ret_reg], W), mem=[sx(v, W) for v in ref["mem"]])
-        return ctx
 
     # ---- quantum machine
     t0 = time.time()
     if cfg["memory_select"] not in ("tree", "comparator"):
         sys.exit(f"error: memory_select must be 'tree' or 'comparator' (it is '{cfg['memory_select']}')")
-    key = (isa.name, W, tuple(sorted(used)), slots, steps, MEM, tuple(classes), str(cfg["registers"]), cfg["memory_select"])
-    if machine_cache is not None and key in machine_cache:
-        m = machine_cache[key]
-    else:
-        try:
-            m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"],
-                                       select=cfg["memory_select"]), defer=True)
-        except ValueError as e:
-            sys.exit(f"error: {e}")
-        if machine_cache is not None:
-            machine_cache[key] = m
+    try:
+        m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"],
+                                   select=cfg["memory_select"]), defer=True)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
     init = {isa.arg_regs[i]: v for i, v in enumerate(qpu_args)}
     # the entry function returns to the halt slot: return address in the link register or on the stack
     init, cells0 = isa.entry(init, cells, slots, sp_off, isa.sp_reg in m.X)

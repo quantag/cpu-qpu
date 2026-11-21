@@ -11,6 +11,5 @@ int is_prime(int n);
 int sum(const int *QPU_IN(n) v, int n);
 void sort(int *QPU_INOUT(n) v, int n);
 void squares(int *QPU_OUT(n) v, int n);             /* v[i] = i*i */
-int report(int x);                                  /* prints on the QPU, returns 2x */
 
 #endif
