@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 # Output stub for RISC-V (RV32IM and RV64IM; the instruction words are the same for both).
 # What printf / puts / putchar are bound to when a RISC-V program runs on the quantum machine.
 # Same record format as the AArch64 stub in output_stub.s:

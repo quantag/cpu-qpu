@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH */
 /* Prime factorization by trial division.
  * Build an AArch64 binary, then run it on the quantum machine:
  *   clang --target=aarch64-linux-gnu -O1 -Iinclude -c examples/factor.c -o factor.o

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """The fast simulator (one generated cycle replayed T times, QuantumARM.run_fast) must give exactly the
 same result as simulating the fully materialised circuit (all T cycles, every qubit), and, for small
 machines, as Qiskit Aer running the exported circuit.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Exact simulator for the interpreter circuit on computational-basis inputs.
 
 The circuit uses only X / CX / CCX / CSWAP, i.e. it is a permutation of basis states, so a

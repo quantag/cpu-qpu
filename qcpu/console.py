@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Turn the output log in data memory into text (C printf semantics), on the host after a run.
 
 Log layout at data offset 0: word 0 = record count; record k (k = 1, 2, ...) at byte 32*k:

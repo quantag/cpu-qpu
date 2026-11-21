@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Instruction-set registry: what the tools need to know about one architecture.
 
 Each entry bundles the quantum front end (Machine + configuration), the classical side (class table,

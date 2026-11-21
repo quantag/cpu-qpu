@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Classical side of the A64 front end: instruction classes, static support check, disassembly.
 
 The same (mask, value) class table drives the *quantum* decoder in machine.py, so what the

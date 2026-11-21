@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH */
 /* Minimal stdio.h for programs that run on the arm-qpu quantum machine.
  * printf / puts / putchar are bound by arm_qpu.py to a small output stub that runs on the
  * QPU and records each call in an output log in data memory; the text is formatted on the

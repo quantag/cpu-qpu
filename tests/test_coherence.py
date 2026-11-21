@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Coherence test on the current machine (Qiskit Aer, matrix-product-state simulator).
 
 Program (clang-assembled A64):  movz w0, #5 ; add w0, w0, #3 ; ret

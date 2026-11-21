@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Run every test and experiment and write docs/test_results.md: seeds, tool versions, commit,
 counts per outcome class including discarded runs. Takes about an hour (the C suites dominate).
 Run: python3 tools/test_report.py [--quick]"""

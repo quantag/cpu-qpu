@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Grover search with a compiled C function as the oracle, run on the quantum ARM machine.
 
     python3 grover.py examples/grover_square.c --entry is_root --bits 4

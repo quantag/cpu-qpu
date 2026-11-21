@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Interpreter vs specialised reversible circuit for one function.
 
     int f(int a, int b) { return (a + b) * (a ^ b); }     // clang -O1: add, eor, mul, ret

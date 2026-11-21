@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH */
 /* Modular exponentiation a^x mod n by square-and-multiply.
  *
  * This is the classical core of Shor's factoring algorithm. It is ordinary C, compiled to AArch64

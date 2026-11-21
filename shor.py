@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Shor's factoring algorithm with the modular exponentiation written in C and run as ARM machine
 code on the quantum ARM machine.
 

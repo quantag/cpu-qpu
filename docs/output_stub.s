@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Quantag IT Solutions GmbH
 // Output stub: what printf / puts / putchar are bound to when a program runs on arm-qpu.
 // These instructions execute on the quantum machine (and on the CPU reference). Each call
 // appends a 32-byte record to the output log at the start of data memory (DATA_BASE):
