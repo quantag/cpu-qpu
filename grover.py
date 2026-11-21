@@ -206,7 +206,7 @@ def main():
     used.discard(31)
     classes = tuple(sorted({c.cls for c in checks} | {"hlt"}))
     m = QuantumARM(Config(W=W, regs=tuple(sorted(used)), sp=any(c.uses_sp for c in checks),
-                          SLOTS=slots, STEPS=T, MEM=0, classes=classes))
+                          SLOTS=slots, STEPS=T, MEM=0, classes=classes, select=cfg.get("memory_select", "tree")))
     ones = m.load_bits(words, {0: 0, 30: 4 * (slots - 1)}, pc=prog["entry_index"])
     cnt = m.counts()
     print(f"machine: W = {W}, {len(classes)} instruction classes, {slots} program slots, {T} cycles: "

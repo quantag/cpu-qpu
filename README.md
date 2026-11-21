@@ -90,7 +90,7 @@ Hello from the QPU!
 MATCH: the QPU produced the same result as the CPU
 return value X0: CPU = 0, QPU = 0
 program output: CPU and QPU identical
-quantum machine: 520364 qubits, 91883088 gates (57841320 Toffoli), 228 steps, W = 12
+quantum machine: 525162 qubits, 28273824 gates (13643064 Toffoli), 228 steps, W = 12
 report: hello.main.report.md
 ```
 
@@ -137,8 +137,8 @@ Classic algorithms on a quantum von Neumann machine
 ```
 
 The inputs go through a `volatile` variable, so the compiler cannot compute the answers in
-advance: the QPU computes them. `factor.c` and `algorithms.c` each take about 20 seconds to
-simulate on a laptop; `hello.c` about 7 seconds.
+advance: the QPU computes them. Each of the three programs takes a few seconds to
+simulate on a laptop.
 
 ## RISC-V
 
@@ -165,11 +165,11 @@ registers x1..x31 (x0 reads as zero), no flags, and one write port, so it is sma
 | program (clang -O1, W = 12) | | AArch64 | RV64IM | RV32IM |
 |---|---|---|---|---|
 | `hello.c` | cycles | 228 | 236 | 236 |
-| | qubits | 520 364 | 269 902 | 145 724 |
-| | gates | 91.9 million | 39.2 million | 31.0 million |
+| | qubits | 525 162 | 271 670 | 147 492 |
+| | gates | 28.3 million | 13.7 million | 11.6 million |
 | `factor.c` | cycles | 606 | 610 | 607 |
-| | qubits | 1 367 842 | 681 527 | 359 678 |
-| | gates | 257.7 million | 113.8 million | 92.1 million |
+| | qubits | 1 372 896 | 683 551 | 361 702 |
+| | gates | 81.6 million | 40.9 million | 35.2 million |
 
 **Implemented:** LUI, AUIPC, JAL, JALR, BEQ/BNE/BLT/BGE/BLTU/BGEU, ADDI/SLTI/SLTIU/XORI/ORI/ANDI,
 SLLI/SRLI/SRAI, ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND, MUL, DIV/DIVU/REM/REMU, LW/SW, EBREAK (ends
@@ -226,16 +226,15 @@ calls push the return address on the stack. `docs/x86.md` describes the circuit.
 | program (clang -O1, W = 12) | | AArch64 | RV64IM | RV32IM | x86-64 |
 |---|---|---|---|---|---|
 | `hello.c` | cycles | 228 | 236 | 236 | 258 |
-| | qubits | 520 364 | 269 902 | 145 724 | 301 029 |
-| | gates | 91.9 million | 39.2 million | 31.0 million | 15.8 million |
+| | qubits | 525 162 | 271 670 | 147 492 | 301 029 |
+| | gates | 28.3 million | 13.7 million | 11.6 million | 15.8 million |
 | `factor.c` | cycles | 606 | 610 | 607 | 701 |
-| | qubits | 1 367 842 | 681 527 | 359 678 | 803 886 |
-| | gates | 257.7 million | 113.8 million | 92.1 million | 57.7 million |
+| | qubits | 1 372 896 | 683 551 | 361 702 | 803 886 |
+| | gates | 81.6 million | 40.9 million | 35.2 million | 57.7 million |
 
-The x86-64 machine has the most complex decoder and still the fewest gates. That comes from how its
-front end selects memory, not from the instruction set: it uses a binary decoder tree for program
-blocks and data cells, where the two older front ends use one comparator per slot. The tree would
-shrink those machines too; they are left as they are, so the AArch64 numbers stay those of the paper.
+The x86-64 machine sits between the other two. Per cycle it writes up to three registers (result, RDX,
+RSP) and two memory cells; the RISC-V machine writes one register and up to two cells, the AArch64
+machine up to four cells (pair instructions) and has 31 registers.
 
 **Implemented:** MOV (register, memory, immediate; 8, 32 and 64 bits), MOVSXD, MOVZX/MOVSX from a byte
 register, LEA, ADD/OR/AND/SUB/XOR/CMP, TEST, NEG, NOT, INC, DEC, IMUL (two- and three-operand),
@@ -294,7 +293,7 @@ python3 grover.py examples/grover_divisor.c --entry divides91 --bits 4 --iterati
 
 ```
 predicate divides91: 10 instructions, solutions over 0..15: [7, 13] (M = 2 of N = 16); cycles per input 5..9, common bound T = 9
-machine: W = 8, 9 instruction classes, 16 program slots, 9 cycles: 1762 qubits, 85374 gates (49680 Toffoli) per run of U
+machine: W = 8, 9 instruction classes, 16 program slots, 9 cycles: 1792 qubits, 81000 gates (47052 Toffoli) per run of U
 basis check: the quantum machine computes f(x) correctly for all 16 inputs
 simulator: exact sparse state vector; optimal number of iterations for M/N = 2/16: 2
 k = 0: P(solution) exact 0.1250, theory 0.1250; measured 142/1000 = 0.142 [95% CI 0.122..0.165]; workspace restored with probability 1.0000
@@ -359,10 +358,10 @@ python3 shor.py --N 15 --a 7
 ```
 modexp: 18 instructions; a = 7, N = 15; exponent register: t = 8 qubits (x = 0..255)
 CPU check: a^x mod N correct for all 256 exponents, 4..101 machine cycles, all inside the 9-bit model
-machine: W = 9, 12 instruction classes, 32 program slots, 101 cycles: 6526 qubits, 2581560 gates (1229776 Toffoli) per run of U
-circuit: H on x, U, copy, U^-1, inverse QFT: 6530 qubits, 5163180 gates
+machine: W = 9, 12 instruction classes, 32 program slots, 101 cycles: 6588 qubits, 2445210 gates (1145340 Toffoli) per run of U
+circuit: H on x, U, copy, U^-1, inverse QFT: 6592 qubits, 4890480 gates
 after U: X0 = a^x mod N in all 256 branches, every branch halted, no trap
-after U^-1: exponent register restored: True; all 6518 work and history qubits back in their initial state: True
+after U^-1: exponent register restored: True; all 6580 work and history qubits back in their initial state: True
 measurement of x, exact probabilities (textbook value in brackets):
     y =     0  P = 0.2500 (0.2500)  y/2^t = 0.0000  no order found
     y =    64  P = 0.2500 (0.2500)  y/2^t = 0.2500  r = 4 -> 15 = 3 x 5
@@ -387,10 +386,10 @@ One run is:
 
 | N | base a | exponent qubits | cycles | qubits | gates | P(factors) per shot | same for a random y |
 |---|---|---|---|---|---|---|---|
-| 15 = 3 × 5 | 7 | 8 | 4–101 | 6 530 | 5.2 million | 0.750 | 0.059 |
-| 21 = 3 × 7 | 2 | 9 | 4–113 | 7 434 | 6.3 million | 0.623 | 0.045 |
-| 33 = 3 × 11 | 5 | 11 | 4–137 | 9 418 | 9.0 million | 0.679 | 0.018 |
-| 35 = 5 × 7 | 2 | 11 | 4–137 | 9 418 | 9.0 million | 0.706 | 0.011 |
+| 15 = 3 × 5 | 7 | 8 | 4–101 | 6 592 | 4.9 million | 0.750 | 0.059 |
+| 21 = 3 × 7 | 2 | 9 | 4–113 | 7 496 | 6.0 million | 0.623 | 0.045 |
+| 33 = 3 × 11 | 5 | 11 | 4–137 | 9 480 | 8.6 million | 0.679 | 0.018 |
+| 35 = 5 × 7 | 2 | 11 | 4–137 | 9 480 | 8.6 million | 0.706 | 0.011 |
 
 Without `--a` the tool tries the bases 2, 3, 4, ... as the classical part of Shor's algorithm does:
 for N = 33, bases 2 and 4 find the order but give no factor, and base 5 gives 3 × 11.
@@ -412,7 +411,7 @@ the chance level in the last column: the history must be uncomputed for the bran
   too large for Qiskit Aer). The simulator is checked against Qiskit's dense statevector on random
   circuits, and the QFT gate list against the discrete Fourier transform (`tests/test_shor.py`).
 - It is not an efficient way to factor. A circuit built by hand for modular exponentiation needs
-  about a dozen qubits for N = 15; the interpreter needs 6 530, almost all of them history. The speed-up
+  about a dozen qubits for N = 15; the interpreter needs 6 592, almost all of them history. The speed-up
   belongs to Shor's algorithm. What the machine adds is that the classical part comes straight from
   compiled code.
 
@@ -576,6 +575,7 @@ python3 arm_qpu.py hello.o
   "memory_words": "auto",
   "max_steps": "auto",
   "isa": "full",
+  "memory_select": "tree",
   "compiler": "auto",
   "cflags": ["-O1", "-fno-stack-protector"],
   "output_records": 32,
@@ -596,6 +596,7 @@ python3 arm_qpu.py hello.o
 | `memory_words` | data memory in 4-byte cells; `auto` = enough for the output log, data sections, user cells and stack. |
 | `max_steps` | machine cycles in the circuit; `auto` = what the CPU reference needed. |
 | `isa` | `full` = decoder implements every supported class; `auto` = only the classes the program uses (smaller circuit). |
+| `memory_select` | how the circuit selects a program slot or a data cell from an address. `tree` (default): one binary decoder per address, about three gates per slot. `comparator`: one comparator per slot, the original circuit; see "Two ways to select memory" below. x86-64 has only `tree`. |
 | `compiler` | for `.c` input: `auto`, `clang`, `gcc`, or a command name / path. |
 | `cflags` | compiler flags for `.c` input, default `["-O1", "-fno-stack-protector"]`. |
 | `output_records` | how many printf/puts/putchar calls the output log keeps (default 32). |
@@ -603,6 +604,32 @@ python3 arm_qpu.py hello.o
 
 Before submitting to hardware the runner checks the circuit's width against the device. A run
 that does not fit is reported as not submitted, with the reason.
+
+### Two ways to select memory
+
+Every cycle the machine picks one program slot (fetch) and up to a few data cells (loads and stores)
+by address. The first version of the AArch64 machine, which is the one described in the paper, does
+this with one comparator per slot: each slot checks "is the address equal to my number?" with a
+multi-controlled gate over all address bits, for every port, so the cost per slot grows with the
+logarithm of the memory size. The default now is a binary decoder: a tree decodes the address once
+into one select line per slot, for about three gates per slot (one Toffoli and two CNOTs).
+
+| `hello.c`, clang -O1, W = 12 | | comparator | tree |
+|---|---|---|---|
+| AArch64 | qubits | 520 364 | 525 162 |
+| | gates | 91.9 million | 28.3 million |
+| | Toffoli | 57.8 million | 13.6 million |
+| RV64IM | qubits | 269 902 | 271 670 |
+| | gates | 39.2 million | 13.7 million |
+| RV32IM | qubits | 145 724 | 147 492 |
+| | gates | 31.0 million | 11.6 million |
+
+The two circuits compute the same thing. The tree needs a few more scratch qubits and about a third
+of the gates when the program has data memory; for a machine without data memory and with a few
+program slots (the Grover and Shor oracles) the difference is a few percent. To build the original
+circuit, with exactly the gate counts of the paper, set `"memory_select": "comparator"`
+(`tools/compare_specialized.py --comparator` for the comparison with a specialised circuit).
+`tests/test_fingerprint.py` checks that those circuits have not changed in any gate.
 
 ## What is implemented
 
@@ -667,14 +694,14 @@ reported why); or *unflagged mismatch* (it differed and the check said nothing).
 mismatch would be a bug, and the tests require that there are none. `docs/test_results.md` lists
 seeds, tool versions, the commit and the number of discarded runs.
 
-The largest C case (`bubble_sort` at `-O0`, about 800 000 qubits and 180 million gates) needs
-several GB of RAM. Run the two C suites one after the other, not in parallel.
+The largest C cases (for example `bubble_sort` at `-O0` on AArch64: 1.4 million qubits and 119 million
+gates) take a few seconds and about 100 MB of RAM to simulate.
 
 ## How the quantum machine works
 
 One machine cycle is a reversible block:
 
-1. **Fetch.** IR ^= MEM[PC], with each program slot selected by a comparator on the PC qubits.
+1. **Fetch.** IR ^= MEM[PC], with the program slot selected by a binary decoder of the PC qubits.
 2. **Decode.** One-hot class flags from IR bit patterns, all gated by a `running` qubit.
 3. **Execute.** Register-file reads are multiplexers on the Rn/Rm/Rt fields. Then the ALU:
    ripple adder with flags, barrel shifter, shift-add multiplier, restoring divider, logical
@@ -703,8 +730,8 @@ simulator), `arm_qpu.py` (CLI and reports), `include/stdio.h`.
 
 * Simulation: verified as above.
 * Hardware: the backend is implemented, but the circuits are far larger than today's devices.
-  The smallest real program (`subs; cneg; ret`, `isa: auto`) needs 666 qubits and about 9 000
-  Toffoli gates; `hello.c` needs about 500 000 qubits and 56 million Toffoli gates. Running on a QPU means a much smaller
+  The smallest real program (`subs; cneg; ret`, `isa: auto`) needs 416 qubits and about 5 000
+  Toffoli gates; `hello.c` needs about 525 000 qubits and 14 million Toffoli gates. Running on a QPU means a much smaller
   machine profile, or fault-tolerant hardware.
 * x86-64 covers the integer instructions that clang and gcc emit for C code without SSE. Byte and
   16-bit memory operands, prefixes, and the instructions listed under "x86-64" are not implemented.

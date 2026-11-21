@@ -46,12 +46,12 @@ def _words(check, disassemble, link, sp):
 def _arm64():
     from . import a64, machine, reference
 
-    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto"):
+    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto", select="tree"):
         used = set(used)
         regs = tuple(range(31)) if registers == "all" else tuple(sorted(used - {31})) if registers == "auto" \
             else tuple(sorted(set(registers) | {30}))
         return machine.Config(W=W, regs=regs, sp=31 in used, SLOTS=SLOTS, STEPS=STEPS, MEM=MEM,
-                              classes=classes or a64.ALL_CLASSES)
+                              classes=classes or a64.ALL_CLASSES, select=select)
     return SimpleNamespace(
         name="arm64", title="AArch64", xlen=64, Machine=machine.QuantumARM, config=config,
         ALL_CLASSES=a64.ALL_CLASSES, MEMOPS=a64.MEMOPS, check=a64.check, disassemble=a64.disassemble,
@@ -68,10 +68,11 @@ def _riscv(xlen):
     from . import rv, rv_machine, rv_reference
     ALL = tuple(rv.classes(xlen))
 
-    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto"):
+    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto", select="tree"):
         regs = tuple(range(1, 32)) if registers == "all" else tuple(sorted(set(used) - {0})) if registers == "auto" \
             else tuple(sorted(set(registers) | {1}))
-        return rv_machine.RVConfig(W=W, regs=regs, SLOTS=SLOTS, STEPS=STEPS, MEM=MEM, classes=classes or ALL, xlen=xlen)
+        return rv_machine.RVConfig(W=W, regs=regs, SLOTS=SLOTS, STEPS=STEPS, MEM=MEM, classes=classes or ALL, xlen=xlen,
+                                   select=select)
     # no compressed instructions, no linker relaxation, absolute addressing (no GOT)
     flags = [f"-march=rv{xlen}im", "-mabi=lp64" if xlen == 64 else "-mabi=ilp32", "-mno-relax", "-fno-pic"]
     check = lambda w, i, n, enabled=None: rv.check(w, i, n, xlen, enabled)
@@ -93,7 +94,9 @@ def _riscv(xlen):
 def _x86_64():
     from . import x86, x86_machine, x86_reference
 
-    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto"):
+    def config(W, used, SLOTS, STEPS, MEM, classes=None, registers="auto", select="tree"):
+        if select != "tree":
+            raise ValueError("the x86-64 machine has only the decoder-tree selection (memory_select: tree)")
         regs = tuple(range(16)) if registers == "all" else tuple(sorted(used)) if registers == "auto" else tuple(registers)
         return x86_machine.X86Config(W=W, regs=regs, SLOTS=SLOTS, STEPS=STEPS, MEM=MEM, classes=classes or x86.ALL_CLASSES)
 

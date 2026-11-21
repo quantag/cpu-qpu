@@ -6,7 +6,8 @@ The shared core (qcpu/core.py) is used by every architecture, so a change made f
 silently change another. This test fails when any of the circuits below changes in any gate. The
 AArch64 values were recorded before the core was split out of the AArch64 machine, so they also show
 that the split left the AArch64 circuits exactly as they were; the RISC-V values were recorded before the
-x86-64 front end was added.
+x86-64 front end was added. Both are the circuits with one comparator per memory slot (select="comparator"),
+which stay available; the "tree" entries are the default circuits with a binary decoder per address.
 
 If a circuit change is intended, rerun with --print and paste the new table.
 Run: python3 -m tests.test_fingerprint [--print]"""
@@ -47,6 +48,15 @@ EXPECTED = {
     "riscv / rv32 W12 mem16": (4500, 80325, "a3f21fc9c18aded9adda"),
     "riscv / rv64 W8 nomem": (1523, 41496, "c2cc3311e2d72b5916d5"),
     "riscv / rv64 tiny": (336, 5970, "7ec4e45d5371dc65f1db"),
+    "arm64 tree / full W12 mem16 sp": (6561, 172833, "eab7486bdbcb436ec89e"),
+    "arm64 tree / full W16 mem64 sp": (11149, 140674, "05cffa841016df67db19"),
+    "arm64 tree / W8 nomem": (2884, 100276, "bcc957d1c9e3e6edcbd1"),
+    "arm64 tree / reduced": (2844, 121050, "de8e4deec459b6fb8404"),
+    "arm64 tree / tiny": (424, 7328, "dc1725baf04adaf6369d"),
+    "riscv tree / rv64 W12 mem16": (4764, 72411, "abb1e7f460b0d80a59ac"),
+    "riscv tree / rv32 W12 mem16": (4662, 67239, "027b4f9abaf14e881ace"),
+    "riscv tree / rv64 W8 nomem": (1553, 39552, "7df54320c6ce6137012b"),
+    "riscv tree / rv64 tiny": (342, 5880, "7a123d03fe9d8ae54aed"),
     "x86_64 / W12 mem16": (4157, 50434, "e623449a97c85e0141e1"),
     "x86_64 / W16 mem64": (7881, 77102, "1653f534b8ad2bea16a3"),
     "x86_64 / W8 mem4": (2584, 48534, "6dfb36dab1a9fc9e8d11"),
@@ -59,9 +69,12 @@ def fingerprints():
     for arch, table, cfg, cls in (("arm64", ARM, Config, QuantumARM), ("riscv", RISCV, RVConfig, QuantumRISCV),
                                   ("x86_64", X86, X86Config, QuantumX86)):
         for name, kw in table.items():
-            m = cls(cfg(**kw))
-            h = hashlib.sha256(repr((m.n, m.g, sorted(m.names.items()), m.pc, m.run, m.trap)).encode()).hexdigest()[:20]
-            out[f"{arch} / {name}"] = (m.n, len(m.g), h)
+            # AArch64 and RISC-V: "arch / name" is the original circuit (one comparator per slot), "arch tree / name"
+            # the default one (decoder tree). x86-64 has only the tree.
+            for label, extra in ((arch, {"select": "comparator"}), (arch + " tree", {"select": "tree"})) if arch != "x86_64" else ((arch, {}),):
+                m = cls(cfg(**kw, **extra))
+                h = hashlib.sha256(repr((m.n, m.g, sorted(m.names.items()), m.pc, m.run, m.trap)).encode()).hexdigest()[:20]
+                out[f"{label} / {name}"] = (m.n, len(m.g), h)
     return out
 
 
@@ -73,6 +86,6 @@ if __name__ == "__main__":
         sys.exit(0)
     bad = [k for k in got if k in EXPECTED and got[k] != EXPECTED[k]] + [k for k in got if k not in EXPECTED]
     for k, v in got.items():
-        print(f"{'ok  ' if k not in bad else 'DIFF'} {k:28s} {v[0]:6d} qubits {v[1]:7d} gates {v[2]}")
+        print(f"{'ok  ' if k not in bad else 'DIFF'} {k:33s} {v[0]:6d} qubits {v[1]:7d} gates {v[2]}")
     print("PASS: all circuits unchanged" if not bad else f"FAIL: {len(bad)} circuit(s) changed or not recorded")
     sys.exit(1 if bad else 0)

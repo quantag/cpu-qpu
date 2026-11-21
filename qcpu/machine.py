@@ -42,9 +42,12 @@ class Config:
     STEPS: int = 16                     # machine cycles in the circuit
     MEM: int = 0                        # data memory: 4-byte cells (W bits each); power of two
     classes: tuple = ALL_CLASSES        # instruction classes the decoder implements
+    select: str = "tree"                # how program slots and data cells are selected: "tree" = one binary decoder
+                                        # per address; "comparator" = one comparator per slot (the original circuit)
 
     def __post_init__(self):
         assert 6 <= self.W <= 16
+        assert self.select in ("tree", "comparator")
         assert self.SLOTS & (self.SLOTS - 1) == 0
         self.pbits = max(1, (self.SLOTS - 1).bit_length())
         self.mbits = (self.MEM - 1).bit_length() if self.MEM > 1 else (1 if self.MEM else 0)
@@ -89,9 +92,14 @@ class QuantumARM(Machine):
 
         # FETCH: IR = MEM[PC]
         ir = self.alloc(32)
-        for slot in range(c.SLOTS):
-            self.local(lambda: self.fresh_match(self.field_eq(self.pc, 0, p, slot)),
-                       lambda sel: self.gated_copy(sel, self.mem[slot], ir))
+        tree = c.select == "tree"
+        if tree:
+            for slot, sel in enumerate(self.onehot(self.pc, ONE)[:c.SLOTS]):
+                self.gated_copy(sel, self.mem[slot], ir)
+        else:
+            for slot in range(c.SLOTS):
+                self.local(lambda: self.fresh_match(self.field_eq(self.pc, 0, p, slot)),
+                           lambda sel: self.gated_copy(sel, self.mem[slot], ir))
 
         # DECODE: one-hot class flags (only while running)
         f = {}
@@ -269,19 +277,31 @@ class QuantumARM(Machine):
             E, _ = self.add(A, eoff, Z, W)
             WBv, _ = self.add(A, off, Z, W)
             idx = [E[2 + j] for j in range(m)]
-            idxc = [idx] + [self.add(idx, [ONE if (k >> j) & 1 else Z for j in range(m)], Z, m)[0] for k in (1, 2, 3)]
-            sel_eq = lambda ix, slot: [(ix[j], (slot >> j) & 1) for j in range(m)]
-            if has(*MEMOPS):
+            if tree:
+                # cell k of a decoder of idx, taken at position (cell - k), is the one-hot of idx + k
+                at = lambda t, k: [t[(cell - k) % (1 << m)] for cell in range(c.MEM)]
+            else:
+                idxc = [idx] + [self.add(idx, [ONE if (k >> j) & 1 else Z for j in range(m)], Z, m)[0] for k in (1, 2, 3)]
+                sel_eq = lambda ix, slot: [(ix[j], (slot >> j) & 1) for j in range(m)]
+            if has(*MEMOPS) and tree:
+                for cell, sl in enumerate(at(self.onehot(idx, fld), 0)):
+                    self.gated_copy(sl, self.ram[cell], R)
+            elif has(*MEMOPS):
                 for slot in range(c.MEM):
                     self.local(lambda: self.fresh_match([(fld, 1)] + sel_eq(idx, slot)),
                                lambda sl: self.gated_copy(sl, self.ram[slot], R))
             if has("ld_pair"):
                 R2 = self.alloc(W)
-                for slot in range(c.MEM):
-                    self.local(lambda: self.fresh_match([(f["ld_pair"], 1), (sz, 0)] + sel_eq(idxc[1], slot)),
-                               lambda sl: self.gated_copy(sl, self.ram[slot], R2))
-                    self.local(lambda: self.fresh_match([(f["ld_pair"], 1), (sz, 1)] + sel_eq(idxc[2], slot)),
-                               lambda sl: self.gated_copy(sl, self.ram[slot], R2))
+                if tree:        # second register of a pair: the next cell (W pair) or the one after (X pair)
+                    lp = [at(self.onehot(idx, self.fresh_match([(f["ld_pair"], 1), (sz, v)])), 1 + v) for v in (0, 1)]
+                    for cell in range(c.MEM):
+                        self.gated_copy(self.fresh_xor(lp[0][cell], lp[1][cell]), self.ram[cell], R2)
+                else:
+                    for slot in range(c.MEM):
+                        self.local(lambda: self.fresh_match([(f["ld_pair"], 1), (sz, 0)] + sel_eq(idxc[1], slot)),
+                                   lambda sl: self.gated_copy(sl, self.ram[slot], R2))
+                        self.local(lambda: self.fresh_match([(f["ld_pair"], 1), (sz, 1)] + sel_eq(idxc[2], slot)),
+                                   lambda sl: self.gated_copy(sl, self.ram[slot], R2))
             if has(*MEMOPS):
                 stp = f.get("st_pair", Z)
                 xs = self.fresh_and(fst, sz)
@@ -294,7 +314,11 @@ class QuantumARM(Machine):
                     self.mcx([(sz, 1), (Dt[W - 1], 1)], d1[i])      # X store: high word = sign fill
                     self.mcx([(sz, 0), (v2[i], 1)], d1[i])          # W pair: second register
                 dm = [Dt, d1, v2, [v2[W - 1]] * W]
-                wm = [[self.fresh_match([(e[k], 1)] + sel_eq(idxc[k], slot)) for slot in range(c.MEM)] for k in range(4)]
+                if tree:        # write port k goes to cell idx + k; ports 2 and 3 share their enable
+                    dec = [self.onehot(idx, e[k]) for k in range(3)]
+                    wm = [at(dec[min(k, 2)], k) for k in range(4)]
+                else:
+                    wm = [[self.fresh_match([(e[k], 1)] + sel_eq(idxc[k], slot)) for slot in range(c.MEM)] for k in range(4)]
 
         # FLAGS
         Nn = self.fresh_xor(R[W - 1], self.fresh_and(fcc, S[W - 1]) if has("ccmp") else Z)

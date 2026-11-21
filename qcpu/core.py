@@ -170,6 +170,20 @@ class Machine:
     def fresh_not(self, a):
         return self.fresh_xor(a, self.ONE)
 
+    def onehot(self, bits, enable):
+        """Binary decoder: 2^len(bits) qubits, entry k is 1 iff enable and the value of bits (LSB first) is k.
+        A tree: each level splits every entry with one Toffoli and two CNOTs, so the whole decoder costs
+        about three gates per output. enable is a qubit or a constant."""
+        sel = [enable]
+        for b in reversed(bits):
+            nxt = []
+            for s_ in sel:
+                hi = self.a1(); self.mcx([(s_, 1), (b, 1)], hi)
+                lo = self.a1(); self.xor_into(lo, [s_, hi])
+                nxt += [lo, hi]
+            sel = nxt
+        return sel
+
     def field_eq(self, ir, lo, n, k):
         return [(ir[lo + j], (k >> j) & 1) for j in range(n)]
 

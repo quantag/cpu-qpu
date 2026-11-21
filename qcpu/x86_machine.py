@@ -74,19 +74,6 @@ class QuantumX86(Machine):
         for s_, d in zip(src, dst):
             self.mcx([(ctrl, 1), (s_, 1)], d)
 
-    def onehot(self, bits, enable):
-        """Binary decoder: 2^len(bits) qubits, entry k is 1 iff enable and the value of bits (LSB first) is k.
-        A tree: each level splits every entry with one Toffoli and two CNOTs."""
-        sel = [enable]
-        for b in reversed(bits):
-            nxt = []
-            for s_ in sel:
-                hi = self.a1(); self.mcx([(s_, 1), (b, 1)], hi)
-                lo = self.a1(); self.xor_into(lo, [s_, hi])
-                nxt += [lo, hi]
-            sel = nxt
-        return sel
-
     def OR(self, *qs):
         t = self.a1(); self.x(t); self.mcx([(q, 0) for q in qs], t); return t
 
