@@ -1,10 +1,10 @@
 # Test results
 
-Generated 2026-11-21 00:09 CET by `tools/test_report.py`.
+Generated 2026-11-21 09:26 CET by `tools/test_report.py`.
 
 **Overall: all tests passed.**
 
-- code: commit `f55ee1e798550fec147afb7cb0f1978b29694eb0`
+- code: commit `507cc004a458648514f3cf172d453172d6053f33`
 - Python 3.13.18 on Linux-6.18.44-fc-v726-x86_64-with-glibc2.39
 - qiskit 2.6.2, qiskit-aer 0.18.4, unicorn 2.1.4, lief 1.0.0, capstone 5.0.9
 - Ubuntu clang version 18.1.3 (1ubuntu1)
@@ -45,7 +45,7 @@ PASS: all circuits unchanged
 
 ## Differential fuzzing
 
-`-m tests.test_fuzz 300 7 8,12,16` exit code 0, 98 s
+`-m tests.test_fuzz 300 7 8,12,16` exit code 0, 100 s
 
 ```
 W=8 seed=15: {"generated": 300, "rejected by assembler": 36, "too long": 0, "discarded (CPU did not halt)": 0, "match": 91, "match-flagged": 127, "flagged": 46, "UNFLAGGED": 0}
@@ -55,7 +55,7 @@ W=16 seed=23: {"generated": 300, "rejected by assembler": 35, "too long": 0, "di
 
 ## Boundary cases
 
-`-m tests.test_edges 8,12,16` exit code 0, 501 s
+`-m tests.test_edges 8,12,16` exit code 0, 538 s
 
 ```
 W=8: {"extend": {"match-flagged": 162, "flagged": 122, "match": 184}, "flags": {"flagged": 154, "match-flagged": 18, "match": 88}, "shift": {"match-flagged": 238, "flagged": 78, "match": 87}, "w/x": {"flagged": 3, "match": 5, "match-flagged": 5}, "memory": {"flagged": 14, "match-flagged": 4, "match": 8}, "mul/div": {"match-flagged": 71, "flagged": 13, "match": 46}, "bitfield": {"match-flagged": 7, "match": 6}, "pointer": {"flagged": 13, "match": 26, "match-flagged": 5}, "constants": {"flagged": 19, "match-flagged": 2, "match": 14}}
@@ -66,7 +66,7 @@ no unflagged mismatch
 
 ## Fast simulator vs full circuit vs Aer
 
-`-m tests.test_simulators 100 5` exit code 0, 50 s
+`-m tests.test_simulators 100 5` exit code 0, 60 s
 
 ```
 full circuit vs fast replay: 100/100 identical (seed 5); full: 5797 qubits 590520 gates, fast reports 5797 qubits 590520 gates
@@ -78,7 +78,7 @@ PASS
 
 ## Coherence: superposition of two programs
 
-`-m tests.test_coherence` exit code 0, 10 s
+`-m tests.test_coherence` exit code 0, 8 s
 
 ```
 machine: 424 qubits, 7328 gates (4832 Toffoli)
@@ -89,7 +89,7 @@ PASS: the machine executes a superposition of two ARM programs coherently
 
 ## Quantum branching
 
-`-m tests.test_branching` exit code 0, 59 s
+`-m tests.test_branching` exit code 0, 57 s
 
 ```
 machine: 882 qubits, 40248 gates (26520 Toffoli), 13 cycles
@@ -108,26 +108,26 @@ basis check: the quantum machine computes f(x) correctly for all 4 inputs
 simulator: exact sparse state vector; optimal number of iterations for M/N = 1/4: 1
 k = 1: P(solution) exact 1.0000, theory 1.0000; measured 1000/1000 = 1.000 [95% CI 0.996..1.000]; workspace restored with probability 1.0000 (0.0 s)
 PASS: amplitudes amplified as Grover's algorithm predicts, workspace restored in every shot
-compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -c /home/claude/cpu-qpu/examples/grover_tiny.c -o /tmp/cpu_qpu_9b4evi_z/grover_tiny.o
+compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -I/home/claude/cpu-qpu/runtime -c /home/claude/cpu-qpu/examples/grover_tiny.c -o /tmp/cpu_qpu_bqyolbda/grover_tiny.o
 predicate is_two: 3 instructions, solutions over 0..3: [2] (M = 1 of N = 4); cycles per input 4..4, common bound T = 4
 machine: W = 8, 4 instruction classes, 4 program slots, 4 cycles: 416 qubits, 7840 gates (5080 Toffoli) per run of U
 basis check: the quantum machine computes f(x) correctly for all 4 inputs
 simulator: Qiskit Aer, matrix product state; optimal number of iterations for M/N = 1/4: 1
-k = 1: P(solution) theory 1.0000; measured 200/200 = 1.000 [95% CI 0.981..1.000]; workspace restored with probability 1.0000 (2.3 s)
+k = 1: P(solution) theory 1.0000; measured 200/200 = 1.000 [95% CI 0.981..1.000]; workspace restored with probability 1.0000 (2.4 s)
 PASS: amplitudes amplified as Grover's algorithm predicts, workspace restored in every shot
 2) grover_tiny: exact and Aer agree (P = 1)
-compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -c /home/claude/cpu-qpu/examples/grover_divisor.c -o /tmp/cpu_qpu_vv3t7rw3/grover_divisor.o
+compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -I/home/claude/cpu-qpu/runtime -c /home/claude/cpu-qpu/examples/grover_divisor.c -o /tmp/cpu_qpu_m455zt_e/grover_divisor.o
 predicate divides91: 10 instructions, solutions over 0..15: [7, 13] (M = 2 of N = 16); cycles per input 5..9, common bound T = 9
 machine: W = 8, 9 instruction classes, 16 program slots, 9 cycles: 1792 qubits, 81000 gates (47052 Toffoli) per run of U
 basis check: the quantum machine computes f(x) correctly for all 16 inputs
 simulator: exact sparse state vector; optimal number of iterations for M/N = 2/16: 2
 k = 0: P(solution) exact 0.1250, theory 0.1250; measured 142/1000 = 0.142 [95% CI 0.122..0.165]; workspace restored with probability 1.0000 (0.0 s)
 k = 1: P(solution) exact 0.7812, theory 0.7813; measured 796/1000 = 0.796 [95% CI 0.770..0.820]; workspace restored with probability 1.0000 (0.0 s)
-k = 2: P(solution) exact 0.9453, theory 0.9453; measured 950/1000 = 0.950 [95% CI 0.935..0.962]; workspace restored with probability 1.0000 (0.0 s)
+k = 2: P(solution) exact 0.9453, theory 0.9453; measured 950/1000 = 0.950 [95% CI 0.935..0.962]; workspace restored with probability 1.0000 (0.1 s)
 k = 3: P(solution) exact 0.3301, theory 0.3301; measured 344/1000 = 0.344 [95% CI 0.315..0.374]; workspace restored with probability 1.0000 (0.1 s)
 PASS: amplitudes amplified as Grover's algorithm predicts, workspace restored in every shot
 3) grover_divisor: P(k) = sin^2((2k+1) theta) for k = 0..3, workspace restored
-compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -c /home/claude/cpu-qpu/examples/grover_square.c -o /tmp/cpu_qpu_sd1aw9nu/grover_square.o
+compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -I/home/claude/cpu-qpu/runtime -c /home/claude/cpu-qpu/examples/grover_square.c -o /tmp/cpu_qpu_pfj0c_wp/grover_square.o
 predicate is_root: 6 instructions, solutions over 0..15: [3, 5, 11, 13] (M = 4 of N = 16); cycles per input 7..7, common bound T = 7
 machine: W = 9, 7 instruction classes, 8 program slots, 7 cycles: 1242 qubits, 49252 gates (28994 Toffoli) per run of U
 basis check: the quantum machine computes f(x) correctly for all 16 inputs
@@ -135,7 +135,7 @@ simulator: exact sparse state vector; optimal number of iterations for M/N = 4/1
 k = 1: P(solution) exact 1.0000, theory 1.0000; measured 1000/1000 = 1.000 [95% CI 0.996..1.000]; workspace restored with probability 1.0000 (0.0 s)
 PASS: amplitudes amplified as Grover's algorithm predicts, workspace restored in every shot
 4) grover_square: one iteration, P = 1
-compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -c /home/claude/cpu-qpu/examples/grover_divisor.c -o /tmp/cpu_qpu_4e6g05y2/grover_divisor.o
+compiled: /usr/bin/clang --target=aarch64-linux-gnu -O1 -fno-stack-protector -I/home/claude/cpu-qpu/include -I/home/claude/cpu-qpu/runtime -c /home/claude/cpu-qpu/examples/grover_divisor.c -o /tmp/cpu_qpu_vd7rtlco/grover_divisor.o
 predicate divides91: 10 instructions, solutions over 0..15: [7, 13] (M = 2 of N = 16); cycles per input 5..9, common bound T = 9
 machine: W = 8, 9 instruction classes, 16 program slots, 9 cycles: 1792 qubits, 81000 gates (47052 Toffoli) per run of U
 basis check: the quantum machine computes f(x) correctly for all 16 inputs
@@ -148,17 +148,17 @@ PASS
 
 ## Shor's algorithm with modexp compiled from C
 
-`-m tests.test_shor` exit code 0, 58 s
+`-m tests.test_shor` exit code 0, 59 s
 
 ```
 9) N = 21, a = 5: order found, base gives no factor
     modexp: 18 instructions; a = 2, N = 33; exponent register: t = 11 qubits (x = 0..2047)
-    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (9.5 s)
+    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (9.9 s)
     machine: W = 12, 12 instruction classes, 32 program slots, 137 cycles: 9474 qubits, 4302074 gates (1951428 Toffoli) per run of U
     circuit: H on x, U, copy, U^-1, inverse QFT: 9480 qubits, 8604246 gates
     after U: X0 = a^x mod N in all 2048 branches, every branch halted, no trap
     after U^-1: exponent register restored: True; all 9463 work and history qubits back in their initial state: True
-    measurement of x, exact probabilities (2.8 s; textbook value in brackets):
+    measurement of x, exact probabilities (2.5 s; textbook value in brackets):
     largest difference from the textbook distribution: 3.7e-16
     1000 shots (seed 2026): 681 gave the order r = 10, 0 gave the factors = 0.000 [95% CI 0.000..0.004]
     exact probability per shot: order 0.6792, factors 0.0000; a uniformly random y would give the factors with probability 0.0000
@@ -166,12 +166,12 @@ PASS
     trying the next base
     
     modexp: 18 instructions; a = 4, N = 33; exponent register: t = 11 qubits (x = 0..2047)
-    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (9.3 s)
+    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (9.9 s)
     machine: W = 12, 12 instruction classes, 32 program slots, 137 cycles: 9474 qubits, 4302074 gates (1951428 Toffoli) per run of U
     circuit: H on x, U, copy, U^-1, inverse QFT: 9480 qubits, 8604246 gates
     after U: X0 = a^x mod N in all 2048 branches, every branch halted, no trap
     after U^-1: exponent register restored: True; all 9463 work and history qubits back in their initial state: True
-    measurement of x, exact probabilities (2.8 s; textbook value in brackets):
+    measurement of x, exact probabilities (2.4 s; textbook value in brackets):
     largest difference from the textbook distribution: 7.2e-16
     1000 shots (seed 2026): 592 gave the order r = 5, 0 gave the factors = 0.000 [95% CI 0.000..0.004]
     exact probability per shot: order 0.5792, factors 0.0000; a uniformly random y would give the factors with probability 0.0000
@@ -179,12 +179,12 @@ PASS
     trying the next base
     
     modexp: 18 instructions; a = 5, N = 33; exponent register: t = 11 qubits (x = 0..2047)
-    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (8.9 s)
+    CPU check: a^x mod N correct for all 2048 exponents, 4..137 machine cycles, all inside the 12-bit model (9.3 s)
     machine: W = 12, 12 instruction classes, 32 program slots, 137 cycles: 9474 qubits, 4302074 gates (1951428 Toffoli) per run of U
     circuit: H on x, U, copy, U^-1, inverse QFT: 9480 qubits, 8604246 gates
     after U: X0 = a^x mod N in all 2048 branches, every branch halted, no trap
     after U^-1: exponent register restored: True; all 9463 work and history qubits back in their initial state: True
-    measurement of x, exact probabilities (2.7 s; textbook value in brackets):
+    measurement of x, exact probabilities (2.4 s; textbook value in brackets):
     largest difference from the textbook distribution: 3.7e-16
     1000 shots (seed 2026): 681 gave the order r = 10, 681 gave the factors = 0.681 [95% CI 0.651..0.709]
     exact probability per shot: order 0.6792, factors 0.6792; a uniformly random y would give the factors with probability 0.0181
@@ -210,7 +210,7 @@ ratio interpreter, reduced decoder (5 classes), with cleanup / specialised: 84x 
 
 ## RISC-V: decoder, traps, boundary cases, random programs
 
-`-m tests.test_riscv 150 7 8,12,16` exit code 0, 397 s
+`-m tests.test_riscv 150 7 8,12,16` exit code 0, 404 s
 
 ```
 1) decoder patterns: mutually exclusive on 40000 random words; every assembled instruction has a class
@@ -235,7 +235,7 @@ PASS
 
 ## x86-64: decoder, circuit against the instruction model, traps, boundary cases, random programs
 
-`-m tests.test_x86 150 7 8,12,16` exit code 0, 408 s
+`-m tests.test_x86 150 7 8,12,16` exit code 0, 427 s
 
 ```
 1) decoder patterns: mutually exclusive for all 4 x 65536 keys; 83 reference instructions decoded with the disassembler's length, covering all 39 kinds
@@ -256,9 +256,29 @@ PASS
 PASS
 ```
 
+## QPU libraries: host program, generated shared library and QPU server, on all four architectures
+
+`-m tests.test_dll arm64,riscv64,riscv32,x86_64` exit code 0, 54 s
+
+```
+1) arm64: host program with mathlib on the QPU == host program with mathlib on the CPU (8 lines, 12.2 s)
+2) arm64: QPU_BACKEND=cpu gives the same output
+1) riscv64: host program with mathlib on the QPU == host program with mathlib on the CPU (8 lines, 5.1 s)
+2) riscv64: QPU_BACKEND=cpu gives the same output
+1) riscv32: host program with mathlib on the QPU == host program with mathlib on the CPU (8 lines, 4.4 s)
+2) riscv32: QPU_BACKEND=cpu gives the same output
+1) x86_64: host program with mathlib on the QPU == host program with mathlib on the CPU (8 lines, 7.4 s)
+2) x86_64: QPU_BACKEND=cpu gives the same output
+3) result outside the 10-bit model: warning; QPU_STRICT=1: exit 70; QPU_WIDTH=16: exact
+4) function that does not halt: qpu: edge: spin: error: did not finish within 100000 steps
+5) after a server restart the library is sent again and the call succeeds
+6) header errors reported: pointer without annotation, struct parameter, double return, missing function
+PASS
+```
+
 ## C programs, clang
 
-`-m tests.test_c_programs clang` exit code 0, 83 s
+`-m tests.test_c_programs clang` exit code 0, 84 s
 
 ```
 54 passed (2 of them are the expected, flagged model-limit cases), 0 failed
@@ -266,7 +286,7 @@ PASS
 
 ## C programs, gcc
 
-`-m tests.test_c_programs gcc` exit code 0, 81 s
+`-m tests.test_c_programs gcc` exit code 0, 80 s
 
 ```
 54 passed (3 of them are the expected, flagged model-limit cases), 0 failed
@@ -274,7 +294,7 @@ PASS
 
 ## C programs, clang, RISC-V RV64IM
 
-`-m tests.test_c_programs clang riscv64` exit code 0, 55 s
+`-m tests.test_c_programs clang riscv64` exit code 0, 53 s
 
 ```
 54 passed (8 of them are the expected, flagged model-limit cases), 0 failed
@@ -282,7 +302,7 @@ PASS
 
 ## C programs, clang, RISC-V RV32IM
 
-`-m tests.test_c_programs clang riscv32` exit code 0, 51 s
+`-m tests.test_c_programs clang riscv32` exit code 0, 50 s
 
 ```
 54 passed (5 of them are the expected, flagged model-limit cases), 0 failed
@@ -290,7 +310,7 @@ PASS
 
 ## C programs, clang, x86-64
 
-`-m tests.test_c_programs clang x86_64` exit code 0, 64 s
+`-m tests.test_c_programs clang x86_64` exit code 0, 63 s
 
 ```
 54 passed (2 of them are the expected, flagged model-limit cases), 0 failed
@@ -298,7 +318,7 @@ PASS
 
 ## C programs, gcc, x86-64
 
-`-m tests.test_c_programs gcc x86_64` exit code 0, 61 s
+`-m tests.test_c_programs gcc x86_64` exit code 0, 59 s
 
 ```
 54 passed (4 of them are the expected, flagged model-limit cases), 0 failed
