@@ -13,7 +13,11 @@ The library starts the server by itself when none is running, so usually you nev
     python3 qpu_server.py                      # foreground, default socket
     python3 qpu_server.py --socket /tmp/q.sock --idle-exit 600 -v
 
-Default socket: $QPU_SERVER, else /tmp/cpu-qpu-<uid>.sock.
+Where it listens (--socket, else $QPU_SERVER, else the platform default):
+  a Unix socket path                         Linux default: /tmp/cpu-qpu-<uid>.sock
+  an endpoint file ending in .txt: TCP       Windows default: %LOCALAPPDATA%\\cpu-qpu\\qpu-server.txt
+In TCP mode the server listens on 127.0.0.1 (a free port) and writes "127.0.0.1 <port> <token>" to
+the endpoint file, readable only by the user; every connection must start with "AUTH <token>".
 
 Protocol (text lines; numbers are decimal):
 
@@ -33,7 +37,7 @@ status: ok | inexact (a value left the W-bit model; result may differ from the C
         bad call) | unknown-lib (send LOAD, then repeat the call)
 backend: sim (quantum machine, checked against the CPU) | cpu (CPU reference only)
 """
-import argparse, hashlib, os, socketserver, sys, threading, time
+import argparse, hashlib, os, secrets, socket, socketserver, sys, threading, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -48,7 +52,34 @@ STATE = dict(last=time.time(), calls=0, verbose=False)
 
 
 def default_socket():
-    return os.environ.get("QPU_SERVER") or f"/tmp/cpu-qpu-{os.getuid()}.sock"
+    if os.environ.get("QPU_SERVER"):
+        return os.environ["QPU_SERVER"]
+    if os.name == "nt":
+        return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "cpu-qpu", "qpu-server.txt")
+    return f"/tmp/cpu-qpu-{os.getuid()}.sock"
+
+
+def is_tcp(endpoint):
+    return endpoint.endswith(".txt")
+
+
+def running(endpoint):
+    """Is a server already answering at this endpoint?"""
+    try:
+        if is_tcp(endpoint):
+            host, port, token = open(endpoint).read().split()
+            s = socket.create_connection((host, int(port)), timeout=2)
+            s.sendall(f"AUTH {token}\n".encode())
+            ok = s.makefile("rb").readline().strip() == b"OK"
+        else:
+            s = socket.socket(socket.AF_UNIX)
+            s.settimeout(2)
+            s.connect(endpoint)
+            ok = True
+        s.close()
+        return ok
+    except (OSError, ValueError):
+        return False
 
 
 def log(*a):
@@ -102,6 +133,12 @@ def call(sha, fn, backend, width, args, bufs):
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         f = self.rfile
+        token = getattr(self.server, "token", None)
+        if token:                                    # TCP: the first line must carry the token
+            first = f.readline().decode(errors="replace").split()
+            if first[:1] != ["AUTH"] or len(first) != 2 or not secrets.compare_digest(first[1], token):
+                return
+            self.wfile.write(b"OK\n"); self.wfile.flush()
         while True:
             line = f.readline()
             if not line:
@@ -152,8 +189,13 @@ class Handler(socketserver.StreamRequestHandler):
                 self.wfile.write(b"ERR unknown request\n"); self.wfile.flush()
 
 
-class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
+
+
+if hasattr(socketserver, "UnixStreamServer"):
+    class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
 
 
 def main():
@@ -164,18 +206,25 @@ def main():
     a = ap.parse_args()
     STATE["verbose"] = a.verbose
     if os.path.exists(a.socket):
-        import socket
-        s = socket.socket(socket.AF_UNIX)
-        try:
-            s.connect(a.socket)
-            sys.exit(f"a QPU server is already listening on {a.socket}")
-        except OSError:
-            os.unlink(a.socket)                # stale socket from a server that is gone
-        finally:
-            s.close()
-    srv = Server(a.socket, Handler)
-    os.chmod(a.socket, 0o600)
-    log("listening on", a.socket)
+        if running(a.socket):
+            sys.exit(f"a QPU server is already listening at {a.socket}")
+        os.unlink(a.socket)                    # left over from a server that is gone
+    if is_tcp(a.socket):
+        srv = TCPServer(("127.0.0.1", 0), Handler)
+        srv.token = secrets.token_hex(16)
+        os.makedirs(os.path.dirname(os.path.abspath(a.socket)), exist_ok=True)
+        tmp = a.socket + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, f"127.0.0.1 {srv.server_address[1]} {srv.token}\n".encode())
+        os.close(fd)
+        os.replace(tmp, a.socket)
+        log("listening on 127.0.0.1 port", srv.server_address[1], "endpoint file", a.socket)
+    else:
+        if not hasattr(socketserver, "UnixStreamServer"):
+            sys.exit("Unix sockets are not available here: give an endpoint file ending in .txt (TCP)")
+        srv = UnixServer(a.socket, Handler)
+        os.chmod(a.socket, 0o600)
+        log("listening on", a.socket)
     if a.idle_exit:
         def watch():
             while time.time() - STATE["last"] < a.idle_exit:

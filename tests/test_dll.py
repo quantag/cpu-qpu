@@ -10,8 +10,13 @@
   4. A function that does not halt within the step limit: message and exit status 70.
   5. The server is restarted between two calls: the library sends its object again.
   6. Header errors are reported: pointer without QPU_IN/OUT, struct parameter, missing function.
+  7. TCP transport (the Windows default) on Linux: endpoint file with a token, readable only by the
+     user; the host output is the same; a connection without the token is refused.
+  8. Windows: the library and the host program cross-compiled with MinGW. The DLL exports exactly
+     the header's functions, the import library links, main.exe imports them from the DLL. (Running
+     main.exe needs Windows or Wine; it is run under Wine when Wine works.)
 Run: python3 -m tests.test_dll [arch,...]"""
-import os, subprocess, sys, tempfile, textwrap, time
+import os, shutil, socket, subprocess, sys, tempfile, textwrap, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EX = os.path.join(ROOT, "examples", "dll")
 RT = os.path.join(ROOT, "runtime")
@@ -39,6 +44,11 @@ def host(d, main, libdir, libname, name):
 def stop(env):
     sock = env["QPU_SERVER"]
     subprocess.run(["pkill", "-f", f"qpu_server.py --socket {sock}"], capture_output=True)
+    if sock.endswith(".txt") and os.path.exists(sock):
+        for _ in range(50):
+            if not os.path.exists(sock):
+                break
+            time.sleep(0.1)
     for _ in range(50):
         if not os.path.exists(sock):
             break
@@ -115,6 +125,64 @@ def main():
                 p = sh([sys.executable, os.path.join(ROOT, "qpu_dll.py"), src, "--header", hdr, "-o", os.path.join(d, "x.so")], check=False)
                 assert p.returncode and msg in p.stderr, (decl, p.stderr)
             print("6) header errors reported: pointer without annotation, struct parameter, double return, missing function")
+
+            # 7. TCP transport on Linux
+            tenv = dict(os.environ, QPU_SERVER=os.path.join(d, "server.txt"))
+            exe = os.path.join(d, archs[0], "main")
+            p = sh([exe], tenv)
+            assert p.stdout == want and not p.stderr, (p.stdout, p.stderr)
+            host_, port, token = open(tenv["QPU_SERVER"]).read().split()
+            assert host_ == "127.0.0.1" and len(token) == 32 and os.stat(tenv["QPU_SERVER"]).st_mode & 0o077 == 0
+            c = socket.create_connection((host_, int(port)), timeout=5)
+            c.sendall(b"AUTH wrong\nPING\n")
+            assert c.recv(100) == b"", "a connection with a wrong token was answered"
+            c.close()
+            stop(tenv)
+            print("7) TCP transport: same output; endpoint file 127.0.0.1 port token (mode 600); wrong token refused")
+
+            # 8. Windows cross-build
+            mingw = shutil.which("x86_64-w64-mingw32-gcc")
+            if not mingw:
+                print("8) Windows: SKIPPED (no x86_64-w64-mingw32-gcc)")
+            else:
+                wd = os.path.join(d, "win")
+                os.makedirs(wd)
+                dll = os.path.join(wd, "mathlib_qpu.dll")
+                sh([sys.executable, os.path.join(ROOT, "qpu_dll.py"), os.path.join(EX, "mathlib.c"), "--header",
+                    os.path.join(EX, "mathlib.h"), "--target", "windows", "-o", dll])
+                exe = os.path.join(wd, "main.exe")
+                sh([mingw, "-Wall", "-Werror", "-I", RT, "-I", EX, os.path.join(EX, "main.c"), os.path.join(wd, "mathlib_qpu.lib"), "-o", exe])
+                exports = sh(["x86_64-w64-mingw32-objdump", "-p", dll]).stdout
+                table = exports.split("[Ordinal/Name Pointer] Table")[1].split("\n\n")[0]
+                names = sorted(line.split("]")[1].strip() for line in table.strip().splitlines())
+                want_names = sorted(["gcd", "modexp", "is_prime", "sum", "sort", "squares", "report", "qpu_last_status", "qpu_last_message"])
+                assert names == want_names, names
+                imports = sh(["x86_64-w64-mingw32-objdump", "-p", exe]).stdout
+                block = imports.split("DLL Name: mathlib_qpu.dll")[1].split("DLL Name:")[0]
+                assert all(f" {n}" in block for n in want_names[:7] if not n.startswith("qpu_")), block
+                wine = shutil.which("wine") or ("/usr/lib/wine/wine64" if os.path.exists("/usr/lib/wine/wine64") else None)
+                ran = "not run (no Wine)"
+                if wine:
+                    w = subprocess.run([wine, "cmd", "/c", "exit"], capture_output=True, timeout=300,
+                                       env=dict(os.environ, WINEDEBUG="-all", WINEPREFIX=os.path.join(d, "wine")))
+                    ran = "not run (Wine does not start here)" if w.returncode else "run under Wine: see below"
+                    if not w.returncode:
+                        wenv = dict(os.environ, WINEDEBUG="-all", WINEPREFIX=os.path.join(d, "wine"),
+                                    QPU_SERVER="Z:" + os.path.join(d, "winserver.txt").replace("/", "\\"))
+                        srv = subprocess.Popen([sys.executable, os.path.join(ROOT, "qpu_server.py"), "--socket",
+                                                os.path.join(d, "winserver.txt")])
+                        try:
+                            for _ in range(100):
+                                if os.path.exists(os.path.join(d, "winserver.txt")):
+                                    break
+                                time.sleep(0.1)
+                            p = subprocess.run([wine, exe], capture_output=True, text=True, env=wenv, timeout=600)
+                            assert p.stdout.replace("\r\n", "\n") == want, p.stdout + p.stderr
+                            ran = "main.exe under Wine prints the same as the CPU build"
+                        finally:
+                            srv.terminate()
+                print(f"8) Windows: DLL exports exactly the {len(want_names)} functions, import library links, "
+                      f"main.exe imports them from mathlib_qpu.dll; {ran}")
         finally:
             stop(env)
     print("PASS")

@@ -55,6 +55,36 @@ report(21)        = 42
 The first call starts the QPU server (`qpu_server.py`) in the background; it stops itself after 10
 minutes without calls. Each call takes 0.1 to 3 seconds in the simulator.
 
+## Windows
+
+The same, with a `.dll`. You need Python with this repository's requirements (as for `cpu_qpu.py`,
+see the main README, "Step-by-step: Windows"), clang for the QPU code, and a C compiler for the host:
+clang, MinGW gcc, or MSVC `cl`.
+
+```powershell
+python ..\..\qpu_dll.py mathlib.c --header mathlib.h -o mathlib_qpu.dll    # also writes mathlib_qpu.lib
+clang -I ..\..\runtime main.c mathlib_qpu.lib -o main.exe                   # or: gcc ... mathlib_qpu.dll
+                                                                           # or: cl /I ..\..\runtime main.c mathlib_qpu.lib
+.\main.exe
+```
+
+`qpu_dll.py` picks the first of `clang`, `gcc`, `cl` it finds; `--host-cc` chooses one. Keep
+`mathlib_qpu.dll` next to `main.exe` (or on `PATH`). On Windows the library talks to the server over
+TCP on 127.0.0.1: the server writes its port and a random token to
+`%LOCALAPPDATA%\cpu-qpu\qpu-server.txt`, and a connection without the token is refused. The server
+is started with `python`, else `py -3`; set `QPU_PYTHON` if your Python has another name (the
+Microsoft Store placeholder `python` does not work).
+
+From Linux, MinGW builds the Windows files:
+
+```bash
+python3 ../../qpu_dll.py mathlib.c --header mathlib.h --target windows -o mathlib_qpu.dll
+x86_64-w64-mingw32-gcc -I ../../runtime main.c mathlib_qpu.lib -o main.exe
+```
+
+On the Windows machine, set `QPU_HOME` to the folder of `qpu_server.py` there (or give
+`--qpu-home` when building).
+
 ## Writing a library header
 
 ```c
@@ -102,9 +132,9 @@ warning and returns wrong values.
 | `QPU_WIDTH` | register width 8..16 (default: `--width`, 16) |
 | `QPU_STRICT` | `1`: stop when a result is not exact |
 | `QPU_QUIET` | `1`: no warnings |
-| `QPU_SERVER` | socket path (default `/tmp/cpu-qpu-<uid>.sock`); log in `<socket>.log` |
+| `QPU_SERVER` | where the server listens: a Unix socket path, or an endpoint file ending in `.txt` for TCP. Default: `/tmp/cpu-qpu-<uid>.sock` (Linux), `%LOCALAPPDATA%\cpu-qpu\qpu-server.txt` (Windows). The server log is `<that>.log`. |
 | `QPU_HOME` | folder with `qpu_server.py` (default: the repository the library was generated from) |
-| `QPU_PYTHON` | Python for the server (default `python3`) |
+| `QPU_PYTHON` | Python for the server (default `python3` on Linux; `python`, then `py -3` on Windows) |
 
 ## What this is, and what it is not
 
@@ -114,5 +144,9 @@ speed-up in this mode. It is the base for quantum calls (a function run on all i
 `grover.py` and `shor.py` do), which need superposition and interference around the call and are not
 part of this interface yet.
 
-Linux only for now (`.so`). The generated library contains the QPU object file, so it can be copied
-on its own; it needs this repository on the machine for the server.
+The generated library contains the QPU object file, so it can be copied on its own; it needs this
+repository on the machine for the server.
+
+Status of the Windows version: the DLL, its import library and a host program are built with MinGW
+and checked (exports, imports) by `tests/test_dll.py`, and the TCP transport it uses is tested end to
+end on Linux. It has not yet been run on a Windows machine.
