@@ -83,7 +83,8 @@ def compile_c(src, choice, cflags, arch="arm64"):
     cc = find_compiler(choice, isas.get(arch))
     out = os.path.join(tempfile.mkdtemp(prefix="cpu_qpu_"), os.path.splitext(os.path.basename(src))[0] + ".o")
     inc = os.path.join(os.path.dirname(os.path.abspath(__file__)), "include")
-    cmd = cc + list(cflags) + ["-I" + inc, "-c", src, "-o", out]
+    rt = os.path.join(os.path.dirname(inc), "runtime")              # qpu_dll.h, for QPU library sources
+    cmd = cc + list(cflags) + ["-I" + inc, "-I" + rt, "-c", src, "-o", out]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode:
         sys.exit("compile failed: " + " ".join(cmd) + "\n" + p.stderr)
@@ -102,46 +103,21 @@ def parse_val(s):
     return ("int", int(s, 0))
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("binary", help="ELF/Mach-O object or executable (or raw .bin); a .c file is compiled first")
-    ap.add_argument("--arch", help="architecture: " + " | ".join(isas.NAMES) + " (default: from the file header, else config 'arch')")
-    ap.add_argument("--entry", help="function to run (default: main, else the first function)")
-    ap.add_argument("--args", nargs="*", default=[], help="X0, X1, ... initial values; '&k' = pointer to user data cell k")
-    ap.add_argument("--mem", default="", help="user data cells (32-bit ints), comma separated: --mem=1,2,3")
-    ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
-    ap.add_argument("-v", "--verbose", action="store_true", help="show the CPU/QPU comparison and resources; write a report")
-    ap.add_argument("--report", help="write the report to PREFIX.md / PREFIX.json")
-    ap.add_argument("--cc", help="compiler for .c input: clang | gcc | command (overrides config)")
-    ap.add_argument("-O", dest="opt", help="optimization level for .c input: 0, 1, 2, s (overrides config cflags)")
-    a = ap.parse_args()
-    cfg = load_config(a.config)
-    say = (lambda *x: print(*x)) if a.verbose else (lambda *x: None)
-    compiled_with = None
-    source = a.binary
-    try:
-        found = None if a.binary.endswith(".c") else isas.detect(a.binary)
-        if a.arch and found and isas.get(a.arch).name != found:
-            sys.exit(f"error: {a.binary} is a {found} file, but --arch {a.arch} was given")
-        isa = isas.get(a.arch or found or cfg["arch"])
-    except (ValueError, OSError) as e:
-        sys.exit(f"error: {e}")
-    if a.binary.endswith(".c"):
-        cflags = [f for f in cfg["cflags"] if not f.startswith("-O")] + [f"-O{a.opt}"] if a.opt else cfg["cflags"]
-        obj_path, compiled_with = compile_c(a.binary, a.cc or cfg["compiler"], cflags, isa.name)
-        say("compiled: " + compiled_with)
-        default_prefix = os.path.splitext(a.binary)[0]
-        a.binary = obj_path
-    else:
-        default_prefix = os.path.splitext(a.binary)[0]
-
+def execute(binary, isa, cfg, entry=None, arg_strs=(), mem_init=(), source=None, compiled_with=None,
+            machine_cache=None, round_steps=False, qpu=True):
+    """Link a binary, run the entry function on the CPU reference and on the quantum machine, compare.
+    Returns a dict: report (as written by -v), prog, ref (CPU), q (QPU state), W, ok (QPU == CPU in
+    every register, flag, memory cell and PC), exact (no model-check issue), ret (QPU return value),
+    qtext (program output), mem (final data cells), user_off (byte offset of the user cells),
+    stop (None, or the exit code when the run could not be completed).
+    Used by the command line and by qpu_server.py (machine_cache: reuse circuits between calls)."""
     # ---- link: output log at data offset 0, then the program's data sections
     try:
-        obj = ObjectImage(a.binary, isa.name)
-        probe = obj.link(a.entry)
+        obj = ObjectImage(binary, isa.name)
+        probe = obj.link(entry)
         records = int(cfg["output_records"]) if probe["uses_output"] else 0
         log_bytes = console.RECORD * (records + 1) if probe["uses_output"] else 0
-        prog = obj.link(a.entry, data_offset=log_bytes, log_capacity=records)
+        prog = obj.link(entry, data_offset=log_bytes, log_capacity=records)
     except LinkError as e:
         sys.exit(f"error: {e}")
     code = prog["words"]
@@ -155,8 +131,8 @@ def main():
     names_at = {v: k for k, v in prog["functions"].items()}
 
     # ---- data memory: [output log][data sections][user cells][stack]
-    raw_args = [parse_val(x) for x in a.args]
-    mem_init = [int(x, 0) for x in a.mem.split(",") if x.strip()] if a.mem else []
+    raw_args = [parse_val(x) for x in arg_strs]
+    mem_init = list(mem_init)
     user_off = (prog["data_end"] + 15) // 16 * 16
     user_cells = max(len(mem_init), 16 if any(t == "ptr" for t, _ in raw_args) else 0)
     uses_mem = (any(c.ok and c.cls in isa.MEMOPS for c in checks) or user_cells or prog["uses_output"]
@@ -203,9 +179,11 @@ def main():
     for i in ref["trace"]:
         executed[i] = executed.get(i, 0) + 1
     steps = ref["steps"] if cfg["max_steps"] == "auto" else int(cfg["max_steps"])
-    report = dict(arch=dict(name=isa.name, title=isa.title, ret=isa.ret_label, flags=isa.flag_names), binary=a.binary, source=source,
+    if round_steps:                     # fewer distinct machines, so a cached circuit can serve many calls
+        steps = max(16, 1 << (max(steps, 1) - 1).bit_length())
+    report = dict(arch=dict(name=isa.name, title=isa.title, ret=isa.ret_label, flags=isa.flag_names), binary=binary, source=source,
                   compiled_with=compiled_with, entry=prog["entry"],
-                  entry_index=prog["entry_index"], args=a.args, memory_init=mem_init, config=cfg,
+                  entry_index=prog["entry_index"], args=list(arg_strs), memory_init=mem_init, config=cfg,
                   unresolved_relocations=prog["unresolved"], externs=prog["externs"],
                   layout=dict(output_log=[0, log_bytes], data=[prog["data_offset"], prog["data_end"]],
                               user=[user_off, user_off + 4 * user_cells], stack_top=sp_off, memory_bytes=4 * MEM))
@@ -220,21 +198,32 @@ def main():
         report["cpu"]["output"], _ = console.render(lambda i: ref["mem"][i], image, ptr_off, records)
     if prog["unresolved"]:
         print("warning: unresolved symbols/relocations: " + "; ".join(prog["unresolved"]), file=sys.stderr)
+    ctx = dict(report=report, prog=prog, ref=ref, W=W, records=records, user_off=user_off, stop=None)
     if ref["error"]:
         report["verdict"] = f"NOT RUN on QPU: {ref['error']}"
-        print(f"error: {ref['error']}", file=sys.stderr)
-        finish(report, a, W, default_prefix, records)
-        sys.exit(1)
+        ctx["stop"] = 1
+        return ctx
+    if not qpu:                         # CPU reference only
+        report["backend"] = dict(name="cpu", note="CPU reference only; the quantum machine was not run")
+        ctx.update(q=None, ok=None, exact=not ref["issues"], qtext=report["cpu"].get("output"),
+                   ret=sx(ref["regs"][isa.ret_reg], W), mem=[sx(v, W) for v in ref["mem"]])
+        return ctx
 
     # ---- quantum machine
     t0 = time.time()
     if cfg["memory_select"] not in ("tree", "comparator"):
         sys.exit(f"error: memory_select must be 'tree' or 'comparator' (it is '{cfg['memory_select']}')")
-    try:
-        m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"],
-                                   select=cfg["memory_select"]), defer=True)
-    except ValueError as e:
-        sys.exit(f"error: {e}")
+    key = (isa.name, W, tuple(sorted(used)), slots, steps, MEM, tuple(classes), str(cfg["registers"]), cfg["memory_select"])
+    if machine_cache is not None and key in machine_cache:
+        m = machine_cache[key]
+    else:
+        try:
+            m = isa.Machine(isa.config(W, used, slots, steps, MEM, classes, registers=cfg["registers"],
+                                       select=cfg["memory_select"]), defer=True)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+        if machine_cache is not None:
+            machine_cache[key] = m
     init = {isa.arg_regs[i]: v for i, v in enumerate(qpu_args)}
     # the entry function returns to the halt slot: return address in the link register or on the stack
     init, cells0 = isa.entry(init, cells, slots, sp_off, isa.sp_reg in m.X)
@@ -275,8 +264,8 @@ def main():
                              qubits=getattr(m, "n_total", m.n), gates=gc, toffoli=gc.get("ccx", 0))
     report["backend"]["seconds"] = round(time.time() - t0, 2)
     if q is None:
-        finish(report, a, W, default_prefix, records)
-        sys.exit(1)
+        ctx["stop"] = 1
+        return ctx
 
     mk = (1 << W) - 1
     rows = []
@@ -303,9 +292,55 @@ def main():
     report["verdict"] = ("MATCH: the QPU produced the same result as the CPU" if ok else
                          "MISMATCH between QPU and CPU") + ("" if exact else
                          f" (warning: {len(ref['issues'])} value(s) did not fit the {W}-bit model, see model check)")
+    ctx.update(q=q, ok=ok, exact=exact, qtext=qtext, ret=sx(q["regs"][isa.ret_reg], W),
+               mem=[sx(v, W) for v in q["mem"]])
+    return ctx
 
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("binary", help="ELF/Mach-O object or executable (or raw .bin); a .c file is compiled first")
+    ap.add_argument("--arch", help="architecture: " + " | ".join(isas.NAMES) + " (default: from the file header, else config 'arch')")
+    ap.add_argument("--entry", help="function to run (default: main, else the first function)")
+    ap.add_argument("--args", nargs="*", default=[], help="X0, X1, ... initial values; '&k' = pointer to user data cell k")
+    ap.add_argument("--mem", default="", help="user data cells (32-bit ints), comma separated: --mem=1,2,3")
+    ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
+    ap.add_argument("-v", "--verbose", action="store_true", help="show the CPU/QPU comparison and resources; write a report")
+    ap.add_argument("--report", help="write the report to PREFIX.md / PREFIX.json")
+    ap.add_argument("--cc", help="compiler for .c input: clang | gcc | command (overrides config)")
+    ap.add_argument("-O", dest="opt", help="optimization level for .c input: 0, 1, 2, s (overrides config cflags)")
+    a = ap.parse_args()
+    cfg = load_config(a.config)
+    say = (lambda *x: print(*x)) if a.verbose else (lambda *x: None)
+    compiled_with = None
+    source = a.binary
+    try:
+        found = None if a.binary.endswith(".c") else isas.detect(a.binary)
+        if a.arch and found and isas.get(a.arch).name != found:
+            sys.exit(f"error: {a.binary} is a {found} file, but --arch {a.arch} was given")
+        isa = isas.get(a.arch or found or cfg["arch"])
+    except (ValueError, OSError) as e:
+        sys.exit(f"error: {e}")
+    if a.binary.endswith(".c"):
+        cflags = [f for f in cfg["cflags"] if not f.startswith("-O")] + [f"-O{a.opt}"] if a.opt else cfg["cflags"]
+        obj_path, compiled_with = compile_c(a.binary, a.cc or cfg["compiler"], cflags, isa.name)
+        say("compiled: " + compiled_with)
+        default_prefix = os.path.splitext(a.binary)[0]
+        a.binary = obj_path
+    else:
+        default_prefix = os.path.splitext(a.binary)[0]
+
+    r = execute(a.binary, isa, cfg, a.entry, a.args,
+                [int(x, 0) for x in a.mem.split(",") if x.strip()] if a.mem else [],
+                source=source, compiled_with=compiled_with)
+    if r["stop"] is not None:
+        if r["ref"]["error"]:
+            print(f"error: {r['ref']['error']}", file=sys.stderr)
+        finish(r["report"], a, r["W"], default_prefix, r["records"])
+        sys.exit(r["stop"])
     # ---- what the user sees: the program's own output, as if it ran locally
-    ret = sx(q["regs"][isa.ret_reg], W)
+    report, prog, q, W, records = r["report"], r["prog"], r["q"], r["W"], r["records"]
+    ok, exact, qtext, ret = r["ok"], r["exact"], r["qtext"], r["ret"]
     if prog["uses_output"]:
         sys.stdout.write(qtext)
         if qtext and not qtext.endswith("\n") and a.verbose:
