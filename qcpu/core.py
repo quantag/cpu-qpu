@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """
 Shared core of the quantum stored-program machines: everything that does not depend on the
 instruction set.

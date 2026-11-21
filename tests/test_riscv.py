@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """RISC-V front end (RV64IM and RV32IM): circuit against the CPU (Unicorn), after every cycle.
 
   1. Decoder table: the class patterns are mutually exclusive, and agree with what the assembler emits.

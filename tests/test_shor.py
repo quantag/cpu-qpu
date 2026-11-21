@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Shor's algorithm with modexp compiled from C as the oracle (shor.py), and checks of the exact
 sparse simulator and the circuit pieces it relies on.
 

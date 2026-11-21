@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Differential fuzzing: random A64 programs (assembled by clang), run on ONE fixed quantum interpreter
 circuit per register width and on the CPU reference, compared after every cycle (registers, flags,
 memory, PC). See tests/common.py for the outcome classes.

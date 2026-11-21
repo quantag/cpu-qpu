@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Boundary tests: operand extensions, flags and conditions, shifts, 32/64-bit (W/X) forms, memory,
 multiply/divide and bitfields, at the edges of the W-bit model, for W = 8, 12 and 16.
 

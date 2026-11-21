@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """x86-64 front end: circuit against the instruction model, and against the CPU (Unicorn) after every cycle.
 
   1. Decoder table: the kind patterns are mutually exclusive (exhaustive over opcode, next byte, 0F

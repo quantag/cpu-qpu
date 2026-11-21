@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Circuit fingerprints: the gate list of each front end for a few fixed configurations.
 
 The shared core (qcpu/core.py) is used by every architecture, so a change made for one front end can

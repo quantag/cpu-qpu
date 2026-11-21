@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Grover search with compiled C predicates as oracles (grover.py), and a check of the exact sparse
 simulator it uses.
 

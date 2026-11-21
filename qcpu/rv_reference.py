@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Conventional reference for RISC-V: execute the same instruction words on a RISC-V CPU emulator
 (Unicorn = QEMU's RISC-V core), one instruction at a time, recording the PC trace, and check that the
 run stays inside the W-bit model of the quantum machine.

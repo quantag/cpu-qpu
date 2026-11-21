@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Exact sparse state-vector simulator for circuits made of X, CX, CCX, CSWAP (permutations of basis
 states) plus a few H, Z and controlled-phase gates.
 

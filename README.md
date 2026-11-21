@@ -746,3 +746,13 @@ simulator), `arm_qpu.py` (CLI and reports), `include/stdio.h`.
 * Fitzjohn et al., Qx86 (Intel 8080/Z80 on IBM Q), IEEE TQE 2022 / QIP 2024: the PC and fetch/decode are classical; each instruction runs as a separate quantum job.
 * Yuan, Villanyi, Carbin, *Quantum Control Machine*, OOPSLA 2024: limits of control flow in superposition (injectivity, synchronisation).
 * Zhang, Ying, *Quantum Register Machine*, PLDI 2025: an ISA with a quantum PC, qif/fiq and recursion; no public implementation.
+
+## License
+
+Copyright 2026 Quantag IT Solutions GmbH. Licensed under the Apache License, Version 2.0
+(`LICENSE`). You may use, modify and redistribute the code, also commercially, provided you keep
+the copyright notices and include the attribution in `NOTICE`, which names Quantag IT Solutions
+GmbH, with every copy or derivative work you distribute.
+
+If you use this work in research, please cite it (Sergii Salata, Quantag IT Solutions GmbH,
+"Running ARM Binaries on a Quantum Processor in Simulation", arXiv).

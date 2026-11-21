@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """
 Quantum stored-program (von Neumann) interpreter for a subset of AArch64.
 

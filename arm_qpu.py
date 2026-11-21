@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Run an AArch64 binary on a quantum stored-program (von Neumann) processor.
 
     python3 arm_qpu.py hello.o

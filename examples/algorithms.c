@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH */
 /* Small classic algorithms: C -> clang or gcc -> AArch64 binary -> quantum machine.
  *   clang --target=aarch64-linux-gnu -O1 -Iinclude -c examples/algorithms.c -o algorithms.o
  *   python3 arm_qpu.py algorithms.o                            # runs main()

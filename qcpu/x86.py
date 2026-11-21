@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Classical side of the x86-64 front end: instruction table, decoder, static check, disassembly, and
 a W-bit model of every implemented instruction.
 

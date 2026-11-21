@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH */
 /* Grover search example: which 4-bit numbers x divide 91?
  *
  * The predicate is ordinary C. It is compiled to an AArch64 object file, and the same machine

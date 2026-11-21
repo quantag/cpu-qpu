@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Run a compiled binary on a quantum stored-program (von Neumann) processor.
 
     python3 cpu_qpu.py hello.o                          # runs main(); prints the program's output

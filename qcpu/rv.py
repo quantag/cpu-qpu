@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Classical side of the RISC-V front end (RV32IM and RV64IM, 32-bit instructions only, no compressed
 instructions): instruction classes, static support check, disassembly, and a W-bit model of every
 implemented instruction.

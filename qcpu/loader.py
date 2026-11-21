@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Load and link machine code for the quantum machine (AArch64, RISC-V and x86-64).
 
 Reads an ELF or Mach-O object/executable (or a raw .bin), merges all executable sections into

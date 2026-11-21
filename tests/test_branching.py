@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Quantum branching: an input in superposition sends the machine down two different control-flow
 paths of different lengths, in one run (Qiskit Aer, matrix-product-state simulator).
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Conventional reference: execute the same A64 bytes on an AArch64 CPU emulator (Unicorn = QEMU's
 ARM CPU core), one instruction at a time, recording the PC trace and checking that every value
 fits the W-bit sign-extended model used by the quantum machine.

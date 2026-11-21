@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
 """Conventional reference for x86-64: execute the same bytes on an x86-64 CPU emulator (Unicorn = QEMU's
 x86 core), one instruction at a time, and check that the run stays inside the W-bit model.
 
