@@ -8,3 +8,7 @@ paper/*.out
 paper/*.fls
 paper/*.fdb_latexmk
 paper/*.blg
+
+# articles are kept out of the repository
+paper/
+paper2/
