@@ -180,7 +180,7 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 | mode | circuit | size | status |
 |---|---|---|---|
 | `interpreted` | the quantum CPU executes the function's machine code | large: every instruction is a machine cycle | *exists* |
-| `compiled` | the function compiled directly to reversible logic (qoracle) | small: e.g. 25 qubits instead of 1,242 | planned; section 5.5 |
+| `compiled` | the function compiled directly to reversible logic (qoracle) | small: e.g. 26 qubits instead of 1,242 | planned; section 5.5 |
 | `auto` | `compiled` where the function has a compiled circuit that fits the backend, else `interpreted` | — | planned |
 
 A mode can only be chosen at run time if it was embedded at build time; otherwise the call fails
@@ -344,17 +344,68 @@ of the following guarantees for every call:
 | guarantee | how | available for |
 |---|---|---|
 | E1, per-call check | the native fallback is run and the results compared; a difference fails the call | every backend (`QCPU_VERIFY`, on by default) |
-| E2, per-call model check | the simulator checks every executed instruction against the reduced-width model (every written register fits its width, flags, branches, addresses, as the CPU reference of this repository does) | interpreted mode on `sim` |
-| E3, build-time proof | the compiled circuit equals the machine code on the whole declared domain: exhaustive verification, or a SAT equivalence check; plus proven result width and guards | compiled mode, when proven |
+| E2, per-call model check | the simulator checks every executed instruction against the reduced-width model (every written register fits its width, flags, branches, addresses, as the CPU reference of this repository does) | interpreted mode on `sim`, when the data models agree (5.6.1) |
+| E3, build-time proof | the compiled circuit equals the machine code on the whole declared domain: exhaustive verification, or a SAT equivalence check; plus proven result width and guards | compiled mode on `sim`, when proven and the data models agree (5.6.1) |
 
-A call without any of them fails with `QCPU_UNVERIFIED`, unless the user explicitly allows unchecked
-results with `QCPU_EXACT=0`; such a call returns status `QCPU_UNCHECKED`, which the call log records.
-On hardware, E2 is impossible and E3 covers the circuit, not the device: interpreted mode relies on
-E1, and compiled mode returns `QCPU_PROBABLE` results without it (section 5.8).
+**`QCPU_EXACT=1` (the default) is decisive.** A call returns `QCPU_OK` only with E1, E2 or E3 as defined
+here; otherwise it fails with `QCPU_UNVERIFIED`. In particular, **a hardware result needs E1**: E2 is
+impossible on hardware, and E3 proves the circuit, not that the device ran it correctly. A hardware call
+with `QCPU_VERIFY=0` therefore fails with `QCPU_UNVERIFIED`, however clear the vote. Only with
+`QCPU_EXACT=0` may a call return an unconfirmed value: `QCPU_PROBABLE` for a hardware vote that meets the
+evidence thresholds (section 5.8), `QCPU_UNCHECKED` for any other unchecked result. The call log records
+both.
 
-The machine code, not the C source, is what the QCPU executes. Where the C standard leaves a result
-undefined or implementation-defined, the native fallback and the QCPU may differ legitimately; E1 then
-reports a difference rather than guessing which is right.
+#### 5.6.1 Host and target C semantics
+
+E2 and E3 compare the QCPU with the *target* machine code, while the contract promises the *host*
+result. The two agree only if the host and target compilers give the C program the same meaning. They
+often do not: `__qcpu__ int f(void) { return sizeof(long); }` returns 4 on a Windows x64 host and 8 when
+compiled for AArch64 Linux. Both values fit at W = 8, the function has a single input case, no undefined
+behaviour, and exhaustive verification against the target code passes, yet the results differ. Measured
+with clang:
+
+| target | `long` | `wchar_t` | `long double` | `char` |
+|---|---|---|---|---|
+| AArch64 Linux, RISC-V Linux | 8 | 4 | 16 | unsigned |
+| x86-64 Linux | 8 | 4 | 16 | signed |
+| AArch64 macOS | 8 | 4 | 8 | signed |
+| x86-64 and AArch64 Windows | 4 | 2 | 8 | signed |
+
+So even a Linux x86-64 host and an AArch64 Linux target disagree (on `char`).
+
+The build therefore:
+1. compiles the QCPU side for the target whose data model is closest to the host's (AArch64 macOS for
+   a macOS host, AArch64 Linux elsewhere) and adds flags that remove differences where a flag exists
+   (`-fsigned-char` / `-funsigned-char`);
+2. compares the remaining **data-model facts** of the two compilers with a probe: size, alignment and
+   signedness of every integer type, `char`, `wchar_t`, `size_t`, pointers, `enum`, and the layout of every
+   struct, union and bit-field type that a `__qcpu__` function uses;
+3. enables E2 and E3 only for functions whose facts all agree. For the others, E1 is required, and the
+   build lists the differing facts ("`f`: `sizeof(long)` is 4 on the host, 8 on the QCPU target").
+
+Undefined behaviour stays outside the contract: where the C standard leaves a result undefined, the
+native fallback and the QCPU may differ, and E1 reports the difference rather than choosing one. The
+portability test suite includes `sizeof(long)`, a `char` comparison (`(char)200 < 0`) and a struct
+layout case, built for every host system.
+
+#### 5.6.2 Buffers under verification
+
+E1 runs the function twice, natively and on the QCPU, and must not let either run see the other's
+writes. For `void increment(int *QCPU_INOUT(1) p)`:
+1. the wrapper copies the caller's input and in/out buffers into **two independent snapshots**, one per
+   execution; both start from the caller's original values;
+2. each execution reads and writes only its own snapshot;
+3. the results are compared: return values and every output and in/out buffer;
+4. on success, the selected outputs are copied back to the caller's buffers **exactly once**;
+5. on failure, the caller's buffers are left **untouched**, whatever `QCPU_ON_FAIL` says about the
+   return value (with `QCPU_ON_FAIL=native`, the native snapshot is copied back, once).
+
+Without E1 the same rules apply to the single execution: it works on a snapshot, and the caller's
+buffers change only when the call succeeds.
+
+**Aliasing.** Two buffer parameters of one call may overlap only if they are the same buffer with the same
+length; this aliasing is then preserved inside each snapshot (one copy, referenced by both parameters).
+Any other overlap is rejected before the call with `QCPU_BAD_ARGS`.
 
 ### 5.7 Call status
 
@@ -362,17 +413,20 @@ Every call sets a status that the program can read with `qcpu_last_call(&info)`:
 
 | status | meaning | the call |
 |---|---|---|
-| `QCPU_OK` | exact result (E1, E2 or E3) | returns the value |
+| `QCPU_OK` | exact result (E1, or E2/E3 with agreeing data models) | returns the value |
 | `QCPU_MISMATCH` | E1 found a difference | fails |
 | `QCPU_INEXACT` | E2 found a value outside the reduced-width model | fails |
 | `QCPU_INCOMPLETE` | a guard flag was set (loop bound, table range) or the cycle limit was reached | fails |
 | `QCPU_TIE`, `QCPU_INSUFFICIENT` | a hardware call without enough evidence (section 5.8) | fails |
-| `QCPU_PROBABLE` | hardware result that meets the evidence thresholds, without E1 (section 5.8) | returns the value |
+| `QCPU_UNVERIFIED` | `QCPU_EXACT=1` and no guarantee applies, for example a hardware result with `QCPU_VERIFY=0` | fails |
+| `QCPU_BAD_ARGS` | an argument outside its `QCPU_BITS`, or overlapping buffers | fails |
+| `QCPU_PROBABLE` | only with `QCPU_EXACT=0`: a hardware result that meets the evidence thresholds, without E1 | returns the value |
 | `QCPU_UNCHECKED` | `QCPU_EXACT=0` and no guarantee applied | returns the value |
 
 "Fails" means: with `QCPU_ON_FAIL=abort` (default) the program stops with a message; with `native` the
 native fallback's result is returned and the status is kept; with `status` the call returns 0 and the
-program decides from `qcpu_last_call`.
+program decides from `qcpu_last_call`. In every case a failed call leaves the caller's buffers untouched,
+except that `native` copies back the native result (section 5.6.2).
 
 ### 5.8 Hardware calls: the result contract
 
@@ -395,9 +449,10 @@ The runtime turns the counts into a result. With `a` accepted shots, `c1` the co
 output string and `c2` of the second:
 - `QCPU_INSUFFICIENT` if `a < QCPU_MIN_ACCEPTED` (default 8);
 - `QCPU_TIE` if `c1 − c2 < QCPU_MIN_MARGIN` (default 3) or `c1 / a < QCPU_MIN_SHARE` (default 0.6);
-- otherwise the most frequent string. Its status is `QCPU_OK` if E1 confirms it. Without E1 it is
-  `QCPU_PROBABLE`: E3 proves that the circuit is right, but not that the device ran it correctly, and a
-  vote is statistical evidence, not proof.
+- otherwise the most frequent string. With E1 confirming it, the status is `QCPU_OK`; with E1 finding a
+  difference, `QCPU_MISMATCH`. Without E1, the status is `QCPU_UNVERIFIED` (a failure) under
+  `QCPU_EXACT=1`, and `QCPU_PROBABLE` only under `QCPU_EXACT=0`: E3 proves that the circuit is right, not
+  that the device ran it correctly, and a vote is statistical evidence, not proof.
 
 `qcpu_last_call` exposes the full counts, so a 16-to-0 vote and a 2-to-1 vote after 13 discarded shots
 are distinguishable. The defaults are starting values, to be calibrated per device; the call log records
@@ -462,7 +517,8 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 | circuit too large for a driver | run | refused with the sizes |
 | mode not embedded | run | error naming the build option |
 | function outside compiled mode's support | build | message; only the interpreted circuit is embedded |
-| argument wider than its `QCPU_BITS` | run, before the circuit | error naming the argument |
+| argument wider than its `QCPU_BITS`, or overlapping buffers | run, before the circuit | `QCPU_BAD_ARGS` |
+| host and target data models differ for a function | build | E1 required for it; the differing facts listed |
 | work qubit or flag measured as 1 on hardware | run | that shot is discarded and counted |
 | too little evidence on hardware | run | `QCPU_INSUFFICIENT` / `QCPU_TIE`, with the counts |
 
@@ -490,7 +546,11 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
    circuit; bound classification (exhaustive / proven by SAT / flagged); E3; `QCPU_MODE=compiled|auto`.
 5. CMake module `QCPU.cmake`.
 6. Example: interactive Code Breaker (`examples/codebreaker/`) in both modes, tests on all three host
-   systems, including the `(x << 8) >> 8` case for every backend.
+   systems. Regression cases for every backend: `(x << 8) >> 8`, written so that the truncating
+   intermediate really exists in the machine code (the test checks the emitted instructions: an
+   optimizing compiler may turn the expression into a mask, `and w0, w0, #0xffffff`, and remove the
+   intermediate value); `sizeof(long)`, `(char)200 < 0` and a struct layout across host systems;
+   `increment(int *QCPU_INOUT(1) p)` under E1, and a failed call leaving its buffers untouched.
 7. Driver interface with counts; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits
    that fit, with the result contract of section 5.8.
 8. Configuration file and per-function settings; call log.
