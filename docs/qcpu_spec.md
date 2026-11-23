@@ -176,10 +176,78 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 | mode | circuit | size | status |
 |---|---|---|---|
 | `interpreted` | the quantum CPU executes the function's machine code | large: every instruction is a machine cycle | *exists* |
-| `compiled` | the function compiled directly to reversible logic (qoracle) | small: e.g. 25 qubits instead of 1,242 | planned; arm64, loop-bounded functions only |
+| `compiled` | the function compiled directly to reversible logic (qoracle) | small: e.g. 25 qubits instead of 1,242 | planned; section 5.5 |
+| `auto` | `compiled` where the function has a compiled circuit that fits the backend, else `interpreted` | — | planned |
 
 A mode can only be chosen at run time if it was embedded at build time; otherwise the call fails
 with a clear message.
+
+### 5.5 Compiled mode: a small dedicated circuit per function (qoracle)
+
+The interpreter runs any supported machine code, but every executed instruction costs a full machine
+cycle, so its circuits are far too large for any existing quantum computer. Compiled mode builds,
+for each `__qcpu__` function, a circuit that computes only that function: no program counter, no
+fetch, no decode. This is what qoracle (`github.com/quantag/qoracle`) does today for single
+functions; compiled mode embeds its output.
+
+**How the circuit is made** (qoracle, at build time):
+1. compile the function for AArch64;
+2. execute the machine code symbolically on all paths: every register bit becomes a Boolean formula of
+   the input bits, branches are merged, loops are unrolled (the bound is measured by running the code);
+3. reduce the formulas to an AND/XOR network (hash-consing, constant folding);
+4. map it to gates: a Toffoli per AND, CNOTs per XOR, Bennett copy-out and uncompute, so that all work
+   qubits return to 0;
+5. verify the circuit against the real machine code in a CPU emulator: on all inputs up to 16 input
+   bits, otherwise on edge cases and 4,096 random inputs. A function that fails is not embedded.
+
+**Input and output widths.** A compiled circuit needs to know how many bits each argument really
+uses; the fewer, the smaller the circuit. Annotations give them:
+
+```c
+__qcpu__ int QCPU_RESULT_BITS(6) score(int QCPU_BITS(8) guess);
+```
+
+Without annotations the build uses the register width W, and reports the circuit size so that the
+annotation can be tightened. Values outside the declared width are an error at the call (the wrapper
+checks them before running the circuit).
+
+**What compiled mode supports** (the current qoracle front end):
+
+| supported | not yet |
+|---|---|
+| integer arithmetic incl. multiply, divide, shifts | writing memory: local arrays, pointers, the stack (`-O0`) |
+| branches, conditional selects, bounded loops | calls that the compiler does not inline |
+| read-only tables (`static const` arrays), switch tables | floating point |
+| AArch64 | RISC-V, x86-64 |
+
+A function outside this set keeps only its interpreted circuit, and the build says why, for example
+"`score`: local array `cg` is written (stack) — rewrite without arrays or use interpreted mode".
+
+**Measured sizes** (qoracle, clang -O1, verified on all inputs):
+
+| function | inputs | qubits | Toffoli | all gates | interpreted, for comparison |
+|---|---|---|---|---|---|
+| `is_root` (Grover predicate, phase oracle) | 4 bits | 25 | 28 | 67 | 1,242 qubits, 98,504 gates |
+| Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | hundreds of thousands of qubits |
+| Code Breaker `score` with colour-count arrays | 8 bits | — | — | — | rejected: writes local arrays |
+
+**Running a compiled circuit on hardware.** For an ordinary call the input is a basis state, so the
+driver job is: X gates to set the input bits, the compiled circuit, measurement of the result qubits.
+Two properties help on noisy devices:
+- the answer is deterministic, so a few shots and a majority vote recover it;
+- every work qubit must end in 0; the driver also measures them, and any shot with a work qubit at 1 is
+  known to be wrong and discarded (free error detection).
+
+**What fits today.** Small predicates and arithmetic on a few bits — `is_root`: 25 qubits and
+28 Toffoli gates — are within reach of current devices. Code Breaker's `score` (312 qubits,
+358 Toffoli gates, depth 165) is beyond what current noisy devices run reliably; qubit reuse and
+measurement-based uncomputation (qoracle roadmap) are the way to bring such functions closer. The
+runtime decides per call with the driver's `capacity` (section 5.4): `QCPU_MODE=auto` takes the
+compiled circuit when it fits the device, and otherwise the simulator or the interpreter.
+
+**Quantum use.** The same compiled circuit, given an input in superposition, is an oracle: as a phase
+oracle in Grover search (find the secret code from `score`), or a compute oracle in period finding.
+That is outside ordinary calls (section 11), but the circuit is the same.
 
 ### 5.4 Driver interface
 
@@ -213,7 +281,8 @@ enough for the device).
 | setting | values | default |
 |---|---|---|
 | `QCPU_BACKEND` | `sim`, `native`, driver name | `sim` |
-| `QCPU_MODE` | `interpreted`, `compiled` | first embedded mode |
+| `QCPU_MODE` | `interpreted`, `compiled`, `auto` | first embedded mode |
+| `QCPU_SHOTS` | shots per call on a hardware driver (majority vote) | `16` |
 | `QCPU_VERIFY` | `0`, `1` | `0` |
 | `QCPU_STRICT` | `0`, `1`: stop on a non-exact or mismatching call | `0` |
 | `QCPU_MAX_STEPS` | cycles per call | build value |
@@ -257,6 +326,9 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
 | cycle limit reached | run | error; `QCPU_MAX_STEPS` raises it |
 | circuit too large for a driver | run | refused with the sizes |
 | mode not embedded | run | error naming the build option |
+| function outside compiled mode's support | build | message; only the interpreted circuit is embedded |
+| argument wider than its `QCPU_BITS` | run, before the circuit | error naming the argument |
+| work qubit measured as 1 on hardware | run | that shot is discarded; error if no shot survives |
 
 ## 9. Portability
 
@@ -268,7 +340,7 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
 
 | QCPU ISA | interpreted | compiled |
 |---|---|---|
-| arm64 | *exists* (library build on `qpu-dll`) | planned (qoracle) |
+| arm64 | *exists* (library build on `qpu-dll`) | planned; qoracle *exists* as a separate tool |
 | riscv64, riscv32 | *exists* (library build on `qpu-dll`) | — |
 | x86_64 | *exists* (library build on `qpu-dll`) | — |
 
@@ -276,11 +348,14 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
 
 1. Update `qpu-dll` to current `main`; macOS `.dylib`; rename `QPU_*` to `QCPU_*` with aliases.
 2. `qcpu.h`, `__qcpu__`, the `qcpucc` driver: single-file split, weak fallbacks, call-graph pruning.
-3. CMake module `QCPU.cmake`.
-4. Configuration file and per-function settings; call log.
-5. Example: interactive Code Breaker (`examples/codebreaker/`), tests on all three host systems.
-6. Driver interface; `file` driver.
-7. Compiled mode through qoracle; `aer` and `ibm` drivers for circuits that fit.
+3. Compiled mode: `QCPU_BITS` / `QCPU_RESULT_BITS`, qoracle at build time, the compiled circuit run
+   by the same engine, `QCPU_MODE=compiled|auto`.
+4. CMake module `QCPU.cmake`.
+5. Example: interactive Code Breaker (`examples/codebreaker/`) in both modes, tests on all three host
+   systems.
+6. Driver interface; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits that fit,
+   with shots, majority vote and work-qubit checks.
+7. Configuration file and per-function settings; call log.
 
 ## 11. Open questions
 
@@ -291,3 +366,6 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
   a quantum algorithm — an API beyond ordinary calls.
 - Asynchronous calls for slow drivers (`qcpu_call_async`, futures).
 - Whether `compiled` mode should become the default when it is available.
+- Writing memory in compiled mode (local arrays) — a quantum RAM inside the compiled circuit, planned
+  in qoracle.
+- Making qoracle a library dependency of cpu-qpu, or calling it as a separate tool at build time.
