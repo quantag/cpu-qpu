@@ -55,6 +55,7 @@ sections = [
 if not quick:
     sections += [("C programs, clang", [sys.executable, "-m", "tests.test_c_programs", "clang"]),
                  ("C programs, gcc", [sys.executable, "-m", "tests.test_c_programs", "gcc"]),
+                 ("macOS arm64 executables", [sys.executable, "-m", "tests.test_macos"]),
                  ("C programs, clang, RISC-V RV64IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv64"]),
                  ("C programs, clang, RISC-V RV32IM", [sys.executable, "-m", "tests.test_c_programs", "clang", "riscv32"]),
                  ("C programs, clang, x86-64", [sys.executable, "-m", "tests.test_c_programs", "clang", "x86_64"]),

@@ -187,7 +187,7 @@ def run_reference(words, W, entry=0, args=(), mem_words=0, mem_init=(), max_step
             error = f"PC left program memory (0x{pc:x})"
             break
         trace.append(idx)
-        if idx == halt_idx:
+        if idx == halt_idx or (0 <= idx < slots and words[idx] == HLT_WORD):   # HLT (also exit())
             halted = True
             snap()
             break

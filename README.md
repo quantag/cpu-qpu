@@ -565,6 +565,27 @@ clang -O1 -fno-stack-protector -Iinclude -c examples/hello.c -o hello.o
 python3 arm_qpu.py hello.o
 ```
 
+### Running a program built on your Mac
+
+A complete macOS executable, as Xcode's clang builds it on an M-series MacBook, runs unchanged:
+
+```bash
+clang -O1 examples/hello.c -o hello     # an ordinary arm64 macOS program; ./hello runs it on the Mac
+python3 cpu_qpu.py hello                # the same file on the quantum machine
+```
+
+The loader takes the executable apart the way `dyld` would put it together: it finds `main`, turns
+calls through the `__stubs` table into calls to the machine's own `printf`/`puts`/`putchar`, makes
+`exit()`, `abort()` and a failed stack check halt the machine (the exit status is kept), points the
+stack-protector guard at a zero word, and rebuilds the PC-relative references and the data pointers
+(classic dyld info or chained fixups) for the machine's address space. `-O0` to `-O2` work; programs
+must stay within the supported instruction classes and the W-bit model (see below). Two common limits
+for real programs: byte and halfword loads and stores (string handling, `char` arrays) are not yet
+implemented on AArch64, and calls to library functions other than the ones above are reported as
+unresolved. `python3 -m tests.test_macos` builds such executables off a Mac (`ld64.lld` and a stub
+`libSystem`, both dyld-info and chained-fixup formats) and checks that each run prints the same text and
+returns the same exit status as the program compiled natively.
+
 ## config.json
 
 ```json
@@ -675,6 +696,7 @@ python3 -m tests.test_c_programs clang riscv64   # the same C cases compiled for
 python3 -m tests.test_riscv 150 7 8,12,16        # RISC-V: decoder, traps, boundary cases, random programs
 python3 -m tests.test_c_programs clang x86_64    # the same C cases compiled for x86-64 (also: gcc x86_64)
 python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs instruction model, traps, boundary cases, random programs
+python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O), dyld info and chained fixups
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
 python3 -m tests.test_edges 8,12,16      # boundary cases: extensions, flags, shifts, W/X forms, memory, mul/div

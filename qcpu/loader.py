@@ -60,6 +60,15 @@ def _get(code, off):
     return int.from_bytes(code[off:off + 4], "little")
 
 
+def _sext(v, bits):
+    return v - (1 << bits) if v >> (bits - 1) & 1 else v
+
+
+def _xreg(name):
+    """x5 / w5 -> x5; other registers unchanged."""
+    return "x" + name[1:] if name[:1] in "wx" and name[1:].isdigit() else name
+
+
 class ObjectImage:
     """Sections, symbols and relocations of one object file, before layout."""
 
@@ -76,6 +85,7 @@ class ObjectImage:
         self.relocs = []           # (code_off, kind, target, addend)   target: ("sym", name) | ("data", key, off)
         self.data_relocs = []      # (key, off, target, addend) for ABS64 pointers in data
         self.apple = False
+        self.adrp_groups = []      # (adrp offset, user offset): must stay on one page after layout
         if magic == b"\x7fELF":
             self._elf()
         elif magic in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
@@ -164,6 +174,8 @@ class ObjectImage:
         if b.header.cpu_type != lief.MachO.Header.CPU_TYPE.ARM64:
             raise LinkError("not an arm64 Mach-O file")
         self.apple = True
+        if b.header.file_type == lief.MachO.Header.FILE_TYPE.EXECUTE:
+            return self._macho_exe(b)
         place = []        # (va_lo, va_hi, kind, where)
         for s in b.sections:
             if s.size == 0 or s.segment_name == "__LD" or s.name in ("__compact_unwind", "__eh_frame"):
@@ -220,6 +232,200 @@ class ObjectImage:
                     self.data_relocs.append((where, a, t, tgt, pending_addend))
                 pending_addend = 0
 
+    # ---------------------------------------------------------- Mach-O executable
+    def _macho_exe(self, b):
+        """A linked macOS arm64 executable (as built on an Apple Silicon Mac).
+
+        A linked file has no relocations left, so they are reconstructed: PC-relative references from the
+        code to data (adrp + add/ldr/str with :lo12:, and adr, which the linker makes from adrp + add) become
+        PAGE21/PAGEOFF12 relocations, calls into the __stubs section become calls to the imported function
+        (printf, puts, putchar: the output stub; exit: halt), and the pointers dyld would rebase in data
+        (rebase opcodes or chained fixups) become pointer relocations. Then the program is linked for the
+        machine's address space like an object file."""
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        md.detail = True
+        secs = {(s.segment_name, s.name): s for s in b.sections}
+        text = secs.get(("__TEXT", "__text"))
+        if text is None:
+            raise LinkError("Mach-O executable without a __TEXT,__text section")
+        t0 = text.virtual_address
+        self.code = bytearray(text.content)
+        data_names = ("__cstring", "__const", "__data", "__bss", "__common", "__got", "__literal4", "__literal8",
+                      "__literal16")
+        place = [(t0, t0 + text.size, "code", 0)]
+        for s in b.sections:
+            if s.segment_name == "__TEXT" and s.name != "__cstring" and s.name != "__const" and not s.name.startswith("__literal"):
+                continue
+            if s.name not in data_names or s.size == 0:
+                continue
+            key = s.segment_name + "," + s.name
+            content = bytes(s.content) if s.name not in ("__bss", "__common") else bytes(s.size)
+            self.data_secs.append((key, content, max(4, 1 << s.alignment)))
+            place.append((s.virtual_address, s.virtual_address + s.size, "data", key))
+
+        def target(va):
+            for inside in (True, False):           # a section containing va; else one ending at va
+                for lo, hi, kind, where in place:
+                    if (lo <= va < hi) if inside else (va == hi and kind == "data"):
+                        return ("code", va - lo) if kind == "code" else ("data", where, va - lo)
+            return None
+        # imported functions: GOT / lazy pointer slot -> name, then stub address -> name
+        slot = {x.address: (x.symbol.name[1:] if x.symbol.name.startswith("_") else x.symbol.name)
+                for x in b.bindings if x.has_symbol}
+        stubs = {}
+        st = secs.get(("__TEXT", "__stubs"))
+        if st is not None:
+            raw = bytes(st.content)
+            size = 12
+            for o in range(0, len(raw) - size + 1, size):
+                w0, w1 = (int.from_bytes(raw[o + 4 * k:o + 4 * k + 4], "little") for k in (0, 1))
+                if (w0 & 0x9F000000) != 0x90000000:
+                    continue
+                page = ((st.virtual_address + o) & ~0xFFF) + (_sext(((w0 >> 3) & 0x1FFFFC) | ((w0 >> 29) & 3), 21) << 12)
+                off = ((w1 >> 10) & 0xFFF) << ((w1 >> 30) & 3)
+                stubs[st.virtual_address + o] = slot.get(page + off, "?")
+        # symbols
+        for s in b.symbols:
+            if (s.raw_type & 0x0E) != 0x0E or not s.name:
+                continue
+            loc = target(s.value)
+            if not loc:
+                continue
+            name = s.name[1:] if s.name.startswith("_") else s.name
+            if loc[0] == "code":
+                self.syms[name] = loc
+                self.funcs[name] = loc[1]
+            else:
+                self.syms[name] = loc
+        if b.has_main_command and "main" not in self.funcs:
+            off = b.main_command.entrypoint - (t0 - b.imagebase if hasattr(b, "imagebase") else 0)
+            loc = target(b.imagebase + b.main_command.entrypoint) if hasattr(b, "imagebase") else None
+            if loc and loc[0] == "code":
+                self.funcs["main"] = loc[1]
+                self.syms["main"] = loc
+        # code: calls into __stubs, and PC-relative references
+        code = bytes(self.code)
+        insns = {}
+        for k in range(0, len(code), 4):
+            got = list(md.disasm(code[k:k + 4], t0 + k))
+            insns[k] = got[0] if got else None
+        word = lambda k: int.from_bytes(code[k:k + 4], "little")
+
+        def writes(ins, reg):
+            if ins is None:
+                return False
+            try:
+                _, wr = ins.regs_access()
+            except Exception:
+                return True
+            return any(_xreg(ins.reg_name(r)) == reg for r in wr)
+
+        def reads_base(ins, reg):
+            return ins is not None and any(op.type == 3 and op.mem.base and _xreg(ins.reg_name(op.mem.base)) == reg
+                                           for op in ins.operands)
+        bounds = sorted(set(self.funcs.values()) | {len(code)})
+        fn_end = lambda k: next(x for x in bounds if x > k)
+        NOP = 0xD503201F
+        for k in range(0, len(code), 4):
+            w = word(k)
+            P = t0 + k
+            if (w & 0x7C000000) == 0x14000000:                      # b / bl
+                T = P + (_sext(w & 0x3FFFFFF, 26) << 2)
+                if T in stubs:
+                    self.relocs.append((k, "CALL26", ("sym", stubs[T]), 0))
+                elif not (t0 <= T < t0 + len(code)):
+                    raise LinkError(f"branch at 0x{P:x} leaves the code section (0x{T:x})")
+                continue
+            if (w & 0xBF000000) in (0x18000000, 0x98000000) and k >= 4 and word(k - 4) == NOP:
+                # ldr Xt/Wt/ldrsw, literal: the linker's relaxation of adrp + ldr; undo it
+                S = P + (_sext((w >> 5) & 0x7FFFF, 19) << 2)
+                tgt = target(S)
+                if tgt is None:
+                    raise LinkError(f"literal load at 0x{P:x} refers outside the program's sections")
+                rt = w & 31
+                if (w & 0xFF000000) == 0x58000000:
+                    ld = 0xF9400000                                     # ldr Xt, [Xt, #lo12]
+                elif (w & 0xFF000000) == 0x18000000:
+                    ld = 0xB9400000                                     # ldr Wt, [Xt, #lo12]
+                else:
+                    ld = 0xB9800000                                     # ldrsw Xt, [Xt, #lo12]
+                self.code[k - 4:k] = (0x90000000 | rt).to_bytes(4, "little")
+                self.code[k:k + 4] = (ld | (rt << 5) | rt).to_bytes(4, "little")
+                self.relocs.append((k - 4, "PAGE21", tgt, 0))
+                self.relocs.append((k, "PAGEOFF12", tgt, 0))
+                continue
+            is_adrp = (w & 0x9F000000) == 0x90000000
+            is_adr = (w & 0x9F000000) == 0x10000000
+            if not (is_adr or is_adrp):
+                continue
+            imm = _sext(((w >> 3) & 0x1FFFFC) | ((w >> 29) & 3), 21)
+            rd = w & 31
+            if is_adr:
+                S = P + imm
+                tgt = target(S)
+                if tgt is None:
+                    raise LinkError(f"adr at 0x{P:x} refers to 0x{S:x}, outside the program's sections")
+                if k + 4 < len(code) and word(k + 4) == NOP:            # adrp + add relaxed by the linker: undo
+                    self.code[k + 4:k + 8] = (0x91000000 | (rd << 5) | rd).to_bytes(4, "little")
+                    self.code[k:k + 4] = (0x90000000 | rd).to_bytes(4, "little")
+                    self.relocs.append((k, "PAGE21", tgt, 0))
+                    self.relocs.append((k + 4, "PAGEOFF12", tgt, 0))
+                else:
+                    self.relocs.append((k, "ADR21", tgt, 0))
+                continue
+            page = (P & ~0xFFF) + (imm << 12)
+            reg = "x%d" % rd
+            users = []
+            for j in range(k + 4, fn_end(k), 4):
+                ins = insns[j]
+                uw = word(j)
+                if (uw & 0x7FC00000) == 0x11000000 and ((uw >> 5) & 31) == rd:          # add Rd, Rn, #lo12
+                    users.append((j, (uw >> 10) & 0xFFF))
+                elif (uw & 0x3B000000) == 0x39000000 and ((uw >> 5) & 31) == rd:        # ldr/str [Rn, #lo12]
+                    scale = (uw >> 30) & 3
+                    if (uw & 0x04800000) == 0x04800000:
+                        scale = 4
+                    users.append((j, ((uw >> 10) & 0xFFF) << scale))
+                elif reads_base(ins, reg):
+                    raise LinkError(f"adrp at 0x{P:x}: the page address is used at 0x{t0 + j:x} in a form the "
+                                    "loader cannot relocate")
+                if writes(ins, reg):
+                    break
+            if not users:
+                raise LinkError(f"adrp at 0x{P:x}: no use of the page address found")
+            tg = [target(page + lo) for _, lo in users]
+            if any(t is None for t in tg):
+                raise LinkError(f"adrp at 0x{P:x} refers outside the program's sections")
+            self.relocs.append((k, "PAGE21", tg[0], 0))
+            for (j, _), t in zip(users, tg):
+                self.relocs.append((j, "PAGEOFF12", t, 0))
+                self.adrp_groups.append((k, j))
+        # data imports: the stack-protector guard becomes a zero word in data memory
+        for va, name in slot.items():
+            loc = target(va)
+            if name == "__stack_chk_guard" and loc and loc[0] == "data":
+                if not any(k == "guard" for k, _, _ in self.data_secs):
+                    self.data_secs.append(("guard", bytes(8), 8))
+                self.data_relocs.append((loc[1], loc[2], "UNSIGNED", ("data", "guard", 0), 0))
+        # pointers in data that dyld would rebase
+        for r in b.relocations:
+            loc = target(r.address)
+            if not loc or loc[0] != "data":
+                continue
+            key, off = loc[1], loc[2]
+            if type(r).__name__ == "RelocationFixup":           # chained fixups: lief decodes the target
+                val = r.target
+            else:
+                content = next(c for kk, c, _ in self.data_secs if kk == key)
+                val = int.from_bytes(content[off:off + 8], "little")
+            dst = target(val)
+            if r.address in slot:
+                continue                                   # an import slot, not a pointer into the program
+            if dst is None:
+                raise LinkError(f"pointer at 0x{r.address:x} refers outside the program (0x{val:x})")
+            self.data_relocs.append((key, off, "UNSIGNED", dst, 0))
+
     # ---------------------------------------------------------------- link
     def link(self, entry=None, data_offset=0, log_capacity=0):
         """Place data sections at data_offset (bytes from DATA_BASE) and resolve relocations.
@@ -230,6 +436,12 @@ class ObjectImage:
         while len(code) % unit: code += b"\0"
         externs = sorted({t[1] for _, _, t, _ in self.relocs if t[0] == "sym" and t[1] not in self.syms})
         uses_output = any(e in OUTPUT_FUNCS for e in externs)
+        exit_at = None
+        HALTS = ("exit", "_exit", "abort", "__stack_chk_fail")
+        if any(e in HALTS for e in externs) and not x86 and not self.arch.startswith("riscv"):
+            exit_at = len(code)                         # exit(status), abort(), __stack_chk_fail(): halt
+            code += (0xD4400000).to_bytes(4, "little")  # (exit's status stays in w0)
+            externs = [e for e in externs if e not in HALTS]
         stub_base = None
         riscv = self.arch.startswith("riscv")
         if uses_output:
@@ -267,6 +479,8 @@ class ObjectImage:
                 if sy[0] == "code":
                     return CODE_BASE + sy[1] + addend
                 return DATA_BASE + place[sy[1]] + sy[2] + addend
+            if name in ("exit", "_exit", "abort", "__stack_chk_fail") and exit_at is not None:
+                return CODE_BASE + exit_at + addend
             if stub_base is not None and name in OUTPUT_FUNCS:
                 k = "printf@apple" if (self.apple and name == "printf") else name
                 return CODE_BASE + stub_base + (STUB_ENTRY_X86[k] if x86 else 4 * STUB_ENTRY[k]) + addend
@@ -292,6 +506,12 @@ class ObjectImage:
             w = _get(code, off)
             if t in ("CALL26", "JUMP26", "BRANCH26"):
                 _put(code, off, (w & 0xFC000000) | (((S - P) >> 2) & 0x3FFFFFF))
+            elif t == "ADR21":
+                d = S - P
+                if not -(1 << 20) <= d < (1 << 20):
+                    unresolved.append(f"code+{off}: adr out of range for the machine's layout")
+                    continue
+                _put(code, off, (w & 0x9F00001F) | ((d & 3) << 29) | (((d >> 2) & 0x7FFFF) << 5))
             elif t in ("ADR_PREL_PG_HI21", "PAGE21"):
                 imm = ((S & ~0xFFF) - (P & ~0xFFF)) >> 12
                 _put(code, off, (w & 0x9F00001F) | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5))
@@ -305,6 +525,11 @@ class ObjectImage:
                 _put(code, off, (w & ~(0xFFF << 10)) | ((lo & 0xFFF) << 10))
             else:
                 unresolved.append(f"code+{off}: {t} {tgt[1]}")
+        if self.adrp_groups:                     # reconstructed adrp users must share the adrp's page
+            S_of = {off: addr(tgt, addend) for off, t, tgt, addend in self.relocs if t in ("PAGE21", "PAGEOFF12")}
+            for k, j in self.adrp_groups:
+                if S_of.get(k) is not None and S_of.get(j) is not None and (S_of[k] >> 12) != (S_of[j] >> 12):
+                    unresolved.append(f"code+{j}: data referenced through one adrp lands on two pages")
         for key, off, t, tgt, addend in self.data_relocs:
             S = addr(tgt, addend)
             if S is None or t not in ("ABS64", "UNSIGNED", "64", "32"):
