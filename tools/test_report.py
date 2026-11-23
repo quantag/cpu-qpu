@@ -23,7 +23,7 @@ def ver(mod):
 
 
 commit = sh("git rev-parse HEAD")[1].strip()
-dirty = bool(sh("git status --porcelain -- qcpu arm_qpu.py cpu_qpu.py tests tools include")[1].strip())
+dirty = bool(sh("git status --porcelain -- qcpu arm_qpu.py cpu_qpu.py qcpucc.py qpu_dll.py runtime tests tools include")[1].strip())
 L = ["# Test results", "", f"Generated {time.strftime('%Y-%m-%d %H:%M %Z')} by `tools/test_report.py`.", "",
      f"- code: commit `{commit}`" + (" (with uncommitted changes)" if dirty else ""),
      f"- Python {platform.python_version()} on {platform.platform()}",
@@ -53,6 +53,8 @@ sections = [
      [sys.executable, "-m", "tests.test_x86", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
     ("QPU libraries: host program and generated shared library; C engine against the Python simulator",
      [sys.executable, "-m", "tests.test_dll", "arm64" if quick else "arm64,riscv64,riscv32,x86_64"]),
+    ("__qcpu__ programs (qcpucc): Code Breaker, pruning, several files, exactness, data models",
+     [sys.executable, "-m", "tests.test_qcpucc"]),
 ]
 if not quick:
     sections += [("C programs, clang", [sys.executable, "-m", "tests.test_c_programs", "clang"]),

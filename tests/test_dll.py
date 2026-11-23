@@ -5,13 +5,18 @@ quantum machine inside a shared library; no Python at run time.
 
   1. examples/dll: the host program linked against the generated library prints exactly what the
      same program prints with mathlib.c compiled for the host, for QPU code in AArch64, RV64, RV32
-     and x86-64; no warning. The same with QPU_VERIFY=0 and with QPU_BACKEND=native.
+     and x86-64; no warning. The same with QCPU_BACKEND=native, with QCPU_VERIFY=0 QCPU_EXACT=0, and with
+     the older QPU_* names. QCPU_VERIFY=0 alone is refused (QCPU_UNVERIFIED, exit 70).
   2. Same circuit: the C engine's final state equals the Python simulator's (core.run_fast) on every
      qubit, for calls of every integer function with random arguments, on all four architectures.
-  3. A result or an argument outside the W-bit model: warning on stderr; QPU_STRICT=1: exit status 70;
-     a 16-bit build gives the exact result.
-  4. A function that does not return within QPU_MAX_STEPS cycles: message, exit status 70.
-  5. An instruction the machine does not implement: warning when building, exit status 70 when reached.
+  3. The call contract (docs/qcpu_spec.md 5.6-5.7): a result outside the W-bit model is a QCPU_MISMATCH
+     (exit 70); QCPU_ON_FAIL=native returns the host build's result; QCPU_ON_FAIL=status returns 0 and
+     the status; an argument outside the model whose result is still confirmed is QCPU_OK; a 16-bit
+     build gives the exact result.
+  4. A function that does not return within QCPU_MAX_STEPS cycles: QCPU_INCOMPLETE, exit status 70.
+  5. An instruction the machine does not implement: warning when building, QCPU_TRAP when reached.
+  5b. Buffers (5.6.2): an in/out buffer is incremented once, not twice; aliasing of the same buffer is
+     kept; overlapping buffers are QCPU_BAD_ARGS; a failed call leaves the caller's buffer untouched.
   6. Build errors: printf in the library, pointer without QPU_IN/OUT, struct parameter, double return,
      a declared function that is not defined.
   7. Windows: library and host program cross-compiled with MinGW. The DLL exports exactly the
@@ -94,11 +99,15 @@ def main():
             sh(TOOL + [os.path.join(EX, "mathlib.c"), "--header", os.path.join(EX, "mathlib.h"), "--arch", arch,
                        "-o", os.path.join(ad, "libmathlib_qpu.so")])
             exe = host(d, os.path.join(EX, "main.c"), ad, "mathlib_qpu", os.path.join(ad, "main"))
-            for env in ({}, {"QPU_VERIFY": "0"}, {"QPU_BACKEND": "native"}):
+            for env in ({}, {"QCPU_BACKEND": "native"}, {"QCPU_VERIFY": "0", "QCPU_EXACT": "0"},
+                        {"QPU_BACKEND": "qpu", "QPU_VERIFY": "1"}):
                 p = sh([exe], dict(os.environ, **env))
                 assert p.stdout == want and not p.stderr, f"{arch} {env}:\n{p.stdout}\n{p.stderr}"
+            p = sh([exe], dict(os.environ, QCPU_VERIFY="0"), check=False)
+            assert p.returncode == 70 and "QCPU_UNVERIFIED" in p.stderr, (p.returncode, p.stderr)
             print(f"1) {arch}: host program with mathlib on the QPU == with mathlib on the CPU "
-                  f"({len(want.splitlines())} lines); also with QPU_VERIFY=0 and QPU_BACKEND=native")
+                  f"({len(want.splitlines())} lines); also native, unchecked and with QPU_* names; "
+                  "QCPU_VERIFY=0 alone: QCPU_UNVERIFIED")
         for arch in archs:
             calls, nq, ng = same_circuit(arch, d, rng)
             print(f"2) {arch}: C engine == Python simulator on all {nq} qubits, {calls} calls ({ng} gates per cycle)")
@@ -133,25 +142,61 @@ def main():
         ex86 = host(d, os.path.join(d, "edge_main.c"), os.path.join(d, "x86"), "edge_qpu", os.path.join(d, "ex86"), (d,))
         p = sh([e12, "twice", "500"])
         assert p.stdout == "1000\n" and not p.stderr, (p.stdout, p.stderr)
-        p = sh([e12, "twice", "1500"])                   # 3000 does not fit 12 bits
-        assert "warning: result may be wrong" in p.stderr and "return value differs" in p.stderr, p.stderr
-        p = sh([e12, "twice", "5000"])                   # nor does the argument
-        assert "argument 1 = 5000 does not fit" in p.stderr, p.stderr
-        p = sh([e12, "twice", "1500"], dict(os.environ, QPU_STRICT="1"), check=False)
-        assert p.returncode == 70 and "not exact" in p.stderr, (p.returncode, p.stderr)
+        p = sh([e12, "twice", "1500"], check=False)      # 3000 does not fit 12 bits
+        assert p.returncode == 70 and "QCPU_MISMATCH" in p.stderr and "return value differs" in p.stderr, p.stderr
+        p = sh([e12, "twice", "1500"], dict(os.environ, QCPU_ON_FAIL="native"))
+        assert p.stdout == "3000\n" and "QCPU_MISMATCH" in p.stderr and "host build's result" in p.stderr, (p.stdout, p.stderr)
+        p = sh([e12, "twice", "1500"], dict(os.environ, QCPU_ON_FAIL="status", QCPU_QUIET="1"))
+        assert p.stdout == "0\n" and not p.stderr, (p.stdout, p.stderr)
+        p = sh([e12, "twice", "-1"])                     # in the model
+        assert p.stdout == "-2\n" and not p.stderr, (p.stdout, p.stderr)
         p = sh([e16, "twice", "1500"])
         assert p.stdout == "3000\n" and not p.stderr, (p.stdout, p.stderr)
-        print("3) outside the 12-bit model (result, argument): warning; QPU_STRICT=1: exit 70; 16-bit build: exact")
-        p = sh([e12, "spin", "1"], dict(os.environ, QPU_MAX_STEPS="3000"), check=False)
-        assert p.returncode == 70 and "did not return within 3000" in p.stderr, (p.returncode, p.stderr)
+        print("3) outside the 12-bit model: QCPU_MISMATCH (exit 70); ON_FAIL=native: host result; "
+              "ON_FAIL=status: 0; 16-bit build: exact")
+        p = sh([e12, "spin", "1"], dict(os.environ, QCPU_MAX_STEPS="3000"), check=False)
+        assert p.returncode == 70 and "QCPU_INCOMPLETE" in p.stderr and "3000" in p.stderr, (p.returncode, p.stderr)
         print("4) " + p.stderr.strip())
         assert "does not implement" in x86.stderr and "bswap" in x86.stderr, x86.stderr
         p = sh([ex86, "swap", "1"], check=False)
-        assert p.returncode == 70 and "trapped" in p.stderr, (p.returncode, p.stderr)
+        assert p.returncode == 70 and "QCPU_TRAP" in p.stderr, (p.returncode, p.stderr)
         msg = p.stderr.strip()
         p = sh([ex86, "twice", "21"])
         assert p.stdout == "42\n" and not p.stderr
         print("5) bswap on x86-64: warning when building; the call: " + msg + "; other functions work")
+
+        # 5b. buffers under verification
+        bh, bs, bm = (os.path.join(d, n) for n in ("buf.h", "buf.c", "buf_main.c"))
+        open(bh, "w").write("#include <qcpu.h>\nvoid increment(int *QCPU_INOUT(1) p);\n"
+                            "int add_to(int *QCPU_INOUT(n) dst, const int *QCPU_IN(n) src, int n);\n"
+                            "int big(int *QCPU_INOUT(1) p);\n")
+        open(bs, "w").write("#include \"buf.h\"\nvoid increment(int *p) { *p += 1; }\n"
+                            "int add_to(int *dst, const int *src, int n) { int s = 0; for (int i = 0; i < n; i++) { dst[i] += src[i]; s += dst[i]; } return s; }\n"
+                            "int big(int *p) { *p = *p * 64; return *p; }\n")
+        open(bm, "w").write(textwrap.dedent("""\
+            #include <stdio.h>
+            #include "buf.h"
+            int main(void) {
+                qcpu_call_info info;
+                int x = 41; increment(&x); printf("increment %d %s\\n", x, qcpu_status_name(qcpu_last_call(&info)));
+                int v[3] = {1, 2, 3};
+                int s = add_to(v, v, 3);                 /* the same buffer twice: aliasing kept */
+                printf("alias %d %d %d %d\\n", s, v[0], v[1], v[2]);
+                s = add_to(v, v + 1, 2);                 /* overlapping, not identical */
+                printf("overlap %d %s %d %d %d\\n", s, qcpu_status_name(qcpu_last_call(&info)), v[0], v[1], v[2]);
+                int y = 1000; s = big(&y);               /* 64000 does not fit 16 bits */
+                printf("big %d %s %d\\n", s, qcpu_status_name(qcpu_last_call(&info)), y);
+                return 0;
+            }
+            """))
+        sh(TOOL + [bs, "--header", bh, "-o", os.path.join(d, "bufl", "libbuf_qpu.so")])
+        eb = host(d, bm, os.path.join(d, "bufl"), "buf_qpu", os.path.join(d, "ebuf"), (d,))
+        p = sh([eb], dict(os.environ, QCPU_ON_FAIL="status", QCPU_QUIET="1"))
+        want_b = ("increment 42 QCPU_OK\nalias 12 2 4 6\noverlap 0 QCPU_BAD_ARGS 2 4 6\n"
+                  "big 0 QCPU_MISMATCH 1000\n")
+        assert p.stdout == want_b, p.stdout + p.stderr
+        print("5b) buffers: in/out incremented once; aliasing kept; overlap QCPU_BAD_ARGS; a failed call "
+              "leaves the buffer untouched")
 
         # 6. build errors
         for decl, body, msg in (("int f(int *p);", "int f(int *p) { return *p; }", "needs QPU_IN"),
@@ -180,7 +225,7 @@ def main():
             table = exports.split("[Ordinal/Name Pointer] Table")[1].split("\n\n")[0]
             names = sorted(line.split("]")[1].strip() for line in table.strip().splitlines())
             fns = sorted(["gcd", "modexp", "is_prime", "sum", "sort", "squares"])
-            assert names == sorted(fns + ["qpu_last_status", "qpu_last_message"]), names
+            assert names == sorted(fns + ["qpu_last_status", "qpu_last_message", "qcpu_last_call", "qcpu_status_name"]), names
             block = sh(["x86_64-w64-mingw32-objdump", "-p", exe]).stdout.split("DLL Name: mathlib_qpu.dll")[1].split("DLL Name:")[0]
             assert all(f" {n}\n" in block for n in fns), block
             deps = sorted({l.split(":")[1].strip() for l in exports.splitlines() if "DLL Name:" in l})
@@ -195,7 +240,7 @@ def main():
                     p = subprocess.run([wine, exe], capture_output=True, text=True, env=wenv, timeout=600)
                     assert p.stdout.replace("\r\n", "\n") == want, p.stdout + p.stderr
                     ran = "main.exe under Wine prints the same as the CPU build"
-            print(f"7) Windows: DLL exports exactly the {len(fns)} functions (+2 status queries) and needs only "
+            print(f"7) Windows: DLL exports exactly the {len(fns)} functions (+4 status queries) and needs only "
                   f"{', '.join(deps)}; import library links; main.exe imports from mathlib_qpu.dll; {ran}")
     print("PASS")
 

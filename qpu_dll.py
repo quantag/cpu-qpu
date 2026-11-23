@@ -41,7 +41,7 @@ INT_TYPES = {"char", "signed char", "unsigned char", "short", "unsigned short", 
              "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
              "intptr_t", "size_t", "ssize_t"}
 BUF_TYPES = {"int", "unsigned", "unsigned int", "signed", "signed int", "int32_t", "uint32_t"}
-ANNOT = re.compile(r"\bQPU_(IN|OUT|INOUT)\s*\(")
+ANNOT = re.compile(r"\bQC?PU_(IN|OUT|INOUT)\s*\(")
 OPS = {"x": 0, "cx": 1, "ccx": 2, "cswap": 3}
 
 
@@ -126,12 +126,12 @@ class BuildError(Exception):
     pass
 
 
-def build_machine(obj_path, isa, funcs, W=16, mem_cells=512, stack_bytes=None):
+def build_machine(obj_path, isa, funcs, W=16, mem_cells=512, stack_bytes=None, roots=None):
     """Link the library and build the quantum machine for it. Returns a dict with the machine m, the
     initial state (qubits that are 1), the cycle template, the function entry PCs and the layout."""
     cfg = cpu_qpu.load_config(os.path.join(ROOT, "config.json"))
     try:
-        obj = ObjectImage(obj_path, isa.name)
+        obj = ObjectImage(obj_path, isa.name, roots)
         prog = obj.link(funcs[0][0])
     except LinkError as e:
         raise BuildError(str(e))
@@ -232,12 +232,12 @@ def library_source(libname, header, funcs, B, max_steps, native):
         if native:
             bidx = {i: k for k, (i, _) in enumerate(bufs)}
             args = ", ".join(f"qpu__native_copy(&qpu__c, {bidx[i]})" if p.direction else p.name for i, p in enumerate(params))
-            L.append("    if (qpu__c.verify || !qpu__c.qpu) {")
+            L.append("    if (qpu__c.need_native) {")
             if ret == "void":
                 L.append(f"        qpu__native_{name}({args});")
             else:
                 L.append(f"        {ret} qpu__r = qpu__native_{name}({args});")
-                L.append(f'        qpu__check(&qpu__c, !qpu__c.qpu || ({ret})qpu__c.ret == qpu__r, "return value");')
+                L.append(f'        qpu__check(&qpu__c, ({ret})qpu__c.ret == qpu__r, "return value");')
                 L.append("        qpu__n = (long long)qpu__r;")
             L.append("    }")
         L.append(f"    {'' if ret == 'void' else f'return ({ret})'}qpu__finish(&qpu__c, qpu__n);")

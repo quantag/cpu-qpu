@@ -1,7 +1,9 @@
 # qcpu: running marked functions on a quantum CPU — design specification
 
-Status: **draft for discussion**. Sections marked *(exists)* describe code that is already in this
-repository or on the `qpu-dll` branch; everything else is planned.
+Status: **draft, partly implemented**. Sections marked *(exists)* describe code that is in this
+repository (`qcpu.h`, `qcpucc.py`, `cmake/QCPU.cmake`, `runtime/qpu_engine.c`,
+`examples/codebreaker/`, tests `test_qcpucc` and `test_dll`); everything else is planned.
+Section 10 lists what is done.
 
 ## 1. Goal
 
@@ -67,12 +69,16 @@ Windows     riscv32                    driver: ibm, aer, file, ...
 __qcpu__ int score(int guess);
 ```
 
-- On the host build it expands to a weak definition with default visibility: the function's own body
-  becomes the native fallback (section 5).
-- On the QCPU build it expands to a section attribute (`.text.qcpu`) that lets the build find the
-  marked functions.
-- Without the build driver (a plain compiler), `qcpu.h` expands `__qcpu__` to nothing: the program is
-  an ordinary C program.
+- `qcpu.h` defines `__qcpu__` as empty on every build. A plain compiler sees an ordinary C program.
+- The build driver finds the marked definitions in the source text *(exists)*. On the host side it
+  renames each marked definition to `qpu__native_<name>` (and the calls between marked functions
+  inside them), so the function's own body becomes the native fallback; every other call to `<name>`
+  links to the generated wrapper. Renaming in the source, rather than weak symbols, is what makes
+  this reliable: a compiler may bind a call to a function defined in the same file directly, past
+  any weak symbol. `#line` directives keep the compiler's messages pointing at the user's file.
+- On the QCPU side the sources are compiled with `-ffunction-sections -fdata-sections`, and the
+  loader keeps only the sections reachable from the marked functions through relocations
+  *(exists)*.
 
 The keyword has no run-time meaning. It decides what the build generates.
 
@@ -113,8 +119,8 @@ game.c ──┬── QCPU side ── compile for the QCPU ISA ── keep mar
          │                ── generate machine configuration and circuit
          │                ── emit qcpu_gen.c: circuit as data + one wrapper per function
          │
-         └── host side ── compile natively: marked bodies become weak native fallbacks
-                          renamed copy: __qcpu_native_<name>, for verification
+         └── host side ── compile natively: marked bodies renamed to qpu__native_<name>,
+                          the native fallback and the E1 reference
 
 qcpu_gen.c + runtime (engine, backend loader) + host objects ── link ── game
 ```
@@ -127,13 +133,20 @@ The circuit generator is Python and runs at build time only. The built program c
 qcpucc [options] files... -o output
 
   --qcpu-isa arm64|riscv64|riscv32|x86_64   ISA of the QCPU side (default arm64)
-  --qcpu-width N                            register width, 8..16 (default 16)
+  --qcpu-width N                            register width, up to 16 (default 16); the code and
+                                            data memory set a minimum (12 with 512 ints)
   --qcpu-memory N                           data memory in ints, power of two (default 512)
   --qcpu-max-steps N                        default cycle limit per call (default 1000000)
-  --qcpu-modes interpreted[,compiled]       circuits to embed (default interpreted)
+  --qcpu-opt N                              optimization level of the QCPU side (default 1)
+  --qcpu-modes interpreted[,compiled]       circuits to embed (default interpreted; planned)
   --shared                                  build a library (.dylib/.so/.dll) instead of an executable
-  other options                             passed to the host compiler
+  --cc CC                                   host compiler (default cc)
+  --keep DIR                                keep the generated files
+  other options                             passed to the host compiler; -l -L -Wl, -framework
+                                            to the linker
 ```
+
+*(exists, except `--qcpu-modes`)*
 
 ### 4.3 CMake
 
@@ -145,6 +158,10 @@ add_qcpu_executable(game SOURCES game.c
 
 add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other programs to link
 ```
+
+*(exists, except `QCPU_MODES`)*: both functions run `qcpucc` through `Python3_EXECUTABLE`;
+`add_qcpu_library` gives an imported shared library target. Further arguments: `QCPU_MEMORY`,
+`QCPU_MAX_STEPS`, `OPTIONS`, `LIBS`.
 
 ### 4.4 What the executable contains
 
@@ -159,7 +176,7 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 
 ### 5.1 A call
 
-1. The call goes to the generated wrapper (the linker chose it over the weak native body).
+1. The call goes to the generated wrapper (the native body was renamed, section 3.1).
 2. The wrapper reads the configuration (section 6) and picks the backend.
 3. It builds the initial state: program bits, arguments in the argument registers, input buffers
    in data memory, return address at the halt slot.
@@ -171,8 +188,8 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 
 | backend | executes | status |
 |---|---|---|
-| `native` | the native fallback; no circuit | *exists* (`QPU_BACKEND=native` on `qpu-dll`) |
-| `sim` | the circuit, in the exact basis-state simulator built into the runtime | *exists* (C engine on `qpu-dll`) |
+| `native` | the native fallback; no circuit | *exists* (`QCPU_BACKEND=native`) |
+| `sim` | the circuit, in the exact basis-state simulator built into the runtime | *exists* (C engine) |
 | driver | the circuit, through a plug-in (`libqcpu_<name>.dylib/.so/.dll`) | planned |
 
 ### 5.3 Modes
@@ -338,7 +355,8 @@ section 5.5.1: with a `|−⟩` output for Grover search (find the secret code f
 the host, with the same output buffers, or it fails with a status. It never returns an approximate value
 silently. A reduced-width machine can be wrong even when the input and the result both fit: for
 `uint32_t f(uint32_t x) { return (x << 8) >> 8; }` at W = 8, `f(1)` is 1, but a machine that truncates
-after the left shift returns 0. Checking only inputs and results misses this, so every backend needs one
+after the left shift returns 0. (The test uses W = 12, the narrowest machine that holds its code and
+memory, and `f(16)`: 16 << 8 = 4096 needs 13 bits.) Checking only inputs and results misses this, so every backend needs one
 of the following guarantees for every call:
 
 | guarantee | how | available for |
@@ -417,6 +435,7 @@ Every call sets a status that the program can read with `qcpu_last_call(&info)`:
 | `QCPU_MISMATCH` | E1 found a difference | fails |
 | `QCPU_INEXACT` | E2 found a value outside the reduced-width model | fails |
 | `QCPU_INCOMPLETE` | a guard flag was set (loop bound, table range) or the cycle limit was reached | fails |
+| `QCPU_TRAP` | the machine reached an instruction it does not implement | fails |
 | `QCPU_TIE`, `QCPU_INSUFFICIENT` | a hardware call without enough evidence (section 5.8) | fails |
 | `QCPU_UNVERIFIED` | `QCPU_EXACT=1` and no guarantee applies, for example a hardware result with `QCPU_VERIFY=0` | fails |
 | `QCPU_BAD_ARGS` | an argument outside its `QCPU_BITS`, or overlapping buffers | fails |
@@ -526,26 +545,29 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 
 | host | build output | status |
 |---|---|---|
-| Linux | executable / `.so` | engine *exists*, driver planned |
-| Windows | executable / `.dll` (MinGW, MSVC, clang) | engine *exists*, driver planned |
-| macOS | executable / `.dylib` | planned |
+| Linux | executable / `.so` | `qcpucc` and engine *exist*, driver planned |
+| Windows | executable / `.dll` (MinGW, MSVC, clang) | engine *exists* (library build, cross-built and checked; not run here); `qcpucc` untested; driver planned |
+| macOS | executable / `.dylib` | `qcpucc` builds `-dynamiclib`; not yet run on a Mac; driver planned |
 
 | QCPU ISA | interpreted | compiled |
 |---|---|---|
-| arm64 | *exists* (library build on `qpu-dll`) | planned; qoracle *exists* as a separate tool |
-| riscv64, riscv32 | *exists* (library build on `qpu-dll`) | — |
-| x86_64 | *exists* (library build on `qpu-dll`) | — |
+| arm64 | *exists* (`qcpucc` default, library build) | planned; qoracle *exists* as a separate tool |
+| riscv64, riscv32 | *exists* (library build; `--qcpu-isa`) | — |
+| x86_64 | *exists* (library build; `--qcpu-isa`) | — |
 
 ## 10. Implementation plan
 
-1. Update `qpu-dll` to current `main`; macOS `.dylib`; rename `QPU_*` to `QCPU_*` with aliases.
-2. `qcpu.h`, `__qcpu__`, the `qcpucc` driver: single-file split, weak fallbacks, call-graph pruning.
-3. Exactness and status (sections 5.6, 5.7): E1 by default, E2 in the simulator (the reference's
-   model checks ported to the C engine), `qcpu_last_call`, `QCPU_ON_FAIL`.
+1. *Done.* `qpu-dll` merged with current `main`; `QPU_*` renamed to `QCPU_*` with aliases. (macOS
+   `.dylib`: built by `qcpucc --shared`, not yet run on a Mac.)
+2. *Done.* `qcpu.h`, `__qcpu__`, the `qcpucc` driver: source split with renamed native bodies,
+   call-graph pruning, stand-in C headers for the QCPU side, the data-model probe (5.6.1).
+3. *Done except E2.* E1 by default, `qcpu_last_call`, `QCPU_ON_FAIL`, all statuses, buffer snapshots
+   (5.6.2). E2 (the reference's model checks ported to the C engine) is still planned.
 4. Compiled mode: `QCPU_BITS` / `QCPU_RESULT_BITS` with proven result width; guard flags in the emitted
    circuit; bound classification (exhaustive / proven by SAT / flagged); E3; `QCPU_MODE=compiled|auto`.
-5. CMake module `QCPU.cmake`.
-6. Example: interactive Code Breaker (`examples/codebreaker/`) in both modes, tests on all three host
+5. *Done.* CMake module `QCPU.cmake`.
+6. *Done for interpreted mode on Linux* (`tests/test_qcpucc.py`). Example: interactive Code Breaker
+   (`examples/codebreaker/`) in both modes, tests on all three host
    systems. Regression cases for every backend: `(x << 8) >> 8`, written so that the truncating
    intermediate really exists in the machine code (the test checks the emitted instructions: an
    optimizing compiler may turn the expression into a mask, `and w0, w0, #0xffffff`, and remove the

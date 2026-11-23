@@ -12,16 +12,22 @@
  * Each call is also checked against the same functions compiled for the host (QPU_VERIFY=0 turns
  * this off): the return value and the output buffers must be equal.
  *
- * Environment (read at each call):
- *   QPU_VERIFY     1 (default): compare with the host build of the function | 0: do not
- *   QPU_STRICT     1: stop the program when a result is not exact (default: warn on stderr)
- *   QPU_QUIET      1: no warnings on stderr
- *   QPU_BACKEND    qpu (default): the quantum machine | native: only the host build (fast)
- *   QPU_MAX_STEPS  machine cycles before a call is stopped (default: given to qpu_dll.py) */
+ * The call contract is docs/qcpu_spec.md, sections 5.6, 5.6.2 and 5.7: a call returns the host
+ * build's exact result or fails with a status; with verification, the quantum CPU and the host build
+ * each work on their own copy of the buffers, and the caller's buffers change once, only on success.
+ *
+ * Environment (read at each call; the older QPU_* names are accepted too):
+ *   QCPU_BACKEND    sim (default; also "qpu"): the quantum CPU in the built-in simulator | native
+ *   QCPU_VERIFY     1 (default): compare every call with the host build (guarantee E1) | 0
+ *   QCPU_EXACT      1 (default): a call needs a guarantee, else QCPU_UNVERIFIED | 0: allow unchecked
+ *   QCPU_ON_FAIL    abort (default): stop with a message | native: use the host build's result | status
+ *   QCPU_MAX_STEPS  machine cycles before a call is stopped (default: given at build time)
+ *   QCPU_QUIET      1: no notes on stderr */
 #ifndef QPU_ENGINE_H
 #define QPU_ENGINE_H
 #include <stddef.h>
 #include <stdint.h>
+#include "qcpu.h"
 
 #ifdef _WIN32
 #  define QPU__EXPORT __declspec(dllexport)
@@ -74,6 +80,12 @@ typedef struct {                      /* one call, between qpu__start and qpu__f
     long cycles;
     int qpu, verify, inexact;
     char why[512];
+    int status;                       /* enum qcpu_status, set during the call */
+    int need_native;                  /* the wrapper must run the host build */
+    int on_fail;                      /* 0 abort, 1 native, 2 status */
+    int exact;                        /* QCPU_EXACT */
+    int alias[QPU__MAXBUF];           /* buffer b shares its data with buffer alias[b] (== b if not) */
+    long long cell_of[QPU__MAXBUF];   /* first data-memory cell of buffer b */
 } qpu__ctx;
 
 /* Run fn (entry PC) on the quantum machine. Holds a lock until qpu__finish. */

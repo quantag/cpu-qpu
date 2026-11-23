@@ -72,9 +72,12 @@ def _xreg(name):
 class ObjectImage:
     """Sections, symbols and relocations of one object file, before layout."""
 
-    def __init__(self, path, arch=None):
-        """arch: architecture of a raw binary; an ELF or Mach-O file carries its own."""
+    def __init__(self, path, arch=None, roots=None):
+        """arch: architecture of a raw binary; an ELF or Mach-O file carries its own.
+        roots: for an ELF object compiled with -ffunction-sections -fdata-sections, keep only the sections
+        reachable from these functions (the code of __qcpu__ functions without main(), I/O and the rest)."""
         self.path = path
+        self.roots = set(roots) if roots else None
         self.arch = arch or "arm64"
         data = open(path, "rb").read()
         magic = data[:4]
@@ -115,8 +118,9 @@ class ObjectImage:
         X = lief.ELF.Section.FLAGS.EXECINSTR
         A = lief.ELF.Section.FLAGS.ALLOC
         sec_place = {}   # section index -> ("code", base) | ("data", key)
+        keep = self._reachable(b, secs) if (self.roots and rel) else None
         for i, s in enumerate(secs):
-            if not s.has(A) or s.size == 0:
+            if not s.has(A) or s.size == 0 or (keep is not None and i not in keep):
                 continue
             if s.has(X):
                 while len(self.code) % 4 and self.arch != "x86_64": self.code += b"\0"
@@ -163,6 +167,36 @@ class ObjectImage:
                 self.relocs.append((where + r.address, t, tgt, r.addend))
             else:
                 self.data_relocs.append((where, r.address, t, tgt, r.addend))
+
+    def _reachable(self, b, secs):
+        """Section indices reachable from the root functions through relocations."""
+        index = {(s.name, s.offset): i for i, s in enumerate(secs)}
+        defined = {}
+        for sym in b.symbols:
+            if sym.name and sym.shndx and sym.shndx < len(secs):
+                defined.setdefault(sym.name, sym.shndx)
+        missing = sorted(r for r in self.roots if r not in defined)
+        if missing:
+            raise LinkError("function(s) not defined in the object: " + ", ".join(missing))
+        edges = {}
+        for r in b.relocations:
+            sec = getattr(r, "section", None)
+            if sec is None:
+                continue
+            src = index.get((sec.name, sec.offset))
+            sym = r.symbol
+            dst = sym.shndx if (sym.shndx and sym.shndx < len(secs)) else defined.get(sym.name)
+            if src is not None and dst:
+                edges.setdefault(src, set()).add(dst)
+        todo = [defined[r] for r in self.roots]
+        seen = set()
+        while todo:
+            i = todo.pop()
+            if i in seen:
+                continue
+            seen.add(i)
+            todo += edges.get(i, ())
+        return seen
 
     # ---------------------------------------------------------------- Mach-O
     def _macho(self):
