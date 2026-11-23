@@ -30,7 +30,7 @@ int main(void) {
 qcpucc game.c -o game                    # build once
 ./game                                   # default: simulated quantum CPU
 QCPU_BACKEND=native ./game               # same binary, plain CPU
-QCPU_VERIFY=1 ./game                     # both, every call compared
+QCPU_VERIFY=0 ./game                     # only where exactness is otherwise guaranteed
 ```
 
 ## 2. Terms
@@ -94,7 +94,10 @@ Checked by the build; each violation is an error naming the function and the rea
 5. **No state between calls**: global variables are read with their initial values; writes do not
    persist to the next call.
 6. **Machine limits**: the supported instruction subset of the QCPU ISA, and the reduced-width model
-   (register width W ≤ 16); a call whose values do not fit is reported (section 8).
+   (register width W ≤ 16).
+7. **Semantics**: a call must return what the function returns as C code (section 5.6), or fail.
+   Undefined behaviour in the source (signed overflow, oversized shifts, out-of-bounds reads) has no
+   defined result on any backend.
 
 ### 3.3 Several files
 
@@ -161,7 +164,8 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 3. It builds the initial state: program bits, arguments in the argument registers, input buffers
    in data memory, return address at the halt slot.
 4. The backend executes the circuit until the machine halts or the cycle limit is reached.
-5. The wrapper reads the return register and output buffers and returns.
+5. The wrapper reads the return register, output buffers and guard flags, establishes exactness
+   (section 5.6), sets the call status (section 5.7), and returns the value or fails.
 
 ### 5.2 Backends
 
@@ -182,6 +186,34 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 A mode can only be chosen at run time if it was embedded at build time; otherwise the call fails
 with a clear message.
 
+### 5.4 Driver interface
+
+```c
+typedef struct {
+    uint32_t nqubits;
+    const uint32_t *gates; long ngates;     /* op << 30 | q0, q1, q2  (x, cx, ccx, cswap) */
+    const uint32_t *ones;  long nones;      /* initial basis state: qubits set to 1 */
+    const uint32_t *measure; long nmeasure; /* output qubits, in result order */
+    const uint32_t *flags;   long nflags;   /* guard flags; a shot with a flag at 1 is not accepted */
+    const uint32_t *work;    long nwork;    /* work qubits; must read 0 in an accepted shot */
+    long cycles;                            /* repetitions of the gate list, for drivers that loop */
+} qcpu_job;
+
+typedef struct {
+    const char *name;
+    int  (*capacity)(uint32_t *max_qubits, long *max_gates);
+    /* runs the job for `shots` shots; fills counts (section 5.8). A simulator driver may run one shot. */
+    int  (*run)(const qcpu_job *job, long shots, qcpu_counts *counts, char *err, size_t errlen);
+} qcpu_driver;
+
+const qcpu_driver *qcpu_driver_entry(void);  /* exported by every driver library */
+```
+
+The runtime asks `capacity` first and refuses jobs that do not fit, with the numbers ("circuit needs
+N qubits, device has M"). Planned drivers: `file` (writes OpenQASM 3 for inspection), `aer` (Qiskit
+Aer, through a small helper process), `ibm` (IBM Quantum; usable only for compiled-mode circuits small
+enough for the device).
+
 ### 5.5 Compiled mode: a small dedicated circuit per function (qoracle)
 
 The interpreter runs any supported machine code, but every executed instruction costs a full machine
@@ -193,12 +225,22 @@ functions; compiled mode embeds its output.
 **How the circuit is made** (qoracle, at build time):
 1. compile the function for AArch64;
 2. execute the machine code symbolically on all paths: every register bit becomes a Boolean formula of
-   the input bits, branches are merged, loops are unrolled (the bound is measured by running the code);
+   the input bits, branches are merged, loops are unrolled to a bound (section 5.5.2);
 3. reduce the formulas to an AND/XOR network (hash-consing, constant folding);
 4. map it to gates: a Toffoli per AND, CNOTs per XOR, Bennett copy-out and uncompute, so that all work
    qubits return to 0;
 5. verify the circuit against the real machine code in a CPU emulator: on all inputs up to 16 input
    bits, otherwise on edge cases and 4,096 random inputs. A function that fails is not embedded.
+   Sampled verification is evidence, not proof; section 5.6 says what a call may rely on.
+
+The circuit always has the **compute-oracle form**
+
+```
+U_f |x⟩|y⟩|f⟩|0…0⟩ = |x⟩|y ⊕ f(x)⟩|f ⊕ flags(x)⟩|0…0⟩
+```
+
+with input register `x` (the declared argument bits), output register `y` (the declared result bits),
+a flag register `f` (section 5.5.2) and work qubits that start and end in 0.
 
 **Input and output widths.** A compiled circuit needs to know how many bits each argument really
 uses; the fewer, the smaller the circuit. Annotations give them:
@@ -210,6 +252,45 @@ __qcpu__ int QCPU_RESULT_BITS(6) score(int QCPU_BITS(8) guess);
 Without annotations the build uses the register width W, and reports the circuit size so that the
 annotation can be tightened. Values outside the declared width are an error at the call (the wrapper
 checks them before running the circuit).
+
+`QCPU_RESULT_BITS(n)` is a claim about the function, so the build must prove it: every result bit above
+`n` must be the constant 0 in the logic network for all inputs of the declared domain (by construction,
+or by a SAT check of the bit). If it cannot be proven, the build fails ("`score`: result bit 6 can be 1,
+e.g. for guess = …"); the result is never silently truncated.
+
+#### 5.5.1 Ordinary calls and coherent use
+
+The same compute oracle serves both uses, with different inputs and readouts:
+
+| use | prepare | readout | meaning |
+|---|---|---|---|
+| ordinary call | `x` = argument (basis state), `y` = 0, `f` = 0 | measure `y` and `f` (and the work qubits, section 5.8) | `y` = f(x) |
+| phase oracle (1-bit result) | `x` = superposition, `y` = `|−⟩` | none: `y` stays `|−⟩` | phase kickback: `|x⟩ → (−1)^{f(x)} |x⟩` |
+| compute oracle | `x` = superposition, `y` = `|0…0⟩` | by the algorithm | `y` entangled with `x` |
+
+A phase flip on a single basis input is not observable, so phase oracles are never used for ordinary
+calls. Coherent use requires that the flag register stays 0 for every input in the domain, that is a
+proven loop bound and proven table ranges (section 5.5.2); otherwise the flags would be entangled with
+the input. Direct tests: basis inputs against the native function, and, for the phase use, the state
+after `H^n · U_f · H^n` on `|0…0⟩|−⟩` compared with the exact expected state vector.
+
+#### 5.5.2 Loop bounds and other guards
+
+Unrolling needs a bound, and a symbolic execution can also reach states the circuit cannot represent
+(a table read outside the table). The logic network computes, for every input, a flag that is 1 exactly
+when the input needs more iterations than were unrolled (`unfinished`), and one for a table index out
+of range (`out_of_range`). Both are part of the circuit (register `f`). A bound is accepted in one of
+three ways:
+
+| bound | how it is established | circuit | at run time |
+|---|---|---|---|
+| exhaustive | the function is run on every input of the domain (domain ≤ 2^16 inputs) | flags proven 0 | nothing to check |
+| proven | a SAT check shows that `unfinished` and `out_of_range` are 0 for every input of the domain | flags proven 0 | nothing to check |
+| explicit or sampled | `QCPU_LOOP_BOUND(n)` on the function, or the bound measured on sampled inputs | flags kept | the wrapper reads `f`; a set flag fails the call with status `QCPU_INCOMPLETE` |
+
+A circuit with unproven flags is valid for ordinary calls (a failure is detected, never wrong) but not
+for coherent use; the build records which kind each embedded circuit is. A bound measured on samples
+alone is never treated as proven.
 
 **What compiled mode supports** (the current qoracle front end):
 
@@ -227,52 +308,100 @@ A function outside this set keeps only its interpreted circuit, and the build sa
 
 | function | inputs | qubits | Toffoli | all gates | interpreted, for comparison |
 |---|---|---|---|---|---|
-| `is_root` (Grover predicate, phase oracle) | 4 bits | 25 | 28 | 67 | 1,242 qubits, 98,504 gates |
+| `is_root` (Grover predicate), compute oracle, 1-bit result | 4 bits | 26 | 28 | 67 | 1,242 qubits, 98,504 gates |
 | Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | 167,670 qubits, 14.3 million gates (one call, 245 cycles) |
 | Code Breaker `score` with colour-count arrays | 8 bits | — | — | — | rejected: writes local arrays |
 
 **Running a compiled circuit on hardware.** For an ordinary call the input is a basis state, so the
-driver job is: X gates to set the input bits, the compiled circuit, measurement of the result qubits.
-Two properties help on noisy devices:
-- the answer is deterministic, so a few shots and a majority vote recover it;
-- every work qubit must end in 0; the driver also measures them, and any shot with a work qubit at 1 is
-  known to be wrong and discarded (free error detection).
+driver job is: X gates to set the input bits, the compiled circuit, measurement of the result, flag
+and work qubits, repeated for a number of shots. The ideal answer is deterministic, and every work qubit
+must end in 0; a shot with a work qubit at 1 is certainly corrupted and is discarded. These checks catch
+some errors, not all: an output bit can flip while every work qubit reads 0. What a hardware call
+returns, and when it succeeds, is defined in section 5.8.
 
-**What fits today.** Small predicates and arithmetic on a few bits — `is_root`: 25 qubits and
-28 Toffoli gates — are within reach of current devices. Code Breaker's `score` (312 qubits,
+**What fits today.** Small predicates and arithmetic on a few bits — `is_root`: 26 qubits and
+28 Toffoli gates — are within reach of current devices, as circuits; whether the answers are reliable
+on a given device is what section 5.8 measures. Code Breaker's `score` (312 qubits,
 358 Toffoli gates, depth 165) is beyond what current noisy devices run reliably; qubit reuse and
 measurement-based uncomputation (qoracle roadmap) are the way to bring such functions closer. The
 runtime decides per call with the driver's `capacity` (section 5.4): `QCPU_MODE=auto` takes the
 compiled circuit when it fits the device, and otherwise the simulator or the interpreter.
 
-**Quantum use.** The same compiled circuit, given an input in superposition, is an oracle: as a phase
-oracle in Grover search (find the secret code from `score`), or a compute oracle in period finding.
-That is outside ordinary calls (section 11), but the circuit is the same.
+**Quantum use.** The same compiled circuit, given an input in superposition, is an oracle, as in
+section 5.5.1: with a `|−⟩` output for Grover search (find the secret code from a 1-bit
+`is_secret(guess)`), or as a compute oracle in period finding. That is outside ordinary calls
+(section 11), but the circuit is the same.
 
-### 5.4 Driver interface
+### 5.6 Exactness: what a call returns
+
+**Contract.** By default a `__qcpu__` call returns exactly the value the function returns as C code on
+the host, with the same output buffers, or it fails with a status. It never returns an approximate value
+silently. A reduced-width machine can be wrong even when the input and the result both fit: for
+`uint32_t f(uint32_t x) { return (x << 8) >> 8; }` at W = 8, `f(1)` is 1, but a machine that truncates
+after the left shift returns 0. Checking only inputs and results misses this, so every backend needs one
+of the following guarantees for every call:
+
+| guarantee | how | available for |
+|---|---|---|
+| E1, per-call check | the native fallback is run and the results compared; a difference fails the call | every backend (`QCPU_VERIFY`, on by default) |
+| E2, per-call model check | the simulator checks every executed instruction against the reduced-width model (every written register fits its width, flags, branches, addresses, as the CPU reference of this repository does) | interpreted mode on `sim` |
+| E3, build-time proof | the compiled circuit equals the machine code on the whole declared domain: exhaustive verification, or a SAT equivalence check; plus proven result width and guards | compiled mode, when proven |
+
+A call without any of them fails with `QCPU_UNVERIFIED`, unless the user explicitly allows unchecked
+results with `QCPU_EXACT=0`; such a call returns status `QCPU_UNCHECKED`, which the call log records.
+On hardware, E2 is impossible and E3 covers the circuit, not the device: interpreted mode relies on
+E1, and compiled mode returns `QCPU_PROBABLE` results without it (section 5.8).
+
+The machine code, not the C source, is what the QCPU executes. Where the C standard leaves a result
+undefined or implementation-defined, the native fallback and the QCPU may differ legitimately; E1 then
+reports a difference rather than guessing which is right.
+
+### 5.7 Call status
+
+Every call sets a status that the program can read with `qcpu_last_call(&info)`:
+
+| status | meaning | the call |
+|---|---|---|
+| `QCPU_OK` | exact result (E1, E2 or E3) | returns the value |
+| `QCPU_MISMATCH` | E1 found a difference | fails |
+| `QCPU_INEXACT` | E2 found a value outside the reduced-width model | fails |
+| `QCPU_INCOMPLETE` | a guard flag was set (loop bound, table range) or the cycle limit was reached | fails |
+| `QCPU_TIE`, `QCPU_INSUFFICIENT` | a hardware call without enough evidence (section 5.8) | fails |
+| `QCPU_PROBABLE` | hardware result that meets the evidence thresholds, without E1 (section 5.8) | returns the value |
+| `QCPU_UNCHECKED` | `QCPU_EXACT=0` and no guarantee applied | returns the value |
+
+"Fails" means: with `QCPU_ON_FAIL=abort` (default) the program stops with a message; with `native` the
+native fallback's result is returned and the status is kept; with `status` the call returns 0 and the
+program decides from `qcpu_last_call`.
+
+### 5.8 Hardware calls: the result contract
+
+A driver returns evidence, not a value:
 
 ```c
-typedef struct {
-    uint32_t nqubits;
-    const uint32_t *gates; long ngates;     /* op << 30 | q0, q1, q2  (x, cx, ccx, cswap) */
-    const uint32_t *ones;  long nones;      /* initial basis state: qubits set to 1 */
-    const uint32_t *measure; long nmeasure; /* qubits whose values are needed */
-    long cycles;                            /* repetitions of the gate list, for drivers that loop */
-} qcpu_job;
+typedef struct { const uint8_t *bits; long count; } qcpu_outcome;   /* one measured bit string */
 
 typedef struct {
-    const char *name;
-    int  (*capacity)(uint32_t *max_qubits, long *max_gates);
-    int  (*run)(const qcpu_job *job, uint8_t *bits_out, char *err, size_t errlen);
-} qcpu_driver;
-
-const qcpu_driver *qcpu_driver_entry(void);  /* exported by every driver library */
+    long shots;                    /* shots run */
+    long accepted;                 /* shots with all work qubits 0 and all flags 0 */
+    long discarded_work;           /* shots with a work qubit at 1 */
+    long discarded_flag;           /* shots with a guard flag at 1 */
+    const qcpu_outcome *outcomes;  /* counts of the output strings among accepted shots */
+    long noutcomes;
+} qcpu_counts;
 ```
 
-The runtime asks `capacity` first and refuses jobs that do not fit, with the numbers ("circuit needs
-N qubits, device has M"). Planned drivers: `file` (writes OpenQASM 3 for inspection), `aer` (Qiskit
-Aer, through a small helper process), `ibm` (IBM Quantum; usable only for compiled-mode circuits small
-enough for the device).
+The runtime turns the counts into a result. With `a` accepted shots, `c1` the count of the most frequent
+output string and `c2` of the second:
+- `QCPU_INSUFFICIENT` if `a < QCPU_MIN_ACCEPTED` (default 8);
+- `QCPU_TIE` if `c1 − c2 < QCPU_MIN_MARGIN` (default 3) or `c1 / a < QCPU_MIN_SHARE` (default 0.6);
+- otherwise the most frequent string. Its status is `QCPU_OK` if E1 confirms it. Without E1 it is
+  `QCPU_PROBABLE`: E3 proves that the circuit is right, but not that the device ran it correctly, and a
+  vote is statistical evidence, not proof.
+
+`qcpu_last_call` exposes the full counts, so a 16-to-0 vote and a 2-to-1 vote after 13 discarded shots
+are distinguishable. The defaults are starting values, to be calibrated per device; the call log records
+the counts of every hardware call.
 
 ## 6. Configuration
 
@@ -282,9 +411,11 @@ enough for the device).
 |---|---|---|
 | `QCPU_BACKEND` | `sim`, `native`, driver name | `sim` |
 | `QCPU_MODE` | `interpreted`, `compiled`, `auto` | first embedded mode |
-| `QCPU_SHOTS` | shots per call on a hardware driver (majority vote) | `16` |
-| `QCPU_VERIFY` | `0`, `1` | `0` |
-| `QCPU_STRICT` | `0`, `1`: stop on a non-exact or mismatching call | `0` |
+| `QCPU_SHOTS` | shots per call on a hardware driver | `32` |
+| `QCPU_VERIFY` | `0`, `1`: compare every call with the native fallback (E1) | `1` |
+| `QCPU_EXACT` | `1`: a call needs E1, E2 or E3; `0`: unchecked results allowed, status `QCPU_UNCHECKED` | `1` |
+| `QCPU_ON_FAIL` | `abort`, `native`, `status` (section 5.7) | `abort` |
+| `QCPU_MIN_ACCEPTED`, `QCPU_MIN_MARGIN`, `QCPU_MIN_SHARE` | evidence needed for a hardware result (section 5.8) | `8`, `3`, `0.6` |
 | `QCPU_MAX_STEPS` | cycles per call | build value |
 | `QCPU_QUIET` | `0`, `1` | `0` |
 | `QCPU_DRIVER_PATH` | directories searched for drivers | next to the executable |
@@ -311,9 +442,10 @@ The `QPU_*` variables of the `qpu-dll` branch are accepted as aliases.
 
 ## 7. Verification
 
-With `QCPU_VERIFY=1` every call also runs the native fallback and compares the return value and the
-output buffers. A difference is reported with the function, the arguments and both results, and stops
-the program under `QCPU_STRICT=1`. This is how a demo proves itself while it runs.
+`QCPU_VERIFY=1` (the default) runs the native fallback on every call and compares the return value and
+the output buffers; this is guarantee E1 of section 5.6. A difference is reported with the function,
+the arguments and both results, and the call fails with `QCPU_MISMATCH`. `QCPU_VERIFY=0` is only
+allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 
 ## 8. Errors and limits
 
@@ -322,13 +454,17 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
 | I/O or library call in a QCPU function | build | error naming the call |
 | unsupported instruction | build | error naming the instruction and function |
 | state shared between calls | build (writes to globals) | warning |
-| value does not fit the register width | run (verify, or the exactness check) | warning or stop (`QCPU_STRICT`) |
+| value does not fit the register width | run: E1 (difference) or E2 (model check) | `QCPU_MISMATCH` / `QCPU_INEXACT` |
+| no exactness guarantee for the call | run | `QCPU_UNVERIFIED`, unless `QCPU_EXACT=0` |
+| loop bound or table range exceeded (unproven guard) | run, from the flag register | `QCPU_INCOMPLETE` |
+| `QCPU_RESULT_BITS` cannot be proven | build | error with an input that needs more bits |
 | cycle limit reached | run | error; `QCPU_MAX_STEPS` raises it |
 | circuit too large for a driver | run | refused with the sizes |
 | mode not embedded | run | error naming the build option |
 | function outside compiled mode's support | build | message; only the interpreted circuit is embedded |
 | argument wider than its `QCPU_BITS` | run, before the circuit | error naming the argument |
-| work qubit measured as 1 on hardware | run | that shot is discarded; error if no shot survives |
+| work qubit or flag measured as 1 on hardware | run | that shot is discarded and counted |
+| too little evidence on hardware | run | `QCPU_INSUFFICIENT` / `QCPU_TIE`, with the counts |
 
 ## 9. Portability
 
@@ -348,14 +484,16 @@ the program under `QCPU_STRICT=1`. This is how a demo proves itself while it run
 
 1. Update `qpu-dll` to current `main`; macOS `.dylib`; rename `QPU_*` to `QCPU_*` with aliases.
 2. `qcpu.h`, `__qcpu__`, the `qcpucc` driver: single-file split, weak fallbacks, call-graph pruning.
-3. Compiled mode: `QCPU_BITS` / `QCPU_RESULT_BITS`, qoracle at build time, the compiled circuit run
-   by the same engine, `QCPU_MODE=compiled|auto`.
-4. CMake module `QCPU.cmake`.
-5. Example: interactive Code Breaker (`examples/codebreaker/`) in both modes, tests on all three host
-   systems.
-6. Driver interface; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits that fit,
-   with shots, majority vote and work-qubit checks.
-7. Configuration file and per-function settings; call log.
+3. Exactness and status (sections 5.6, 5.7): E1 by default, E2 in the simulator (the reference's
+   model checks ported to the C engine), `qcpu_last_call`, `QCPU_ON_FAIL`.
+4. Compiled mode: `QCPU_BITS` / `QCPU_RESULT_BITS` with proven result width; guard flags in the emitted
+   circuit; bound classification (exhaustive / proven by SAT / flagged); E3; `QCPU_MODE=compiled|auto`.
+5. CMake module `QCPU.cmake`.
+6. Example: interactive Code Breaker (`examples/codebreaker/`) in both modes, tests on all three host
+   systems, including the `(x << 8) >> 8` case for every backend.
+7. Driver interface with counts; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits
+   that fit, with the result contract of section 5.8.
+8. Configuration file and per-function settings; call log.
 
 ## 11. Open questions
 
