@@ -228,7 +228,7 @@ A function outside this set keeps only its interpreted circuit, and the build sa
 | function | inputs | qubits | Toffoli | all gates | interpreted, for comparison |
 |---|---|---|---|---|---|
 | `is_root` (Grover predicate, phase oracle) | 4 bits | 25 | 28 | 67 | 1,242 qubits, 98,504 gates |
-| Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | hundreds of thousands of qubits |
+| Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | 167,670 qubits, 14.3 million gates (one call, 245 cycles) |
 | Code Breaker `score` with colour-count arrays | 8 bits | — | — | — | rejected: writes local arrays |
 
 **Running a compiled circuit on hardware.** For an ordinary call the input is a basis state, so the
