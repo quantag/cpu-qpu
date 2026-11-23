@@ -51,6 +51,8 @@ sections = [
      [sys.executable, "-m", "tests.test_riscv", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
     ("x86-64: decoder, circuit against the instruction model, traps, boundary cases, random programs",
      [sys.executable, "-m", "tests.test_x86", "40" if quick else "150", "7", "8" if quick else "8,12,16"]),
+    ("QPU libraries: host program and generated shared library; C engine against the Python simulator",
+     [sys.executable, "-m", "tests.test_dll", "arm64" if quick else "arm64,riscv64,riscv32,x86_64"]),
 ]
 if not quick:
     sections += [("C programs, clang", [sys.executable, "-m", "tests.test_c_programs", "clang"]),

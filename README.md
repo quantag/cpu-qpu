@@ -415,6 +415,37 @@ the chance level in the last column: the history must be uncomputed for the bran
   belongs to Shor's algorithm. What the machine adds is that the classical part comes straight from
   compiled code.
 
+## Calling QPU functions from a host program, like a DLL
+
+A host program can call functions that run on the quantum machine as ordinary C functions, through
+a shared library (Linux `.so`, Windows `.dll`). `qpu_dll.py` compiles the library for the QPU, builds
+the quantum machine's circuit for that code, and puts the circuit into the library as data, with a
+small C engine that runs it. At run time there is only the program and the library: no Python, no
+server, no network.
+
+```c
+// mathlib.h                                 // main.c, the host program: plain C
+#include "qpu_dll.h"                         #include <stdio.h>
+int gcd(int a, int b);                       #include "mathlib.h"
+int sum(const int *QPU_IN(n) v, int n);      int main(void) {
+void sort(int *QPU_INOUT(n) v, int n);           int v[] = {9, -3, 7, 1, 0, 4};
+                                                 printf("%d\n", gcd(84, 36));   // runs on the QPU
+                                                 sort(v, 6);                    // so does this
+                                             }
+```
+
+```bash
+python3 qpu_dll.py mathlib.c --header mathlib.h --arch arm64 -o libmathlib_qpu.so    # Windows: -o mathlib_qpu.dll
+cc -I runtime main.c -L. -lmathlib_qpu -Wl,-rpath,'$ORIGIN' -o main
+./main
+```
+
+The engine runs the same gates as the Python simulator (the tests compare the two on every qubit),
+and each call is checked against the same function compiled for the host. Integers and `int` buffers
+cross the boundary; values must fit the register width (16 bits by default), and a call where one
+does not is reported. Library functions cannot print. Example, rules and settings:
+`examples/dll/README.md`.
+
 ## How printf works
 
 All computation, including every value that gets printed, happens on the QPU. Text formatting
@@ -697,6 +728,7 @@ python3 -m tests.test_riscv 150 7 8,12,16        # RISC-V: decoder, traps, bound
 python3 -m tests.test_c_programs clang x86_64    # the same C cases compiled for x86-64 (also: gcc x86_64)
 python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs instruction model, traps, boundary cases, random programs
 python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O), dyld info and chained fixups
+python3 -m tests.test_dll                        # QPU libraries: host program + generated .so/.dll; C engine == Python simulator
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
 python3 -m tests.test_edges 8,12,16      # boundary cases: extensions, flags, shifts, W/X forms, memory, mul/div
