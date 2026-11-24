@@ -298,14 +298,14 @@ def compile_functions(qobj, isa, funcs, defs, mode, char_signed, verify_limit=40
         if isa.name != "arm64":
             skip(f"compiled mode reads AArch64 machine code, the quantum CPU here is {isa.title}")
             continue
+        if any(p.direction for p in params):
+            skip("it takes buffers (compiled circuits cannot write memory yet)")
+            continue
         if ret == "void":
             skip("it returns nothing")
             continue
         if not params:
             skip("it has no arguments")
-            continue
-        if any(p.direction for p in params):
-            skip("it takes buffers (compiled circuits cannot write memory yet)")
             continue
         try:
             rbits, rsigned = type_bits(ret, char_signed)

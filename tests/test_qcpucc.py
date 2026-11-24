@@ -266,7 +266,7 @@ def compiled_mode(d):
     built = sh(QCPUCC + ["--qcpu-mode", "auto", m, "-o", exe])
     out = built.stdout + built.stderr
     assert "low: compiled circuit" in out and "triple: compiled circuit" in out and "popc: compiled circuit" in out, out
-    assert "inc: interpreted (it returns nothing)" in out, out
+    assert "inc: interpreted (it takes buffers" in out, out
     assert sh([exe, "100"]).stdout == "3 compiled 300 compiled 3 compiled 5 interpreted\n"
     assert sh([exe, "-100"], check=False).returncode == 70        # popc(-100): outside its 12 bits
     p = sh([exe, "-100"], env=env(QCPU_ON_FAIL="native", QCPU_QUIET="1"))
@@ -276,7 +276,7 @@ def compiled_mode(d):
     p = sh([exe, "3"], env=env(QCPU_MODE="compiled"), check=False)
     assert p.returncode == 70 and "inc has no compiled circuit" in p.stderr, p.stderr
     p = sh(QCPUCC + ["--qcpu-mode", "compiled", m, "-o", exe + "2"], check=False)
-    assert p.returncode and "inc: no compiled circuit: it returns nothing" in p.stderr, p.stderr
+    assert p.returncode and "inc: no compiled circuit: it takes buffers" in p.stderr, p.stderr
     print("   QCPU_BITS(12), QCPU_SBITS(8), QCPU_RESULT_BITS(4) on 64 input bits (proven in the logic): compiled; a "
           "buffer function stays interpreted (auto) or is an error (compiled); arguments outside their bits: QCPU_BAD_ARGS")
 
