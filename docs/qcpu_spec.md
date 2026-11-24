@@ -555,9 +555,11 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 
 | host | build output | status |
 |---|---|---|
-| Linux | executable / `.so` | `qcpucc` and engine *exist*, driver planned |
-| Windows | executable / `.dll` (MinGW, MSVC, clang) | engine *exists* (library build, cross-built and checked; not run here); `qcpucc` untested; driver planned |
-| macOS | executable / `.dylib` | `qcpucc` builds `-dynamiclib`; not yet run on a Mac; driver planned |
+| Linux x86-64, ARM64 | executable / `.so` | `qcpucc` and engine *exist*, tested in CI; driver planned |
+| macOS (Apple Silicon) | executable / `.dylib` | `qcpucc` and engine *exist*, tested in CI (Apple clang); driver planned |
+| Windows x86-64 | executable / `.dll` (clang with MSVC, MinGW) | `qcpucc` and engine *exist*, tested in CI (clang, MSVC linker); MinGW cross-built; driver planned. `long` is 4 bytes here and 8 on the quantum CPU: E1 catches every difference (`QCPU_MISMATCH`) |
+
+`test_qcpucc` runs on all four in `.github/workflows/qcpucc.yml`.
 
 | QCPU ISA | interpreted | compiled |
 |---|---|---|

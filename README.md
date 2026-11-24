@@ -462,6 +462,10 @@ How it works, at build time and at every call:
   what the C function returns, or fails with a status (`QCPU_MISMATCH`, `QCPU_INCOMPLETE`, `QCPU_TRAP`,
   `QCPU_BAD_ARGS`, ...): by default the program stops with exit code 70 and a message. The program
   can read the last call's status, cycles, qubits and gates with `qcpu_last_call(&info)`.
+- **Platforms.** Linux (x86-64, ARM64), macOS on Apple Silicon and Windows; `test_qcpucc` runs on all four
+  in GitHub Actions. On a Mac: `python3 qcpucc.py examples/codebreaker/codebreaker.c -o codebreaker`
+  (Apple clang does both sides). On Windows `long` is 4 bytes, on the quantum CPU 8: a function whose
+  result depends on it is stopped with `QCPU_MISMATCH`, never returned wrong.
 - **Not yet:** compiled circuits from qoracle (much smaller, for real hardware), hardware drivers,
   and the E2/E3 guarantees of the spec. `QPU_*` names still work as aliases.
 
