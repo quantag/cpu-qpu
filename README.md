@@ -415,6 +415,91 @@ the chance level in the last column: the history must be uncomputed for the bran
   belongs to Shor's algorithm. What the machine adds is that the classical part comes straight from
   compiled code.
 
+## One program, some functions on the quantum CPU: `__qcpu__`
+
+Mark a function with `__qcpu__` and build with `qcpucc` (or CMake). The rest of the program stays on the
+CPU: input, output, the C library. Every call to a marked function runs on the quantum CPU (the
+circuit of a whole processor, simulated by a small C engine inside the executable) and is checked
+against the same function compiled for this computer. Design: [`docs/qcpu_spec.md`](docs/qcpu_spec.md).
+
+```c
+#include <qcpu.h>
+__qcpu__ int score(int guess, int secret) { ... }    // pure: no I/O, no library calls
+int main(void) { ... fgets(...); r = score(guess, secret); printf(...); }
+```
+
+```
+$ python3 qcpucc.py examples/codebreaker/codebreaker.c -o codebreaker
+qcpucc: codebreaker: 1 __qcpu__ function(s) on the quantum CPU (AArch64, W = 16, 34 instructions, 23342 qubits, 143899 gates per cycle): score
+$ ./codebreaker
+Code Breaker: guess the 4-peg code, colours R G B Y (for example RGBY).
+turn 1>   RRGG  black 2  white 0    [quantum CPU: 245 cycles, 35.3M gates on 565k qubits, checked]
+turn 2>   RGBY  black 0  white 2    [quantum CPU: 245 cycles, 35.3M gates on 565k qubits, checked]
+turn 3>   YYGG  black 4  white 0    [quantum CPU: 245 cycles, 35.3M gates on 565k qubits, checked]
+Cracked in 3 turns!
+```
+
+With CMake: `include(cmake/QCPU.cmake)` and `add_qcpu_executable(codebreaker SOURCES codebreaker.c)`
+(`add_qcpu_library` for a shared library); see `examples/codebreaker/CMakeLists.txt`.
+
+`qcpucc` is optional. The same source builds with any plain C compiler (`clang -I runtime codebreaker.c`,
+gcc, MSVC, or CMake's `add_executable`; in the example: `cmake -B build -DQCPU=OFF`). Then `__qcpu__`
+means nothing, everything runs on the CPU, and `qcpu_last_call()` reports backend `none`.
+
+How it works, at build time and at every call:
+
+<p align="center"><img src="docs/images/qcpu_build.svg" alt="Build time: qcpucc splits game.c into a quantum-CPU side (clang for AArch64, loader and pruning, circuit generator) and a host side (renamed bodies, your C compiler), linked with the C engine into game.exe" width="600"></p>
+<p align="center"><img src="docs/images/qcpu_run.svg" alt="Run time: main() calls score(); the wrapper runs the circuit in the C engine, the same function runs natively, and the results are compared" width="600"></p>
+
+- **Build.** `qcpucc` compiles the sources twice. For the quantum CPU (AArch64 by default,
+  `--qcpu-isa riscv64|riscv32|x86_64`) it keeps only the marked functions and what they call, here
+  34 instructions; `main`, `fgets`, `printf` are left out. For the host it renames each marked body to
+  `qpu__native_<name>` and links the calls to a generated wrapper. A marked function that uses the C
+  library, or is `static`, is a build error. Host and quantum-CPU data models (`sizeof(long)`, the
+  sign of `char`) are compared, and `-fsigned-char`/`-funsigned-char` is added to match the host.
+- **Run.** `QCPU_BACKEND=sim` (default) or `native`; `QCPU_VERIFY` (1), `QCPU_EXACT` (1),
+  `QCPU_ON_FAIL=abort|native|status`, `QCPU_MAX_STEPS`, `QCPU_QUIET`. A call either returns exactly
+  what the C function returns, or fails with a status (`QCPU_MISMATCH`, `QCPU_INCOMPLETE`, `QCPU_TRAP`,
+  `QCPU_BAD_ARGS`, ...): by default the program stops with exit code 70 and a message. The program
+  can read the last call's status, cycles, qubits and gates with `qcpu_last_call(&info)`.
+- **Platforms.** Linux (x86-64, ARM64), macOS on Apple Silicon and Windows; `test_qcpucc` runs on all four
+  in GitHub Actions. On a Mac: `python3 qcpucc.py examples/codebreaker/codebreaker.c -o codebreaker`
+  (Apple clang does both sides). On Windows `long` is 4 bytes, on the quantum CPU 8: a function whose
+  result depends on it is stopped with `QCPU_MISMATCH`, never returned wrong.
+- **Not yet:** compiled circuits from qoracle (much smaller, for real hardware), hardware drivers,
+  and the E2/E3 guarantees of the spec. `QPU_*` names still work as aliases.
+
+## Calling QPU functions from a host program, like a DLL
+
+A host program can call functions that run on the quantum machine as ordinary C functions, through
+a shared library (Linux `.so`, Windows `.dll`). `qpu_dll.py` compiles the library for the QPU, builds
+the quantum machine's circuit for that code, and puts the circuit into the library as data, with a
+small C engine that runs it. At run time there is only the program and the library: no Python, no
+server, no network.
+
+```c
+// mathlib.h                                 // main.c, the host program: plain C
+#include "qpu_dll.h"                         #include <stdio.h>
+int gcd(int a, int b);                       #include "mathlib.h"
+int sum(const int *QPU_IN(n) v, int n);      int main(void) {
+void sort(int *QPU_INOUT(n) v, int n);           int v[] = {9, -3, 7, 1, 0, 4};
+                                                 printf("%d\n", gcd(84, 36));   // runs on the QPU
+                                                 sort(v, 6);                    // so does this
+                                             }
+```
+
+```bash
+python3 qpu_dll.py mathlib.c --header mathlib.h --arch arm64 -o libmathlib_qpu.so    # Windows: -o mathlib_qpu.dll
+cc -I runtime main.c -L. -lmathlib_qpu -Wl,-rpath,'$ORIGIN' -o main
+./main
+```
+
+The engine runs the same gates as the Python simulator (the tests compare the two on every qubit),
+and each call is checked against the same function compiled for the host. Integers and `int` buffers
+cross the boundary; values must fit the register width (16 bits by default), and a call where one
+does not is reported. Library functions cannot print. Example, rules and settings:
+`examples/dll/README.md`.
+
 ## How printf works
 
 All computation, including every value that gets printed, happens on the QPU. Text formatting
@@ -697,6 +782,8 @@ python3 -m tests.test_riscv 150 7 8,12,16        # RISC-V: decoder, traps, bound
 python3 -m tests.test_c_programs clang x86_64    # the same C cases compiled for x86-64 (also: gcc x86_64)
 python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs instruction model, traps, boundary cases, random programs
 python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O), dyld info and chained fixups
+python3 -m tests.test_dll                        # QPU libraries: host program + generated .so/.dll; C engine == Python simulator
+python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
 python3 -m tests.test_edges 8,12,16      # boundary cases: extensions, flags, shifts, W/X forms, memory, mul/div

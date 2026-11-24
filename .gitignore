@@ -8,6 +8,9 @@ paper/*.out
 paper/*.fls
 paper/*.fdb_latexmk
 paper/*.blg
+examples/dll/libmathlib_qpu.so
+examples/dll/main_qpu
+examples/dll/main_cpu
 
 # articles are kept out of the repository
 paper/
