@@ -77,7 +77,7 @@ def match_close(text, i, open_ch, close_ch):
 
 def find_qcpu(path):
     """__qcpu__ function definitions of a source file: [dict(name, proto, name_at, body=(start, end))]."""
-    src = open(path).read()
+    src = open(path, encoding="utf-8", errors="surrogateescape").read()
     b = blank(src)
     found = []
     for m in MARK.finditer(b):
@@ -107,6 +107,24 @@ def find_qcpu(path):
     return src, found
 
 
+def cpath(path):
+    """An absolute path for a C string literal: forward slashes work on every system, backslashes would be
+    escape sequences."""
+    return os.path.abspath(path).replace("\\", "/")
+
+
+def host_os(h):
+    """The system the host compiler builds for, from its predefined macros: windows, darwin or linux."""
+    return "windows" if "_WIN32" in h else "darwin" if "__APPLE__" in h else "linux" if "__linux__" in h else "other"
+
+
+def default_cc():
+    for cc in ("cc", "clang", "gcc"):
+        if shutil.which(cc):
+            return cc
+    raise Error("no C compiler found for this computer (cc, clang or gcc); use --cc")
+
+
 def host_copy(path, src, defs, names):
     """The host version of a source: __qcpu__ bodies renamed qpu__native_<name>, a prototype of <name> before
     each, and calls between __qcpu__ functions inside those bodies going to the native versions. Lines are
@@ -125,7 +143,7 @@ def host_copy(path, src, defs, names):
     protos = "".join(f"{d['proto']}; " for d in defs)
     # the prototypes go on the first line of the file (keeps line numbers); <qcpu.h> types first
     first_nl = out.find("\n")
-    return f'#line 1 "{os.path.abspath(path)}"\n#include <qcpu.h>\n' + "#line 1\n" + out[:first_nl] + "\n" + out[first_nl + 1:], protos
+    return f'#line 1 "{cpath(path)}"\n#include <qcpu.h>\n' + "#line 1\n" + out[:first_nl] + "\n" + out[first_nl + 1:], protos
 
 
 # ------------------------------------------------------------------ compilers
@@ -147,9 +165,9 @@ FACTS = [("__SIZEOF_SHORT__", "sizeof(short)"), ("__SIZEOF_INT__", "sizeof(int)"
          ("__CHAR_UNSIGNED__", "char is unsigned"), ("__BYTE_ORDER__", "byte order")]
 
 
-def data_model(host_cc, qcpu_cc):
+def data_model(host_cc, qcpu_cc, h=None):
     """Data-model facts of the two compilers (spec 5.6.1). Returns (flags for the QCPU side, differences)."""
-    h = macros(host_cc, [])
+    h = h if h is not None else macros(host_cc, [])
     t = macros(qcpu_cc, [])
     flags = []
     if ("__CHAR_UNSIGNED__" in h) != ("__CHAR_UNSIGNED__" in t):
@@ -188,7 +206,9 @@ def run(cmd, what):
 
 # ------------------------------------------------------------------ build
 def build(a, cflags, ldflags, sources):
-    host_cc = shlex.split(a.cc or os.environ.get("CC") or "cc")
+    host_cc = shlex.split(a.cc or os.environ.get("CC") or default_cc(), posix=os.name != "nt")
+    host_macros = macros(host_cc, [])
+    system = host_os(host_macros)
     isa = isas.get(a.qcpu_isa)
     qcpu_cc = ["clang"] + isa.clang
     if not shutil.which("clang"):
@@ -201,8 +221,16 @@ def build(a, cflags, ldflags, sources):
     names = [d["name"] for d in all_defs]
     if len(set(names)) != len(names):
         raise Error("a __qcpu__ function is defined twice")
-    dm_flags, dm_diffs = data_model(host_cc, qcpu_cc)
-    out = a.output or ("a.out" if not a.shared else "liba" + (".dylib" if sys.platform == "darwin" else ".so"))
+    dm_flags, dm_diffs = data_model(host_cc, qcpu_cc, host_macros)
+    if a.output:
+        out = a.output
+        if system == "windows" and not os.path.splitext(out)[1]:
+            out += ".dll" if a.shared else ".exe"
+    elif a.shared:
+        out = {"windows": "a.dll", "darwin": "liba.dylib"}.get(system, "liba.so")
+    else:
+        out = "a.exe" if system == "windows" else "a.out"
+    pic = ["-fPIC"] if a.shared and system != "windows" else []
     with tempfile.TemporaryDirectory(prefix="qcpucc_") as d:
         hdr = os.path.join(d, "qcpu_functions.h")
         protos = "".join(f"{d_['proto']};\n" for d_ in all_defs)
@@ -223,7 +251,7 @@ def build(a, cflags, ldflags, sources):
         if all_defs:
             # 1. quantum-CPU side: one translation unit, pruned to the __qcpu__ functions
             unity = os.path.join(d, "qcpu_side.c")
-            open(unity, "w").write("".join(f'#include "{os.path.abspath(s)}"\n' for s in sources))
+            open(unity, "w").write("".join(f'#include "{cpath(s)}"\n' for s in sources))
             qobj = os.path.join(d, "qcpu_side.o")
             run(qcpu_cc + [f"-O{a.qcpu_opt}", "-fno-stack-protector", "-ffunction-sections", "-fdata-sections",
                            "-fno-asynchronous-unwind-tables", "-nostdlibinc", "-isystem", QINC, "-I", RT,
@@ -247,29 +275,27 @@ def build(a, cflags, ldflags, sources):
             if a.keep:
                 shutil.copy(gen, out + ".qcpu_wrappers.c")
             gobj = os.path.join(d, "qcpu_wrappers.o")
-            pic = ["-fPIC"] if a.shared else []
             run(host_cc + ["-c", "-O2"] + pic + ["-I", RT, "-I", d, gen, "-o", gobj], "compiling the generated wrappers")
             objs.append(gobj)
         # 2. host side
         for i, s in enumerate(sources):
             src, defs = defs_by_file[s]
-            text, _ = host_copy(s, src, defs, names) if all_defs else (f'#line 1 "{os.path.abspath(s)}"\n' + src, "")
+            text, _ = host_copy(s, src, defs, names) if all_defs else (f'#line 1 "{cpath(s)}"\n' + src, "")
             if defs:
                 # declarations of every __qcpu__ function, so that main() in another file sees them
                 text = text.replace("#include <qcpu.h>\n", "#include <qcpu.h>\n#include \"qcpu_functions.h\"\n", 1)
             hs = os.path.join(d, f"host{i}.c")
-            open(hs, "w").write(text)
+            open(hs, "w", encoding="utf-8", errors="surrogateescape").write(text)
             ho = os.path.join(d, f"host{i}.o")
-            pic = ["-fPIC"] if a.shared else []
             run(host_cc + ["-c"] + pic + ["-I", RT, "-I", d, "-I", os.path.dirname(os.path.abspath(s))] + cflags + [hs, "-o", ho],
                 f"compiling {s} for this computer")
             objs.append(ho)
         # 3. link
         if a.shared:
-            link = host_cc + (["-dynamiclib"] if sys.platform == "darwin" else ["-shared"]) + objs + ["-o", out]
+            link = host_cc + (["-dynamiclib"] if system == "darwin" else ["-shared"]) + objs + ["-o", out]
         else:
             link = host_cc + objs + ["-o", out]
-        if sys.platform.startswith("linux"):
+        if system == "linux":
             link.append("-lpthread")
         run(link + ldflags, "linking")
     if all_defs:
