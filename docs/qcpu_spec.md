@@ -69,7 +69,11 @@ Windows     riscv32                    driver: ibm, aer, file, ...
 __qcpu__ int score(int guess);
 ```
 
-- `qcpu.h` defines `__qcpu__` as empty on every build. A plain compiler sees an ordinary C program.
+- `qcpu.h` defines `__qcpu__` as empty on every build. A plain compiler sees an ordinary C program;
+  `qcpu.h` then also supplies `qcpu_last_call()` and `qcpu_status_name()` as inline functions (status
+  `QCPU_OK`, backend `none`), so a program that queries its calls still links *(exists)*. Under `qcpucc`
+  (`__QCPUCC__`), inside the runtime, or with `QCPU_LIBRARY` (a program linking a QPU library) they come
+  from the runtime.
 - The build driver finds the marked definitions in the source text *(exists)*. On the host side it
   renames each marked definition to `qpu__native_<name>` (and the calls between marked functions
   inside them), so the function's own body becomes the native fallback; every other call to `<name>`

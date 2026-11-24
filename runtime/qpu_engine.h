@@ -27,6 +27,9 @@
 #define QPU_ENGINE_H
 #include <stddef.h>
 #include <stdint.h>
+#ifndef QCPU_RUNTIME
+#define QCPU_RUNTIME 1
+#endif
 #include "qcpu.h"
 
 #ifdef _WIN32

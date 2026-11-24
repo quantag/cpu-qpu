@@ -167,7 +167,7 @@ def main():
 
         # 5b. buffers under verification
         bh, bs, bm = (os.path.join(d, n) for n in ("buf.h", "buf.c", "buf_main.c"))
-        open(bh, "w").write("#include <qcpu.h>\nvoid increment(int *QCPU_INOUT(1) p);\n"
+        open(bh, "w").write("#define QCPU_LIBRARY 1\n#include <qcpu.h>\nvoid increment(int *QCPU_INOUT(1) p);\n"
                             "int add_to(int *QCPU_INOUT(n) dst, const int *QCPU_IN(n) src, int n);\n"
                             "int big(int *QCPU_INOUT(1) p);\n")
         open(bs, "w").write("#include \"buf.h\"\nvoid increment(int *p) { *p += 1; }\n"

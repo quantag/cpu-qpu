@@ -442,6 +442,10 @@ Cracked in 3 turns!
 With CMake: `include(cmake/QCPU.cmake)` and `add_qcpu_executable(codebreaker SOURCES codebreaker.c)`
 (`add_qcpu_library` for a shared library); see `examples/codebreaker/CMakeLists.txt`.
 
+`qcpucc` is optional. The same source builds with any plain C compiler (`clang -I runtime codebreaker.c`,
+gcc, MSVC, or CMake's `add_executable`; in the example: `cmake -B build -DQCPU=OFF`). Then `__qcpu__`
+means nothing, everything runs on the CPU, and `qcpu_last_call()` reports backend `none`.
+
 - **Build.** `qcpucc` compiles the sources twice. For the quantum CPU (AArch64 by default,
   `--qcpu-isa riscv64|riscv32|x86_64`) it keeps only the marked functions and what they call, here
   34 instructions; `main`, `fgets`, `printf` are left out. For the host it renames each marked body to

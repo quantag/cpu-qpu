@@ -275,7 +275,7 @@ def build(a, cflags, ldflags, sources):
             if a.keep:
                 shutil.copy(gen, out + ".qcpu_wrappers.c")
             gobj = os.path.join(d, "qcpu_wrappers.o")
-            run(host_cc + ["-c", "-O2"] + pic + ["-I", RT, "-I", d, gen, "-o", gobj], "compiling the generated wrappers")
+            run(host_cc + ["-c", "-O2", "-D__QCPUCC__=1"] + pic + ["-I", RT, "-I", d, gen, "-o", gobj], "compiling the generated wrappers")
             objs.append(gobj)
         # 2. host side
         for i, s in enumerate(sources):
@@ -287,7 +287,7 @@ def build(a, cflags, ldflags, sources):
             hs = os.path.join(d, f"host{i}.c")
             open(hs, "w", encoding="utf-8", errors="surrogateescape").write(text)
             ho = os.path.join(d, f"host{i}.o")
-            run(host_cc + ["-c"] + pic + ["-I", RT, "-I", d, "-I", os.path.dirname(os.path.abspath(s))] + cflags + [hs, "-o", ho],
+            run(host_cc + ["-c", "-D__QCPUCC__=1"] + pic + ["-I", RT, "-I", d, "-I", os.path.dirname(os.path.abspath(s))] + cflags + [hs, "-o", ho],
                 f"compiling {s} for this computer")
             objs.append(ho)
         # 3. link

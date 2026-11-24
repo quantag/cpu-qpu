@@ -40,11 +40,7 @@ def main():
         game = os.path.join(d, "codebreaker")
         built = sh(QCPUCC + [os.path.join(EX, "codebreaker.c"), "-o", game])
         plain = os.path.join(d, "plain")
-        stub = os.path.join(d, "stub.c")     # the plain build: no quantum CPU, qcpu_last_call() reports nothing
-        open(stub, "w").write('#include <string.h>\n#include <qcpu.h>\n'
-                              'int qcpu_last_call(qcpu_call_info *i) { if (i) memset(i, 0, sizeof *i); return 0; }\n'
-                              'const char *qcpu_status_name(int s) { (void)s; return "QCPU_OK"; }\n')
-        sh(["cc", "-I", RT, os.path.join(EX, "codebreaker.c"), stub, "-o", plain])
+        sh(["cc", "-I", RT, os.path.join(EX, "codebreaker.c"), "-o", plain])      # plain compiler, no qcpucc
         games = [("7", "RRRR\nRGBY\nxx\nYYGG\n"), ("11", "BBBB\nGGRR\nRGBY\nYBGR\nBYRG\n"), ("3", "RGBY\n" * 11)]
         for seed, moves in games:
             want = sh([plain, seed], inp=moves, check=False)
@@ -160,7 +156,7 @@ def main():
             """))
         exe = os.path.join(d, "dm")
         sh(QCPUCC + [dm, "-o", exe])
-        want = sh(["sh", "-c", f"cc -I {RT} {dm} {d}/stub.c -o {d}/dmn && {d}/dmn"]).stdout
+        want = sh(["sh", "-c", f"cc -I {RT} {dm} -o {d}/dmn && {d}/dmn"]).stdout
         p = sh([exe])
         assert p.stdout == want and not p.stderr, (p.stdout, want, p.stderr)
         flags, diffs = qcpucc.data_model(["clang", "--target=x86_64-pc-windows-msvc"], ["clang", "--target=aarch64-linux-gnu"])
