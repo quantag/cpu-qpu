@@ -69,8 +69,9 @@ def main():
             print("   CMake build (add_qcpu_executable): same program")
 
         # 2. pruning
-        line = built.stdout + built.stderr
-        assert line.rstrip().endswith("): score") and "34 instructions" in line, line
+        out = built.stdout + built.stderr
+        line = next((l for l in out.splitlines() if "__qcpu__ function(s)" in l), "")
+        assert line.rstrip().endswith("): score") and "34 instructions" in line, out
         print("2) quantum-CPU side: only score() and what it reaches (34 instructions); main, fgets, printf, rand left out")
 
         # 3. several files, calls between __qcpu__ functions, buffers
