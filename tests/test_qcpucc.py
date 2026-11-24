@@ -30,6 +30,11 @@ def sh(cmd, env=None, inp=None, check=True):
     return p
 
 
+HOST_CC = (os.environ.get("CC") or qcpucc.default_cc()).split()      # the compiler qcpucc uses too
+OBJDUMP = next((t for t in ("llvm-objdump", "objdump") if shutil.which(t) and
+                "LLVM" in subprocess.run([t, "--version"], capture_output=True, text=True).stdout), None)
+
+
 def env(**kw):
     return dict(os.environ, **kw)
 
@@ -40,7 +45,7 @@ def main():
         game = os.path.join(d, "codebreaker")
         built = sh(QCPUCC + [os.path.join(EX, "codebreaker.c"), "-o", game])
         plain = os.path.join(d, "plain")
-        sh(["cc", "-I", RT, os.path.join(EX, "codebreaker.c"), "-o", plain])      # plain compiler, no qcpucc
+        sh(HOST_CC + ["-I", RT, os.path.join(EX, "codebreaker.c"), "-o", plain])      # plain compiler, no qcpucc
         games = [("7", "RRRR\nRGBY\nxx\nYYGG\n"), ("11", "BBBB\nGGRR\nRGBY\nYBGR\nBYRG\n"), ("3", "RGBY\n" * 11)]
         for seed, moves in games:
             want = sh([plain, seed], inp=moves, check=False)
@@ -123,8 +128,11 @@ def main():
             """))
         obj = os.path.join(d, "trunc.o")
         sh(["clang", "--target=aarch64-linux-gnu", "-O1", "-nostdlibinc", "-isystem", qcpucc.QINC, "-I", RT, "-c", ex, "-o", obj])
-        dis = sh(["llvm-objdump", "-d", obj]).stdout.split("<f>:")[1].split("\n\n")[0]
-        assert "lsl" in dis and "lsr" in dis and "and" not in dis, dis
+        if OBJDUMP:                       # LLVM's objdump (macOS: the system objdump)
+            dis = sh([OBJDUMP, "-d", obj]).stdout.split("<f>:")[1].split("\n\n")[0]
+            assert "lsl" in dis and "lsr" in dis and "and" not in dis, dis
+        else:
+            print("   (no LLVM objdump: the emitted instructions are not checked)")
         # W = 12 is the narrowest machine that holds code and memory; 16 << 8 = 4096 needs 13 bits
         for w, mode, want in (("12", {}, None), ("12", {"QCPU_ON_FAIL": "native", "QCPU_QUIET": "1"}, "16 QCPU_MISMATCH\n"),
                               ("16", {}, "16 QCPU_OK\n")):
@@ -156,7 +164,8 @@ def main():
             """))
         exe = os.path.join(d, "dm")
         sh(QCPUCC + [dm, "-o", exe])
-        want = sh(["sh", "-c", f"cc -I {RT} {dm} -o {d}/dmn && {d}/dmn"]).stdout
+        sh(HOST_CC + ["-I", RT, dm, "-o", os.path.join(d, "dmn")])
+        want = sh([os.path.join(d, "dmn")]).stdout
         p = sh([exe])
         assert p.stdout == want and not p.stderr, (p.stdout, want, p.stderr)
         flags, diffs = qcpucc.data_model(["clang", "--target=x86_64-pc-windows-msvc"], ["clang", "--target=aarch64-linux-gnu"])
