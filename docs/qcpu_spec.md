@@ -131,6 +131,10 @@ qcpu_gen.c + runtime (engine, backend loader) + host objects ── link ── 
 
 The circuit generator is Python and runs at build time only. The built program contains no Python.
 
+As implemented (`qcpucc.py`; redraw with `tools/qcpu_diagrams.py`):
+
+<p align="center"><img src="images/qcpu_build.svg" alt="Build time: qcpucc splits the program into a quantum-CPU side and a host side, linked with the C engine into one executable" width="600"></p>
+
 ### 4.2 Command-line driver
 
 ```
@@ -179,6 +183,8 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 ## 5. Run time
 
 ### 5.1 A call
+
+<p align="center"><img src="images/qcpu_run.svg" alt="Run time: the wrapper runs the circuit in the C engine, the native body runs for E1, and the results are compared" width="600"></p>
 
 1. The call goes to the generated wrapper (the native body was renamed, section 3.1).
 2. The wrapper reads the configuration (section 6) and picks the backend.

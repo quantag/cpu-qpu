@@ -446,6 +446,11 @@ With CMake: `include(cmake/QCPU.cmake)` and `add_qcpu_executable(codebreaker SOU
 gcc, MSVC, or CMake's `add_executable`; in the example: `cmake -B build -DQCPU=OFF`). Then `__qcpu__`
 means nothing, everything runs on the CPU, and `qcpu_last_call()` reports backend `none`.
 
+How it works, at build time and at every call:
+
+<p align="center"><img src="docs/images/qcpu_build.svg" alt="Build time: qcpucc splits game.c into a quantum-CPU side (clang for AArch64, loader and pruning, circuit generator) and a host side (renamed bodies, your C compiler), linked with the C engine into game.exe" width="600"></p>
+<p align="center"><img src="docs/images/qcpu_run.svg" alt="Run time: main() calls score(); the wrapper runs the circuit in the C engine, the same function runs natively, and the results are compared" width="600"></p>
+
 - **Build.** `qcpucc` compiles the sources twice. For the quantum CPU (AArch64 by default,
   `--qcpu-isa riscv64|riscv32|x86_64`) it keeps only the marked functions and what they call, here
   34 instructions; `main`, `fgets`, `printf` are left out. For the host it renames each marked body to
