@@ -62,8 +62,10 @@ def main():
             b = os.path.join(d, "cmake")
             sh(["cmake", "-S", EX, "-B", b])
             sh(["cmake", "--build", b])
-            got = sh([os.path.join(b, "codebreaker"), "7"], inp="YYGG\n", check=False)
-            assert "Cracked in 1 turn" in got.stdout and "checked" in got.stdout, got.stdout
+            moves = "RGBY\nYYGG\nBBRR\n"      # the secret for a seed depends on the C library's rand()
+            got = sh([os.path.join(b, "codebreaker"), "7"], inp=moves, check=False)
+            want = sh([game, "7"], inp=moves, check=False)
+            assert got.stdout == want.stdout and got.stdout.count("checked]") == 3, (got.stdout, want.stdout)
             print("   CMake build (add_qcpu_executable): same program")
 
         # 2. pruning
