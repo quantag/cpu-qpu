@@ -5,6 +5,7 @@
 
     qcpucc game.c -o game                     an executable for this computer
     qcpucc lib.c --shared -o libgame.dylib    a library (.dylib / .so)
+    qcpucc --qcpu-mode auto game.c -o game    also a small circuit per function (qoracle), where possible
     ./game                                    __qcpu__ calls run on the quantum CPU (simulated), checked
     QCPU_BACKEND=native ./game                the same program, everything on the CPU
 
@@ -75,14 +76,59 @@ def match_close(text, i, open_ch, close_ch):
     raise Error("unbalanced brackets")
 
 
+BITS_ANNOT = re.compile(r"\bQCPU_(RESULT_BITS|SBITS|BITS)\s*\(\s*([^()]*?)\s*\)")
+
+
+def split_params(plist):
+    depth, cur, parts = 0, "", []
+    for ch in plist:
+        if ch == "," and depth == 0:
+            parts.append(cur); cur = ""
+            continue
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        cur += ch
+    return parts + [cur] if cur.strip() else parts
+
+
+def bit_annotations(path, proto, name):
+    """QCPU_RESULT_BITS(n) before the name, QCPU_BITS(n) / QCPU_SBITS(n) per parameter. Returns
+    (prototype without them, result bits or None, [(bits, signed) or None per parameter])."""
+    def number(kind, text):
+        if not text.isdigit() or not 1 <= int(text) <= 64:
+            raise Error(f"{path}: {name}: QCPU_{kind}({text}): give a number of bits, 1 to 64")
+        return int(text)
+    at = re.search(r"\b" + re.escape(name) + r"\s*\(", proto)
+    head, plist = proto[:at.start()], proto[at.end():proto.rindex(")")]
+    result = None
+    for m in BITS_ANNOT.finditer(head):
+        if m.group(1) != "RESULT_BITS":
+            raise Error(f"{path}: {name}: QCPU_{m.group(1)} belongs to a parameter; the result takes QCPU_RESULT_BITS")
+        result = number("RESULT_BITS", m.group(2))
+    params = []
+    for p in split_params(plist):
+        ms = list(BITS_ANNOT.finditer(p))
+        if any(m.group(1) == "RESULT_BITS" for m in ms):
+            raise Error(f"{path}: {name}: QCPU_RESULT_BITS belongs before the function name")
+        if len(ms) > 1:
+            raise Error(f"{path}: {name}: more than one QCPU_BITS / QCPU_SBITS on a parameter")
+        params.append((number(ms[0].group(1), ms[0].group(2)), ms[0].group(1) == "SBITS") if ms else None)
+    if params == [None] and plist.strip() in ("", "void"):
+        params = []
+    clean = " ".join(BITS_ANNOT.sub(" ", proto).split()).replace(" (", "(").replace("( ", "(").replace(" )", ")")
+    return clean, result, params
+
+
 def find_qcpu(path):
-    """__qcpu__ function definitions of a source file: [dict(name, proto, name_at, body=(start, end))]."""
+    """__qcpu__ function definitions of a source file: [dict(name, proto, name_at, body=(start, end), result_bits,
+    param_bits)]; proto is without the QCPU_*BITS annotations."""
     src = open(path, encoding="utf-8", errors="surrogateescape").read()
     b = blank(src)
     found = []
     for m in MARK.finditer(b):
         start = m.end()
         par = b.find("(", start)
+        while par >= 0 and re.search(r"\bQCPU_(RESULT_BITS|SBITS|BITS)\s*$", b[start:par]):
+            par = b.find("(", match_close(b, par, "(", ")") + 1)       # QCPU_RESULT_BITS(n) before the name
         semi = b.find(";", start)
         brace = b.find("{", start)
         if par < 0:
@@ -102,7 +148,9 @@ def find_qcpu(path):
         body_open = b.index("{", close)
         body_close = match_close(b, body_open, "{", "}")
         proto = " ".join((src[start:close + 1]).split())
-        found.append(dict(name=nm.group(1), proto=proto, name_at=start + nm.start(1), body=(body_open, body_close)))
+        proto, rbits, pbits = bit_annotations(path, proto, nm.group(1))
+        found.append(dict(name=nm.group(1), proto=proto, name_at=start + nm.start(1), body=(body_open, body_close),
+                          result_bits=rbits, param_bits=pbits))
         del semi, brace
     return src, found
 
@@ -204,6 +252,124 @@ def run(cmd, what):
     return p
 
 
+# ------------------------------------------------------------------ compiled mode (qoracle)
+def type_bits(ctype, char_signed):
+    """(bits, signed) of an integer type on the quantum CPU (AArch64, LP64)."""
+    t = " ".join(ctype.replace("const", " ").replace("volatile", " ").split())
+    if t in ("_Bool", "bool"):
+        return 1, False
+    m = re.match(r"^u?int(8|16|32|64)_t$", t)
+    if m:
+        return int(m.group(1)), not t.startswith("u")
+    if t in ("size_t", "uintptr_t"):
+        return 64, False
+    if t in ("ssize_t", "intptr_t", "ptrdiff_t"):
+        return 64, True
+    unsigned = "unsigned" in t.split()
+    core = [w for w in t.split() if w not in ("signed", "unsigned", "int")] or ["int"]
+    bits = {"char": 8, "short": 16, "int": 32, "long": 64, "long long": 64}.get(" ".join(core))
+    if bits is None:
+        raise Error(f"type '{ctype}' is not supported in compiled mode")
+    if core == ["char"] and "signed" not in t.split() and not unsigned:
+        return 8, char_signed
+    return bits, not unsigned
+
+
+EXHAUSTIVE_BITS = 16           # qoracle tests every input up to this many input bits
+
+
+def compile_functions(qobj, isa, funcs, defs, mode, char_signed, verify_limit=4096):
+    """Compiled circuits (spec 5.5) for the __qcpu__ functions that qualify. Returns (C code, {function: C name},
+    report lines). mode "compiled": every function must qualify; "auto": the others stay interpreted."""
+    try:
+        import qoracle
+        from qoracle import verify as qverify, frontend as qfrontend
+    except ImportError:
+        raise Error("compiled mode needs qoracle: python3 -m pip install git+https://github.com/quantag/qoracle")
+    by_name = {d["name"]: d for d in defs}
+    code, circuits, lines = [], {}, []
+    for name, ret, params in funcs:
+        d = by_name[name]
+
+        def skip(why):
+            if mode == "compiled":
+                raise Error(f"{name}: no compiled circuit: {why} (build with --qcpu-mode auto to keep it interpreted)")
+            lines.append(f"{name}: interpreted ({why})")
+        if isa.name != "arm64":
+            skip(f"compiled mode reads AArch64 machine code, the quantum CPU here is {isa.title}")
+            continue
+        if ret == "void":
+            skip("it returns nothing")
+            continue
+        if not params:
+            skip("it has no arguments")
+            continue
+        if any(p.direction for p in params):
+            skip("it takes buffers (compiled circuits cannot write memory yet)")
+            continue
+        try:
+            rbits, rsigned = type_bits(ret, char_signed)
+            spec = []
+            for p, ann in zip(params, d["param_bits"] or [None] * len(params)):
+                bits, signed = ann if ann else type_bits(p.ctype, char_signed)
+                spec.append(qoracle.Arg(name=p.name, bits=bits, signed=signed))
+        except Error as e:
+            skip(str(e))
+            continue
+        total = sum(x.bits for x in spec)
+        want = d["result_bits"]
+        try:
+            o = qoracle.build(qobj, name, spec, out_bits=want or rbits, verify_limit=verify_limit)
+        except qoracle.OracleError as e:
+            skip(f"qoracle: {e}")
+            continue
+        rep = o.report
+        exhaustive = rep["verification"]["exhaustive"]
+        if not exhaustive and (rep["loops"] or rep["tables"] or rep["rom_bits"]):
+            skip(f"its inputs total {total} bits, so qoracle tested {rep['verification']['inputs_tested']} sampled inputs, "
+                 "and it has loops or tables: the run-time guards of spec 5.5.2 are not implemented yet; declare "
+                 f"QCPU_BITS so that the inputs total at most {EXHAUSTIVE_BITS} bits")
+            continue
+        if want:                                     # QCPU_RESULT_BITS(n) is a claim: prove it
+            if exhaustive:
+                image = qfrontend.load(qobj, name)
+                cpu = qverify.CPU(image)
+                vectors, _ = qverify.test_inputs([(x.name, x.bits, x.signed) for x in spec], 1 << EXHAUSTIVE_BITS)
+                for vec in vectors:
+                    argv = qoracle.cpu_args(spec, vec)
+                    v = cpu.call(argv) & ((1 << rbits) - 1)
+                    if rsigned and v >> (rbits - 1):
+                        v -= 1 << rbits
+                    if not 0 <= v < (1 << want):
+                        raise Error(f"{name}: QCPU_RESULT_BITS({want}) is wrong: for "
+                                    + ", ".join(f"{x.name} = {v_}" for x, v_ in zip(spec, argv)) + f" the result is {v}")
+            else:
+                full = qoracle.build(qobj, name, spec, out_bits=rbits, verify_limit=verify_limit)
+                if full.out_bits > want:
+                    raise Error(f"{name}: QCPU_RESULT_BITS({want}) cannot be proven: its inputs total {total} bits, too "
+                                f"many to test all, and result bit {full.out_bits - 1} is not constant 0 in the logic")
+        c = o.circuit
+        gates = []
+        for g in c.gates:
+            if g[0] not in ("x", "cx", "ccx"):
+                raise Error(f"{name}: qoracle produced a '{g[0]}' gate, which the engine does not run")
+            q = list(g[1:]) + [0] * (4 - len(g))
+            gates += [qpu_dll.OPS[g[0]] << 30 | q[0], q[1], q[2]]
+        first = {n: f for n, f, _ in c.regs}
+        var = f"qpu__k_{name}"
+        code += [qpu_dll.c_array(f"{var}_gates", gates), qpu_dll.c_array(f"{var}_in", [first[x.name] for x in spec]),
+                 qpu_dll.c_array(f"{var}_bits", [x.bits for x in spec], "unsigned char"),
+                 qpu_dll.c_array(f"{var}_signed", [int(x.signed) for x in spec], "unsigned char"),
+                 f"static const qpu__circuit {var} = {{{c.nqubits}u, {var}_gates, {len(c.gates)}, {len(spec)}, {var}_in, "
+                 f"{var}_bits, {var}_signed, {c.out0}u, {c.n_out}, {c.anc0}u}};", ""]
+        circuits[name] = var
+        how = (f"all {rep['verification']['inputs_tested']} inputs" if exhaustive else
+               f"{rep['verification']['inputs_tested']} sampled inputs, no loops or tables")
+        lines.append(f"{name}: compiled circuit, {c.nqubits} qubits ({c.n_in} in, {c.n_out} out), {len(c.gates)} gates "
+                     f"({rep['toffoli']} Toffoli); checked on {how}")
+    return "\n".join(code), circuits, lines
+
+
 # ------------------------------------------------------------------ build
 def build(a, cflags, ldflags, sources):
     host_cc = shlex.split(a.cc or os.environ.get("CC") or default_cc(), posix=os.name != "nt")
@@ -269,9 +435,13 @@ def build(a, cflags, ldflags, sources):
                 print(f"qcpucc: warning: {len(B['unsupported'])} instruction(s) the quantum CPU does not implement; "
                       "a call that reaches one fails with QCPU_TRAP: " + "; ".join(e["asm"] for e in B["unsupported"][:5]),
                       file=sys.stderr)
+            extra_c, circuits, mode_lines = "", {}, []
+            if a.qcpu_mode != "interpreted":
+                extra_c, circuits, mode_lines = compile_functions(qobj, isa, funcs, all_defs, a.qcpu_mode,
+                                                                  "__CHAR_UNSIGNED__" not in host_macros)
             gen = os.path.join(d, "qcpu_wrappers.c")
             open(gen, "w").write(qpu_dll.library_source(os.path.splitext(os.path.basename(out))[0], hdr, funcs, B,
-                                                        a.qcpu_max_steps, True))
+                                                        a.qcpu_max_steps, True, circuits, extra_c))
             if a.keep:
                 shutil.copy(gen, out + ".qcpu_wrappers.c")
             gobj = os.path.join(d, "qcpu_wrappers.o")
@@ -303,6 +473,8 @@ def build(a, cflags, ldflags, sources):
         print(f"qcpucc: {out}: {len(names)} __qcpu__ function(s) on the quantum CPU ({isa.title}, W = {B['W']}, "
               f"{len(B['code'])} {'bytes' if isa.unit == 1 else 'instructions'}, {m.n} qubits, {len(B['tmpl'])} gates "
               f"per cycle): {', '.join(names)}", file=sys.stderr)
+        for line in mode_lines:
+            print("qcpucc:   " + line, file=sys.stderr)
         if dm_diffs:
             print("qcpucc: note: the host and quantum-CPU data models differ (" + "; ".join(dm_diffs) + "); calls "
                   "rely on the comparison with the host build (QCPU_VERIFY=1, the default)", file=sys.stderr)
@@ -320,6 +492,10 @@ def main(argv=None):
     ap.add_argument("--qcpu-memory", type=int, default=512, help="data memory in ints, a power of two (default 512)")
     ap.add_argument("--qcpu-max-steps", type=int, default=1000000, help="default cycle limit per call")
     ap.add_argument("--qcpu-opt", default="1", help="optimisation level of the quantum-CPU code (default 1)")
+    ap.add_argument("--qcpu-mode", choices=("interpreted", "compiled", "auto"), default="interpreted",
+                    help="interpreted: the whole quantum CPU runs each function (default); compiled: also a small "
+                         "circuit of each function alone (qoracle), required for every function; auto: compiled where "
+                         "possible. The program runs the compiled circuit unless QCPU_MODE=interpreted")
     ap.add_argument("--cc", help="host C compiler (default $CC, else cc)")
     ap.add_argument("--keep", action="store_true", help="keep the generated wrapper source next to the output")
     a, rest = ap.parse_known_args(argv)

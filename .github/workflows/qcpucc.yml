@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main, qcpu]
+    branches: [main, qcpu, compiled-mode]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -23,7 +23,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm cmake
       - name: Python packages
-        run: python -m pip install unicorn lief capstone
+        run: python -m pip install unicorn lief capstone "qoracle @ git+https://github.com/quantag/qoracle.git"
       - name: Tool versions
         shell: bash
         run: |

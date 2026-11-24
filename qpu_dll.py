@@ -191,8 +191,11 @@ def c_array(name, values, ctype="uint32_t"):
     return f"static const {ctype} {name}[] = {{\n" + ",\n".join(rows) + "\n};\n"
 
 
-def library_source(libname, header, funcs, B, max_steps, native):
-    """The C file of the library: the engine, the circuit as data, and one wrapper per function."""
+def library_source(libname, header, funcs, B, max_steps, native, circuits=None, extra_c=""):
+    """The C file of the library: the engine, the circuit as data, and one wrapper per function.
+    circuits: {function: C name of its qpu__circuit} for functions that also have a compiled circuit, defined
+    by extra_c (qcpucc --qcpu-mode compiled|auto)."""
+    circuits = circuits or {}
     m, W, isa = B["m"], B["W"], B["isa"]
     gates = []
     for g in B["tmpl"]:
@@ -211,7 +214,7 @@ def library_source(libname, header, funcs, B, max_steps, native):
          f'    "{libname}", {W}, {m.n}u, qpu__gates, {len(B["tmpl"])}, qpu__ones, {len(B["ones"])}, qpu__step, {len(B["step_ids"])},',
          f"    qpu__pc_in, qpu__pc_next, {len(B['pc_in'])}, {B['run_in']}u, {B['run_out']}u, {B['trap']}u,",
          f"    qpu__argq, {B['nargs']}, qpu__retq, qpu__ramq, {B['mem_cells']}, {B['user_cell']}, {B['user_cells']},",
-         f"    {max_steps}L, {1 if native else 0}", "};", ""]
+         f"    {max_steps}L, {1 if native else 0}", "};", "", extra_c]
     if native:
         for name, ret, params in funcs:
             L.append(f"{ret} qpu__native_{name}({', '.join(p.ctype + ' ' + p.name for p in params) or 'void'});")
@@ -226,8 +229,9 @@ def library_source(libname, header, funcs, B, max_steps, native):
         if bufs:
             L.append("    qpu__buf qpu__b[%d] = {%s};" % (len(bufs), ", ".join(
                 f"{{{i}, QPU__{p.direction}, (int *){p.name}, (long long)({p.count})}}" for i, p in bufs)))
-        L.append(f'    qpu__start(&qpu__c, &qpu__L, "{name}", {B["entry"][name]}L, {len(params)}, {"qpu__a" if params else "NULL"}, '
-                 f'{"qpu__b" if bufs else "NULL"}, {len(bufs)});')
+        circ = f"&{circuits[name]}" if name in circuits else "NULL"
+        L.append(f'    qpu__start_c(&qpu__c, &qpu__L, {circ}, "{name}", {B["entry"][name]}L, {len(params)}, '
+                 f'{"qpu__a" if params else "NULL"}, {"qpu__b" if bufs else "NULL"}, {len(bufs)});')
         L.append("    long long qpu__n = 0;")
         if native:
             bidx = {i: k for k, (i, _) in enumerate(bufs)}

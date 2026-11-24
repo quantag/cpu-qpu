@@ -22,7 +22,8 @@
  *   QCPU_EXACT      1 (default): a call needs a guarantee, else QCPU_UNVERIFIED | 0: allow unchecked
  *   QCPU_ON_FAIL    abort (default): stop with a message | native: use the host build's result | status
  *   QCPU_MAX_STEPS  machine cycles before a call is stopped (default: given at build time)
- *   QCPU_QUIET      1: no notes on stderr */
+ *   QCPU_QUIET      1: no notes on stderr
+ *   QCPU_MODE       compiled (default where a function has a compiled circuit) | interpreted | auto */
 #ifndef QPU_ENGINE_H
 #define QPU_ENGINE_H
 #include <stddef.h>
@@ -61,6 +62,19 @@ typedef struct {
     int has_native;                   /* the host build of the functions is in the library */
 } qpu__lib;
 
+typedef struct {                      /* compiled mode: a circuit of one function alone (qoracle) */
+    uint32_t nqubits;
+    const uint32_t *gates;            /* 3 words per gate, as in qpu__lib (op 0 x, 1 cx, 2 ccx) */
+    long ngates;
+    int nargs;
+    const uint32_t *in_first;         /* first qubit of argument i's register */
+    const unsigned char *in_bits;     /* its width */
+    const unsigned char *in_signed;   /* 1: the argument's range is signed (two's complement) */
+    uint32_t out_first;               /* the result register: out_bits qubits, an unsigned value */
+    int out_bits;
+    uint32_t work_first;              /* qubits from here on start and end in 0 */
+} qpu__circuit;
+
 enum { QPU__IN = 1, QPU__OUT = 2, QPU__INOUT = 3 };
 
 typedef struct {
@@ -89,11 +103,15 @@ typedef struct {                      /* one call, between qpu__start and qpu__f
     int exact;                        /* QCPU_EXACT */
     int alias[QPU__MAXBUF];           /* buffer b shares its data with buffer alias[b] (== b if not) */
     long long cell_of[QPU__MAXBUF];   /* first data-memory cell of buffer b */
+    const qpu__circuit *circ;         /* compiled mode: the circuit this call runs (NULL: interpreted) */
 } qpu__ctx;
 
 /* Run fn (entry PC) on the quantum machine. Holds a lock until qpu__finish. */
 void qpu__start(qpu__ctx *c, const qpu__lib *lib, const char *fn, long entry, int nargs, const long long *args,
                 qpu__buf *bufs, int nbufs);
+/* The same, with the function's compiled circuit (NULL if it has none); QCPU_MODE picks which one runs. */
+void qpu__start_c(qpu__ctx *c, const qpu__lib *lib, const qpu__circuit *circ, const char *fn, long entry, int nargs,
+                  const long long *args, qpu__buf *bufs, int nbufs);
 /* For the host build: a copy of buffer b to call it with. */
 int *qpu__native_copy(qpu__ctx *c, int b);
 /* Compare a host-build result with the QPU's. */

@@ -466,8 +466,27 @@ How it works, at build time and at every call:
   in GitHub Actions. On a Mac: `python3 qcpucc.py examples/codebreaker/codebreaker.c -o codebreaker`
   (Apple clang does both sides). On Windows `long` is 4 bytes, on the quantum CPU 8: a function whose
   result depends on it is stopped with `QCPU_MISMATCH`, never returned wrong.
-- **Not yet:** compiled circuits from qoracle (much smaller, for real hardware), hardware drivers,
-  and the E2/E3 guarantees of the spec. `QPU_*` names still work as aliases.
+- **Compiled mode.** `qcpucc --qcpu-mode auto` (or `compiled`, which requires it for every function) also
+  turns each `__qcpu__` function into a circuit of its own with [qoracle](https://github.com/quantag/qoracle):
+  no processor, just the function's logic. Annotations give the widths: `QCPU_BITS(n)` (0 .. 2^n − 1),
+  `QCPU_SBITS(n)` (signed) per argument, `QCPU_RESULT_BITS(n)` for the result, which the build proves (a
+  false claim fails the build with a counterexample). A circuit is embedded when it is checked on every
+  input (at most 16 input bits), or when the function has no loops and no tables. Calls are still checked
+  against the host build, arguments outside their bits fail with `QCPU_BAD_ARGS`, and `QCPU_MODE=interpreted`
+  runs the whole quantum CPU instead. Code Breaker's `score()`:
+
+  ```
+  $ python3 qcpucc.py --qcpu-mode auto examples/codebreaker/codebreaker.c -o codebreaker
+  qcpucc:   score: compiled circuit, 544 qubits (16 in, 6 out), 1844 gates (614 Toffoli); checked on all 65536 inputs
+  $ ./codebreaker
+  turn 1>   RRGG  black 2  white 0    [compiled circuit: 1844 gates on 544 qubits, checked]
+  ```
+
+  35.3 million gates on 565k qubits per call become 1,844 gates on 544 qubits. Needs
+  `python3 -m pip install git+https://github.com/quantag/qoracle` (in `requirements.txt`).
+- **Not yet:** run-time guards for loop bounds measured on samples (functions with loops need inputs of
+  at most 16 bits for now), compiled circuits that write memory, hardware drivers, and the E2/E3
+  guarantees of the spec. `QPU_*` names still work as aliases.
 
 ## Calling QPU functions from a host program, like a DLL
 
