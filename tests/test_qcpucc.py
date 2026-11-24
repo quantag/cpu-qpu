@@ -65,7 +65,7 @@ def main():
             moves = "RGBY\nYYGG\nBBRR\n"      # the secret for a seed depends on the C library's rand()
             got = sh([os.path.join(b, "codebreaker"), "7"], inp=moves, check=False)
             want = sh([game, "7"], inp=moves, check=False)
-            assert got.stdout == want.stdout and got.stdout.count("checked]") == 3, (got.stdout, want.stdout)
+            assert got.stdout == want.stdout and got.stdout.count("checked]") == got.stdout.count("black ") > 0, (got.stdout, want.stdout)
             print("   CMake build (add_qcpu_executable): same program")
 
         # 2. pruning
