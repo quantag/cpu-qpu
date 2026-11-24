@@ -169,11 +169,21 @@ def main():
         sh(QCPUCC + [dm, "-o", exe])
         sh(HOST_CC + ["-I", RT, dm, "-o", os.path.join(d, "dmn")])
         want = sh([os.path.join(d, "dmn")]).stdout
-        p = sh([exe])
-        assert p.stdout == want and not p.stderr, (p.stdout, want, p.stderr)
+        _, host_diffs = qcpucc.data_model(HOST_CC, ["clang"] + qcpucc.isas.get("arm64").clang)
+        if not any("sizeof(long)" in x for x in host_diffs):
+            p = sh([exe])
+            assert p.stdout == want and not p.stderr, (p.stdout, want, p.stderr)
+            seen = f"equal to the host ({want.splitlines()[0]})"
+        else:                             # Windows (LLP64): long is 4 bytes here, 8 on the quantum CPU
+            p = sh([exe], check=False)
+            assert p.returncode == 70 and "QCPU_MISMATCH" in p.stderr and not p.stdout, (p.returncode, p.stdout, p.stderr)
+            p = sh([exe], env=env(QCPU_ON_FAIL="native"))       # the order of the three calls is the compiler's
+            assert p.stdout.splitlines()[0] == want.splitlines()[0] and "QCPU_MISMATCH" in p.stderr, (p.stdout, p.stderr, want)
+            seen = (f"differ on this host (sizeof(long) 4): caught as QCPU_MISMATCH, exit 70; with ON_FAIL=native the "
+                    f"host values ({want.splitlines()[0]})")
         flags, diffs = qcpucc.data_model(["clang", "--target=x86_64-pc-windows-msvc"], ["clang", "--target=aarch64-linux-gnu"])
         assert any("sizeof(long): host 4, quantum CPU 8" in x for x in diffs) and "-fsigned-char" in flags, (flags, diffs)
-        print(f"6) data models: sizeof(long), (char)200 < 0, struct size equal to the host ({want.split(chr(10))[0]}); "
+        print(f"6) data models: sizeof(long), (char)200 < 0, struct size {seen}; "
               "a Windows host compiler: reported " + "; ".join(x for x in diffs if "long)" in x))
     print("PASS")
 
