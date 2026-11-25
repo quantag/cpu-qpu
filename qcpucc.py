@@ -195,8 +195,20 @@ def host_copy(path, src, defs, names):
 
 
 # ------------------------------------------------------------------ compilers
+def start(cmd, **kw):
+    """subprocess.run, with a message that names a program which is not installed."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    except FileNotFoundError:
+        hint = ("install clang (LLVM), which also compiles the quantum-CPU side" if "clang" in cmd[0] else
+                "check the name, or choose another compiler with --cc")
+        if os.name == "nt" and "mingw32" in cmd[0]:
+            hint = "install LLVM-MinGW (winget install -e --id MartinStorsjo.LLVM-MinGW.UCRT), then open a new window"
+        raise Error(f"cannot run '{cmd[0]}': it is not installed or not on PATH; {hint}")
+
+
 def macros(cc, flags):
-    p = subprocess.run(cc + flags + ["-dM", "-E", "-x", "c", "-"], input="", capture_output=True, text=True)
+    p = start(cc + flags + ["-dM", "-E", "-x", "c", "-"], input="")
     if p.returncode:
         raise Error("cannot run " + " ".join(cc) + ": " + p.stderr.strip())
     out = {}
@@ -246,7 +258,7 @@ def split_args(rest):
 
 
 def run(cmd, what):
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = start(cmd)
     if p.returncode:
         raise Error(f"{what} failed:\n  {shlex.join(cmd)}\n{p.stdout}{p.stderr}")
     return p
