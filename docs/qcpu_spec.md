@@ -397,6 +397,21 @@ section 5.5.1: with a `|−⟩` output for Grover search (find the secret code f
 `is_secret(guess)`), or as a compute oracle in period finding. That is outside ordinary calls
 (section 11), but the circuit is the same.
 
+#### 5.5.3 Quantum search from C: `qcpu_search()` *(exists)*
+
+`int qcpu_search(int (*f)(int), int bits, int *x)` finds an `x` in `0 .. 2^bits − 1` with `f(x) = 1`.
+`f` is a `__qcpu__` function of one `QCPU_BITS(bits)` argument with `QCPU_RESULT_BITS(1)`. In a
+`--qcpu-mode qoracle` build, `qcpucc` also embeds `f`'s phase oracle, and the runtime runs Grover's
+search with it: the randomized form for an unknown number of solutions (Boyer, Brassard, Høyer, Tapp
+1998), each measured answer checked with an ordinary call of `f` (so under E1); 0 after about 4.5·√N
+oracle calls. The simulation keeps the 2^bits amplitudes of the argument register (every other qubit is
+0 between calls) and obtains the oracle's phases by running its gates on each basis input once;
+`bits` ≤ 24. Without a phase oracle (`QCPU_MODE=native` or `qcpu`, a `qcpu` build), or built by a plain
+compiler (`qcpu.h`), the search is classical: every input in turn, the same answer. `qcpu_last_call()`:
+mode `"grover"` or `"classical"`, oracle calls in `cycles`. `QCPU_SEED` makes the measurements
+repeatable. Errors: `bits` other than the declared width, `QCPU_MODE=qoracle` without a phase oracle
+(`QCPU_BAD_ARGS`). On hardware, the same search would send the phase oracle to the device (section 5.4).
+
 ### 5.6 Exactness: what a call returns
 
 **Contract.** By default a `__qcpu__` call returns exactly the value the function returns as C code on
@@ -532,6 +547,7 @@ the counts of every hardware call.
 | setting | values | default |
 |---|---|---|
 | `QCPU_MODE` | `qcpu`, `qoracle`, `native` | the built mode (the first one if both) |
+| `QCPU_SEED` | an integer: the measurements of `qcpu_search` | from the clock |
 | `QCPU_BACKEND` | `sim`, driver name (planned); `native` = `QCPU_MODE=native` | `sim` |
 | `QCPU_SHOTS` | shots per call on a hardware driver | `32` |
 | `QCPU_VERIFY` | `0`, `1`: compare every call with the native fallback (E1) | `1` |

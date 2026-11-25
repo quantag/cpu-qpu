@@ -134,7 +134,7 @@ def main():
         p = sh(QCPUCC + ["--qcpu-mode", "qoracle", "--qcpu-export", oracle,
                          os.path.join(ROOT, "examples", "codebreaker", "solver.c"), "-o", os.path.join(d, "solver")])
         assert "consistent: qoracle circuit, 1045 qubits (8 in, 1 out), 4255 gates" in p.stderr, p.stderr
-        assert sh([os.path.join(d, "solver")]).stdout.strip().endswith(": BYRG")
+        assert "the secret code: BYRG" in sh([os.path.join(d, "solver")]).stdout
         p = sh([sys.executable, os.path.join(ROOT, "examples", "codebreaker", "grover_solver.py"),
                 os.path.join(oracle, "consistent_phase.qasm")])
         assert "after 12 Grover iterations" in p.stdout and "  BYRG  probability 0.9999" in p.stdout, p.stdout

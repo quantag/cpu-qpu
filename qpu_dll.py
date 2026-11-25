@@ -228,7 +228,20 @@ def wrappers(funcs, entry, native, circuits):
     return L
 
 
-def library_source(libname, header, funcs, B, max_steps, native, circuits=None, extra_c="", qoracle_first=False):
+def search_table(searches, funcs):
+    """C lines: the qcpu_search() table and qcpu_search(). searches: (function, C name of its phase circuit, bits);
+    every other function of one argument is listed too, without a circuit, so that a search names it."""
+    L = ["", "static const qpu__search_entry qpu__searchable[] = {"]
+    L += [f'    {{"{n}", (void (*)(void)){n}, &{var}, {bits}}},' for n, var, bits in searches]
+    have = {n for n, _, _ in searches}
+    L += [f'    {{"{n}", (void (*)(void)){n}, NULL, 0}},' for n, _, params in funcs if len(params) == 1 and n not in have]
+    L += ["    {NULL, NULL, NULL, 0}", "};",
+          "QPU__EXPORT int qcpu_search(int (*f)(int), int bits, int *x) { return qpu__search(qpu__searchable, f, bits, x); }"]
+    return L
+
+
+def library_source(libname, header, funcs, B, max_steps, native, circuits=None, extra_c="", qoracle_first=False,
+                   searches=()):
     """The C file of the library: the engine, the circuit as data, and one wrapper per function.
     circuits: {function: C name of its qpu__circuit}, defined by extra_c (qcpucc --qcpu-mode qoracle); B is None
     when the library has no quantum CPU. qoracle_first: QCPU_MODE defaults to qoracle (--qcpu-mode qoracle,qcpu)."""
@@ -239,7 +252,7 @@ def library_source(libname, header, funcs, B, max_steps, native, circuits=None, 
              "static const qpu__lib qpu__L = {",
              f'    "{libname}", 0, 0u, NULL, 0, NULL, 0, NULL, 0, NULL, NULL, 0, 0u, 0u, 0u, NULL, 0, NULL, NULL, 0, 0, 0,',
              f"    {max_steps}L, {1 if native else 0}, 1", "};", "", extra_c]
-        return "\n".join(L + wrappers(funcs, {n: 0 for n, _, _ in funcs}, native, circuits)) + "\n"
+        return "\n".join(L + wrappers(funcs, {n: 0 for n, _, _ in funcs}, native, circuits) + search_table(searches, funcs)) + "\n"
     m, W, isa = B["m"], B["W"], B["isa"]
     gates = []
     for g in B["tmpl"]:
@@ -259,7 +272,7 @@ def library_source(libname, header, funcs, B, max_steps, native, circuits=None, 
          f"    qpu__pc_in, qpu__pc_next, {len(B['pc_in'])}, {B['run_in']}u, {B['run_out']}u, {B['trap']}u,",
          f"    qpu__argq, {B['nargs']}, qpu__retq, qpu__ramq, {B['mem_cells']}, {B['user_cell']}, {B['user_cells']},",
          f"    {max_steps}L, {1 if native else 0}, {1 if qoracle_first else 0}", "};", "", extra_c]
-    L += wrappers(funcs, B["entry"], native, circuits)
+    L += wrappers(funcs, B["entry"], native, circuits) + search_table(searches, funcs)
     L += ["", "#ifdef QPU__SELFTEST",
           "QPU__EXPORT long qpu__selftest(long entry, int nargs, const long long *args, unsigned char *out) {",
           "    return qpu__selftest_run(&qpu__L, entry, nargs, args, out);", "}",

@@ -22,6 +22,7 @@ static pthread_mutex_t qpu__lock = PTHREAD_MUTEX_INITIALIZER;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static qcpu_call_info qpu__last;
 static const char *QPU__NAMES[] = {"QCPU_OK", "QCPU_MISMATCH", "QCPU_INEXACT", "QCPU_INCOMPLETE", "QCPU_TRAP",
@@ -158,6 +159,147 @@ static void qpu__run_circuit(qpu__ctx *c, const qpu__circuit *K, int nargs, cons
                 break;
             }
     free(st);
+}
+
+/* ------------------------------------------------------------------ qcpu_search: Grover's search */
+static unsigned long long qpu__rng;
+static double qpu__random(void) {                  /* xorshift64*, uniform in [0, 1) */
+    qpu__rng ^= qpu__rng >> 12; qpu__rng ^= qpu__rng << 25; qpu__rng ^= qpu__rng >> 27;
+    return (double)((qpu__rng * 2685821657736338717ULL) >> 11) / 9007199254740992.0;
+}
+
+static void qpu__search_done(const char *fn, const char *mode, int status, long calls, long long qubits,
+                             long long gates, const char *fmt, ...) {
+    QPU__LOCK();
+    memset(&qpu__last, 0, sizeof qpu__last);
+    qpu__last.status = status;
+    qpu__last.function = fn;
+    qpu__last.backend = "sim";
+    qpu__last.guarantee = "checked";
+    qpu__last.mode = mode;
+    qpu__last.cycles = calls;
+    qpu__last.qubits = qubits;
+    qpu__last.gates = gates;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(qpu__last.message, sizeof qpu__last.message, fmt, ap);
+    va_end(ap);
+    QPU__UNLOCK();
+}
+
+static void qpu__search_fail(const char *fn, int status, const char *fmt, const char *arg) {
+    char why[200];
+    snprintf(why, sizeof why, fmt, arg);
+    qpu__search_done(fn, "none", status, 0, 0, 0, "%s", why);
+    const char *on_fail = qpu__getenv("QCPU_ON_FAIL");
+    if (!on_fail || !strcmp(on_fail, "abort")) {
+        fprintf(stderr, "qcpu: qcpu_search(%s): %s: %s\n", fn, qcpu_status_name(status), why);
+        exit(70);
+    }
+}
+
+int qpu__search(const qpu__search_entry *T, int (*f)(int), int bits, int *x) {
+    const qpu__search_entry *e = NULL;
+    for (; T && T->name; T++)
+        if (T->fn == (void (*)(void))f) { e = T; break; }
+    const char *fn = e ? e->name : "predicate";
+    if (bits < 1 || bits > 24) {
+        qpu__search_fail(fn, QCPU_BAD_ARGS, "bits must be 1 .. 24, not %s", bits < 1 ? "less" : "more");
+        return 0;
+    }
+    if (e && e->bits && e->bits != bits) {
+        char b[16];
+        snprintf(b, sizeof b, "%d", e->bits);
+        qpu__search_fail(fn, QCPU_BAD_ARGS, "its argument is declared QCPU_BITS(%s); give that number of bits", b);
+        return 0;
+    }
+    const char *mode = qpu__getenv("QCPU_MODE"), *backend = qpu__getenv("QCPU_BACKEND");
+    if (!mode && backend && !strcmp(backend, "native")) mode = "native";
+    if (mode && !strcmp(mode, "qoracle") && !(e && e->phase)) {
+        qpu__search_fail(fn, QCPU_BAD_ARGS, "QCPU_MODE=qoracle, but %s has no phase oracle in this program (a "
+                         "one-bit result, one QCPU_BITS argument, qcpucc --qcpu-mode qoracle)", fn);
+        return 0;
+    }
+    long N = 1L << bits;
+    if (!(e && e->phase) || (mode && strcmp(mode, "qoracle"))) {     /* classical: try every input */
+        for (long v = 0; v < N; v++)
+            if (f((int)v)) {
+                *x = (int)v;
+                qpu__search_done(fn, "classical", QCPU_OK, v + 1, 0, 0, "classical search: %ld call(s) of %s", v + 1, fn);
+                return 1;
+            }
+        qpu__search_done(fn, "classical", QCPU_OK, N, 0, 0, "classical search: no input of %d bits satisfies %s", bits, fn);
+        return 0;
+    }
+
+    /* Grover's search, simulated exactly. Between oracle calls only the argument register is in superposition
+     * and every other qubit is 0, so the state is N amplitudes. The simulator runs the phase oracle's gates on
+     * every basis input once (a simulator has to); a quantum computer applies them to all inputs at once. */
+    const qpu__circuit *K = e->phase;
+    signed char *sign = malloc(N);
+    double *amp = malloc(N * sizeof *amp);
+    unsigned char *st = calloc(K->nqubits ? K->nqubits : 1, 1);
+    if (!sign || !amp || !st) { fprintf(stderr, "qcpu: qcpu_search(%s): out of memory\n", fn); exit(70); }
+    for (long v = 0; v < N; v++) {
+        memset(st, 0, K->nqubits);
+        for (int b = 0; b < bits; b++) st[K->in_first[0] + b] = (unsigned char)((v >> b) & 1);
+        int s = 1;
+        for (long g = 0; g < K->ngates; g++) {
+            const uint32_t *w = K->gates + 3 * g;
+            uint32_t a = w[0] & 0x3FFFFFFFu;
+            switch (w[0] >> 30) {
+            case 0: st[a] ^= 1; break;
+            case 1: st[w[1]] ^= st[a]; break;
+            case 2: st[w[2]] ^= (unsigned char)(st[a] & st[w[1]]); break;
+            default: if (st[a]) s = -s;                                  /* Z */
+            }
+        }
+        for (uint32_t q = 0; q < K->nqubits; q++)
+            if (st[q] != ((q >= K->in_first[0] && q < K->in_first[0] + (uint32_t)bits) ? ((v >> (q - K->in_first[0])) & 1) : 0)) {
+                free(sign); free(amp); free(st);
+                qpu__search_fail(fn, QCPU_INEXACT, "the phase oracle of %s does not return its qubits (a broken circuit)", fn);
+                return 0;
+            }
+        sign[v] = (signed char)s;
+    }
+    free(st);
+    const char *seed = qpu__getenv("QCPU_SEED");
+    qpu__rng = seed ? strtoull(seed, NULL, 10) * 0x9E3779B97F4A7C15ULL + 1 : (unsigned long long)time(NULL) ^ (unsigned long long)(uintptr_t)amp;
+    if (!qpu__rng) qpu__rng = 1;
+    /* The number of solutions is not known: Boyer, Brassard, Hoyer, Tapp (1998). Each round runs a random number
+     * of Grover iterations below m, measures, and checks the answer with an ordinary call of f. */
+    double m = 1, root = (double)(1L << (bits / 2)) * (bits & 1 ? 1.4142135623730951 : 1.0);   /* sqrt(N) */
+    long calls = 0, limit = (long)(4.5 * root) + 4;
+    int rounds = 0, found = 0;
+    long v = 0;
+    while (calls <= limit) {
+        rounds++;
+        long j = (long)(qpu__random() * m);
+        for (long i = 0; i < N; i++) amp[i] = 1 / root;
+        for (long it = 0; it < j; it++) {
+            double mean = 0;
+            for (long i = 0; i < N; i++) { amp[i] *= sign[i]; mean += amp[i]; }      /* the oracle */
+            mean /= N;
+            for (long i = 0; i < N; i++) amp[i] = 2 * mean - amp[i];                /* diffusion */
+        }
+        calls += j;
+        double r = qpu__random(), acc = 0;                                        /* measure the argument */
+        for (v = 0; v < N - 1; v++) { acc += amp[v] * amp[v]; if (acc > r) break; }
+        if (f((int)v)) { found = 1; break; }
+        m = m * 6 / 5 < root ? m * 6 / 5 : root;
+    }
+    free(sign);
+    free(amp);
+    long long gates = (long long)calls * K->ngates;
+    if (found) {
+        *x = (int)v;
+        qpu__search_done(fn, "grover", QCPU_OK, calls, K->nqubits, gates, "Grover's search: %ld oracle call(s) in %d "
+                         "round(s) over %ld inputs; %s(%ld) = 1 checked", calls, rounds, N, fn, v);
+    } else {
+        qpu__search_done(fn, "grover", QCPU_OK, calls, K->nqubits, gates, "Grover's search: nothing found in %ld oracle "
+                         "call(s), %d round(s); with a solution that is very unlikely", calls, rounds);
+    }
+    return found;
 }
 
 void qpu__start(qpu__ctx *c, const qpu__lib *L, const char *fn, long entry, int nargs, const long long *args,

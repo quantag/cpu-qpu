@@ -646,30 +646,69 @@ cudaq.sample(grover, 3)    # about 96% of the shots: '1010' (q[0] first), x = 5
 
 (Run it from a `.py` file or Jupyter: `@cudaq.kernel` reads the kernel's source.)
 
-**A Grover solver for Code Breaker** (`examples/codebreaker/solver.c`): `consistent(secret)` says whether
-a secret code fits the answers of a game so far, using the game's own scoring. Exported, it becomes a
-phase oracle of 1,044 qubits and 4,255 gates; Grover's search finds the secret in 12 oracle calls, where
-a classical search tries up to 256 codes:
-
-```
-$ python3 qcpucc.py --qcpu-mode qoracle --qcpu-export oracle examples/codebreaker/solver.c -o solver
-qcpucc:   consistent: qoracle circuit, 1045 qubits (8 in, 1 out), 4255 gates (1074 Toffoli); checked on all 256 inputs
-$ ./solver
-codes consistent with RRGG 1/1, RGBY 0/4, YRGB 0/4: BYRG
-$ python3 examples/codebreaker/grover_solver.py oracle/consistent_phase.qasm
-after 12 Grover iterations (12 oracle calls; a classical search tries up to 256 codes):
-  BYRG  probability 0.9999
-```
-
-1,044 qubits is far beyond a state-vector simulator (CUDA-Q's included), but Grover puts only the 8
-qubits of the secret in superposition, so `grover_solver.py` runs it exactly on 256 amplitudes, reading
-the circuit from the exported file.
+The Code Breaker solver of the next section also works from the exported file:
+`examples/codebreaker/grover_solver.py oracle/consistent_phase.qasm` reads the 1,044-qubit phase oracle
+and finds the secret with probability 0.9999 in 12 oracle calls. 1,044 qubits is far beyond a
+state-vector simulator (CUDA-Q's included), but Grover puts only the 8 qubits of the secret in
+superposition, so the script runs it exactly on 256 amplitudes.
 
 What is checked (`tests/test_qcpu_export.py`, in CI): the exported compute oracles give the C
 function's result for every input; Qiskit loads every file; in CUDA-Q 0.17 the exported Python kernels
 run, right for every input, and Grover with the phase oracle finds the marked value; the C++ header
 type-checks against CUDA-Q's own `cudaq.h` (running it needs `nvq++`, which is not part of the pip
 package and has not been tried); the Code Breaker solver finds BYRG.
+
+## Quantum search from C: `qcpu_search()`
+
+A C program can also run a quantum algorithm itself. `qcpu_search(f, bits, &x)` looks for an `x` with
+`f(x) == 1`, where `f` is a `__qcpu__` predicate: one argument with `QCPU_BITS(bits)`, and
+`QCPU_RESULT_BITS(1)`. Built with `--qcpu-mode qoracle`, it is **Grover's search** with `f`'s phase
+oracle, `|x⟩ → (−1)^f(x) |x⟩`, in the simulator built into the program; any answer is checked with an
+ordinary call of `f` before it is returned.
+
+**Code Breaker solver** (`examples/codebreaker/solver.c`): `consistent(secret)` says whether a secret
+code fits the answers of a game so far, using the game's own scoring.
+
+```c
+__qcpu__ int QCPU_RESULT_BITS(1) consistent(int QCPU_BITS(8) secret)
+{
+    return answer(RRGG, secret) == 1 * 8 + 1 && answer(RGBY, secret) == 0 * 8 + 4 && answer(YRGB, secret) == 0 * 8 + 4;
+}
+
+int main(void)
+{
+    int secret;
+    if (qcpu_search(consistent, 8, &secret))
+        printf("the secret code: ...", ...);
+}
+```
+
+```
+$ python3 qcpucc.py --qcpu-mode qoracle examples/codebreaker/solver.c -o solver
+qcpucc:   consistent: qoracle circuit, 1045 qubits (8 in, 1 out), 4255 gates (1074 Toffoli); checked on all 256 inputs
+qcpucc:   consistent: phase oracle for qcpu_search(), 1044 qubits, 4255 gates
+$ ./solver
+the game so far: RRGG black 1 white 1, RGBY black 0 white 4, YRGB black 0 white 4
+the secret code: BYRG
+[Grover's search: 6 oracle call(s) in 9 round(s) over 256 inputs; consistent(78) = 1 checked]
+```
+
+| build or setting | how `qcpu_search` searches | calls of `consistent` for this game |
+|---|---|---|
+| `--qcpu-mode qoracle` | Grover's search with the phase oracle | 23.9 on average (40 runs: oracle calls plus checks), at most 61 |
+| `QCPU_MODE=native`, `--qcpu-mode qcpu`, a plain C compiler | a classical search, every code in turn | 79 here; 128.5 on average for one code in 256 |
+
+The number of solutions is not known in advance, so it is the randomized form of Grover's search
+(Boyer, Brassard, Høyer and Tapp, 1998): rounds with a random number of iterations, growing, each ending
+in a measurement that is checked. Several solutions: any one of them is returned. None: `qcpu_search`
+returns 0 after about 4.5·√N oracle calls (with a solution, that is very unlikely). The result of each
+run varies with the measurements; `QCPU_SEED=n` makes a run repeatable. `qcpu_last_call(&info)` reports
+`info.mode` (`"grover"` or `"classical"`), the oracle calls in `info.cycles`, and a message.
+
+How the simulation works: between oracle calls only the 8 qubits of the argument are in
+superposition, so the state is 256 amplitudes, updated exactly. To get the oracle's effect, the
+simulator runs its 4,255 gates on each of the 256 basis inputs once, which a simulator cannot avoid; a
+quantum computer would apply them to all inputs at once, in each of the calls. Up to 24 bits.
 
 ## Q-ARM: quantum gates inside an ARM binary
 
@@ -1004,6 +1043,7 @@ python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O
 python3 -m tests.test_dll                        # QPU libraries: host program + generated .so/.dll; C engine == Python simulator
 python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
 python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
+python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths

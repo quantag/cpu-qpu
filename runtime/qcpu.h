@@ -62,6 +62,12 @@ extern "C" {
 /* Information about the last __qcpu__ call of this thread's program (calls are serialised). Returns its status. */
 int qcpu_last_call(qcpu_call_info *info);
 const char *qcpu_status_name(int status);
+/* Find an x in 0 .. 2^bits - 1 with predicate(x) == 1; returns 1 and stores it in *x, or 0 if none was found.
+ * predicate: a __qcpu__ function int f(int QCPU_BITS(bits) x) with QCPU_RESULT_BITS(1). Built with qcpucc
+ * --qcpu-mode qoracle, this is Grover's search with the function's phase oracle (simulated); the answer is
+ * checked with an ordinary call. Otherwise (QCPU_MODE=qcpu or native, or a plain compiler) every input is tried.
+ * qcpu_last_call() then reports mode "grover" or "classical", and the oracle calls in info.cycles. */
+int qcpu_search(int (*predicate)(int), int bits, int *x);
 #ifdef __cplusplus
 }
 #endif
@@ -72,6 +78,11 @@ static inline const char *qcpu_status_name(int s) {
     static const char *const names[] = {"QCPU_OK", "QCPU_MISMATCH", "QCPU_INEXACT", "QCPU_INCOMPLETE", "QCPU_TRAP",
         "QCPU_TIE", "QCPU_INSUFFICIENT", "QCPU_UNVERIFIED", "QCPU_BAD_ARGS", "QCPU_PROBABLE", "QCPU_UNCHECKED"};
     return s >= 0 && s < (int)(sizeof names / sizeof *names) ? names[s] : "QCPU_?";
+}
+static inline int qcpu_search(int (*predicate)(int), int bits, int *x) {
+    for (long v = 0; bits > 0 && bits <= 24 && v < (1L << bits); v++)
+        if (predicate((int)v)) { *x = (int)v; return 1; }
+    return 0;
 }
 static inline int qcpu_last_call(qcpu_call_info *info) {
     if (info) {

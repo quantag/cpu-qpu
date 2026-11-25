@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, qcpu-search]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -35,6 +35,8 @@ jobs:
         run: python -m tests.test_qcpucc
       - name: test_qcpu_export (OpenQASM part; Qiskit and CUDA-Q in the job below)
         run: python -m tests.test_qcpu_export
+      - name: test_qcpu_search
+        run: python -m tests.test_qcpu_search
   export:
     # the exported circuits in Qiskit and in CUDA-Q itself
     runs-on: ubuntu-latest
