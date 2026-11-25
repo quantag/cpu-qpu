@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Quantag IT Solutions GmbH
 //
-// Code Breaker solver: which secret codes fit the answers of a game so far?
+// Code Breaker solver: which secret code fits the answers of a game so far?
 //
-// consistent(secret) is 1 when every guess below would have got the answer it got. Built with
-//   qcpucc --qcpu-mode qoracle --qcpu-export oracle solver.c -o solver
-// the predicate becomes a quantum circuit, exported for other toolkits (OpenQASM 3, CUDA-Q) as a phase
-// oracle: |secret> -> (-1)^consistent(secret) |secret>. Grover's search with it finds the secret code
-// among all 256 in about 12 oracle calls (grover_solver.py). The program itself lists the
-// consistent codes classically, by calling consistent() for each of the 256 codes.
+// consistent(secret) is 1 when every guess below would have got the answer it got. The program asks
+// qcpu_search() for such a code:
+//
+//   qcpucc --qcpu-mode qoracle solver.c -o solver     Grover's search with consistent() as the oracle,
+//                                                     in the built-in simulator: about 12 oracle calls
+//   qcpucc solver.c -o solver   (or any C compiler)   a classical search: up to 256 calls
+//
+// With --qcpu-export oracle, the same oracle is also written for Qiskit and CUDA-Q (oracle/consistent_phase.qasm,
+// oracle/consistent_cudaq.py); grover_solver.py runs the search from that file.
 #include <stdio.h>
 #include <qcpu.h>
 
@@ -44,10 +47,17 @@ __qcpu__ int QCPU_RESULT_BITS(1) consistent(int QCPU_BITS(8) secret)
 int main(void)
 {
     const char *colours = "RGBY";
-    printf("codes consistent with RRGG 1/1, RGBY 0/4, YRGB 0/4:");
-    for (int s = 0; s < 256; s++)
-        if (consistent(s))
-            printf(" %c%c%c%c", colours[peg(s, 0)], colours[peg(s, 1)], colours[peg(s, 2)], colours[peg(s, 3)]);
-    printf("\n");
+    qcpu_call_info info;
+    int secret;
+    printf("the game so far: RRGG black 1 white 1, RGBY black 0 white 4, YRGB black 0 white 4\n");
+    if (qcpu_search(consistent, 8, &secret)) {
+        qcpu_last_call(&info);
+        printf("the secret code: %c%c%c%c\n", colours[peg(secret, 0)], colours[peg(secret, 1)],
+               colours[peg(secret, 2)], colours[peg(secret, 3)]);
+    } else {
+        qcpu_last_call(&info);
+        printf("no code fits these answers\n");
+    }
+    printf("[%s]\n", info.message[0] ? info.message : "classical search");
     return 0;
 }

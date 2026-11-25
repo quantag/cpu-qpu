@@ -77,6 +77,13 @@ typedef struct {                      /* qcpucc --qcpu-mode qoracle: a circuit o
     uint32_t work_first;              /* qubits from here on start and end in 0 */
 } qpu__circuit;
 
+typedef struct {                      /* qcpu_search(): a one-bit __qcpu__ function of one argument */
+    const char *name;
+    void (*fn)(void);                 /* its wrapper, the address the program passes */
+    const qpu__circuit *phase;        /* its phase oracle: |x>|0> -> (-1)^f(x) |x>|0> (gates: 0 x, 1 cx, 2 ccx, 3 z) */
+    int bits;                         /* QCPU_BITS(n) of its argument */
+} qpu__search_entry;
+
 enum { QPU__IN = 1, QPU__OUT = 2, QPU__INOUT = 3 };
 
 typedef struct {
@@ -114,6 +121,9 @@ void qpu__start(qpu__ctx *c, const qpu__lib *lib, const char *fn, long entry, in
 /* The same, with the function's own circuit (qoracle mode), or NULL: the quantum CPU runs it. */
 void qpu__start_c(qpu__ctx *c, const qpu__lib *lib, const qpu__circuit *circ, const char *fn, long entry, int nargs,
                   const long long *args, qpu__buf *bufs, int nbufs);
+/* qcpu_search() for the program: Grover's search with the phase oracle of f (table T, ending with a NULL name),
+ * or a classical search when f has none or QCPU_MODE asks for qcpu or native. */
+int qpu__search(const qpu__search_entry *T, int (*f)(int), int bits, int *x);
 /* For the host build: a copy of buffer b to call it with. */
 int *qpu__native_copy(qpu__ctx *c, int b);
 /* Compare a host-build result with the QPU's. */

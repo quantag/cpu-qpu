@@ -225,7 +225,7 @@ def main():
             table = exports.split("[Ordinal/Name Pointer] Table")[1].split("\n\n")[0]
             names = sorted(line.split("]")[1].strip() for line in table.strip().splitlines())
             fns = sorted(["gcd", "modexp", "is_prime", "sum", "sort", "squares"])
-            assert names == sorted(fns + ["qpu_last_status", "qpu_last_message", "qcpu_last_call", "qcpu_status_name"]), names
+            assert names == sorted(fns + ["qpu_last_status", "qpu_last_message", "qcpu_last_call", "qcpu_status_name", "qcpu_search"]), names
             block = sh(["x86_64-w64-mingw32-objdump", "-p", exe]).stdout.split("DLL Name: mathlib_qpu.dll")[1].split("DLL Name:")[0]
             assert all(f" {n}\n" in block for n in fns), block
             deps = sorted({l.split(":")[1].strip() for l in exports.splitlines() if "DLL Name:" in l})
@@ -240,7 +240,7 @@ def main():
                     p = subprocess.run([wine, exe], capture_output=True, text=True, env=wenv, timeout=600)
                     assert p.stdout.replace("\r\n", "\n") == want, p.stdout + p.stderr
                     ran = "main.exe under Wine prints the same as the CPU build"
-            print(f"7) Windows: DLL exports exactly the {len(fns)} functions (+4 status queries) and needs only "
+            print(f"7) Windows: DLL exports exactly the {len(fns)} functions (+5 runtime queries) and needs only "
                   f"{', '.join(deps)}; import library links; main.exe imports from mathlib_qpu.dll; {ran}")
     print("PASS")
 
