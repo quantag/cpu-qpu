@@ -170,17 +170,37 @@ void qpu__start_c(qpu__ctx *c, const qpu__lib *L, const qpu__circuit *circ, cons
     QPU__LOCK();
     memset(c, 0, sizeof *c);
     c->lib = L; c->fn = fn; c->bufs = bufs; c->nbufs = nbufs;
-    c->circ = circ;                       /* qcpucc --qcpu-mode qoracle: every function has its own circuit */
+    /* QCPU_MODE: qcpu (the quantum CPU), qoracle (the function's own circuit) or native (no circuit). Without it:
+     * the mode the program was built with (qcpucc --qcpu-mode), the first one if it was built with both.
+     * QCPU_BACKEND=native is the older name of QCPU_MODE=native; QCPU_BACKEND=sim changes nothing. */
     const char *backend = qpu__getenv("QCPU_BACKEND");
     if (backend && strcmp(backend, "native") && strcmp(backend, "sim") && strcmp(backend, "qpu"))
-        qpu__die(c, "QCPU_BACKEND=%s: this program supports sim and native", backend);
-    c->qpu = !(backend && strcmp(backend, "native") == 0);
+        qpu__die(c, "QCPU_BACKEND=%s: use QCPU_MODE=qcpu, qoracle or native", backend);
+    const char *mode = qpu__getenv("QCPU_MODE");
+    if (!mode)
+        mode = backend && !strcmp(backend, "native") ? "native" : L->ngates && !(circ && L->qoracle_first) ? "qcpu" : "qoracle";
+    if (!strcmp(mode, "native")) {
+        c->qpu = 0;
+    } else if (!strcmp(mode, "qcpu")) {
+        if (!L->ngates)
+            qpu__die(c, "QCPU_MODE=qcpu, but this program was built without the quantum CPU (qcpucc --qcpu-mode qoracle); "
+                        "build with --qcpu-mode qcpu or qcpu,qoracle");
+        c->qpu = 1;
+    } else if (!strcmp(mode, "qoracle")) {
+        if (!circ)
+            qpu__die(c, "QCPU_MODE=qoracle, but %s has no qoracle circuit in this program (built with --qcpu-mode qcpu); "
+                        "build with --qcpu-mode qoracle or qcpu,qoracle", fn);
+        c->qpu = 1;
+        c->circ = circ;
+    } else {
+        qpu__die(c, "QCPU_MODE=%s: use qcpu, qoracle or native", mode);
+    }
     c->verify = L->has_native && qpu__env("QCPU_VERIFY", 1);
     c->exact = qpu__env("QCPU_EXACT", 1);
     const char *of = qpu__getenv("QCPU_ON_FAIL");
     c->on_fail = !of || !strcmp(of, "abort") ? 0 : !strcmp(of, "native") ? 1 : !strcmp(of, "status") ? 2 : -1;
     if (c->on_fail < 0) qpu__die(c, "QCPU_ON_FAIL=%s: use abort, native or status", of);
-    if (!c->qpu && !L->has_native) qpu__die(c, "QCPU_BACKEND=native, but the program has no host build of the function");
+    if (!c->qpu && !L->has_native) qpu__die(c, "QCPU_MODE=native, but the program has no host build of the function");
     if (c->on_fail == 1 && !L->has_native) qpu__die(c, "QCPU_ON_FAIL=native, but the program has no host build of the function");
     if (nbufs > QPU__MAXBUF) qpu__die(c, "more than %d buffers", QPU__MAXBUF);
     /* buffers: the same buffer twice is shared (aliasing kept); any other overlap is refused */
@@ -204,8 +224,6 @@ void qpu__start_c(qpu__ctx *c, const qpu__lib *L, const qpu__circuit *circ, cons
     if (c->status != QCPU_OK) return;
     c->need_native = L->has_native && (c->verify || !c->qpu || c->on_fail == 1);
     if (!c->qpu) return;
-    if (!c->circ && !L->ngates)
-        qpu__die(c, "%s has neither a qoracle circuit nor a virtual CPU (a broken build)", fn);
     if (c->circ) {
         qpu__run_circuit(c, c->circ, nargs, args);
         if (c->status != QCPU_OK) c->need_native = L->has_native && c->on_fail == 1;
@@ -305,7 +323,7 @@ long long qpu__finish(qpu__ctx *c, long long native_ret) {
     qpu__last.backend = c->qpu ? "sim" : "native";
     qpu__last.guarantee = guarantee;
     qpu__last.cycles = c->cycles > 0 ? c->cycles : 0;
-    qpu__last.mode = !c->qpu ? "none" : c->circ ? "qoracle" : "vcpu";
+    qpu__last.mode = !c->qpu ? "native" : c->circ ? "qoracle" : "qcpu";
     if (c->qpu && c->circ) {
         qpu__last.qubits = c->circ->nqubits;
         qpu__last.gates = c->circ->ngates;

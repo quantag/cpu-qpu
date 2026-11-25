@@ -31,7 +31,7 @@ int main(void) {
 ```bash
 qcpucc game.c -o game                    # build once
 ./game                                   # default: simulated quantum CPU
-QCPU_BACKEND=native ./game               # same binary, plain CPU
+QCPU_MODE=native ./game                  # same binary, plain CPU
 QCPU_VERIFY=0 ./game                     # only where exactness is otherwise guaranteed
 ```
 
@@ -43,7 +43,7 @@ QCPU_VERIFY=0 ./game                     # only where exactness is otherwise gua
 | quantum CPU (QCPU) | the reversible stored-program machine of this repository, as a quantum circuit |
 | QCPU function | a function marked `__qcpu__`, with everything it calls |
 | QCPU ISA | the instruction set the QCPU function is compiled to: `arm64`, `riscv64`, `riscv32`, `x86_64` |
-| mode | how a QCPU function becomes a circuit: `vcpu` (the virtual CPU runs its machine code) or `qoracle` (a circuit of the function alone); chosen at build time, one per program |
+| mode | how a QCPU function becomes a circuit: `qcpu` (the quantum CPU runs its machine code) or `qoracle` (a circuit of the function alone); chosen at build time, one per program |
 | backend | what executes the circuit: `native`, `sim`, or a driver |
 | driver | a plug-in library that runs circuits on a device or service |
 | configuration | ISA, register width, memory size, cycle limit, mode, backend, verification |
@@ -53,7 +53,7 @@ function's requirements allow:
 
 ```
 host OS  x  QCPU ISA  x  mode  x  backend
-macOS       arm64        vcpu      native
+macOS       arm64        qcpu      native
 Linux       riscv64      qoracle   sim
 Windows     riscv32                    driver: ibm, aer, file, ...
             x86_64
@@ -146,7 +146,7 @@ qcpucc [options] files... -o output
   --qcpu-memory N                           data memory in ints, power of two (default 512)
   --qcpu-max-steps N                        default cycle limit per call (default 1000000)
   --qcpu-opt N                              optimization level of the QCPU side (default 1)
-  --qcpu-mode vcpu|qoracle                  vcpu: the virtual CPU runs every function (default);
+  --qcpu-mode qcpu|qoracle                  qcpu: the quantum CPU runs every function (default);
                                             qoracle: a circuit per function, or a build error
   --shared                                  build a library (.dylib/.so/.dll) instead of an executable
   --cc CC                                   host compiler (default cc)
@@ -199,7 +199,7 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 
 | backend | executes | status |
 |---|---|---|
-| `native` | the native fallback; no circuit | *exists* (`QCPU_BACKEND=native`) |
+| `native` | the native fallback; no circuit | *exists* (`QCPU_MODE=native`) |
 | `sim` | the circuit, in the exact basis-state simulator built into the runtime | *exists* (C engine) |
 | driver | the circuit, through a plug-in (`libqcpu_<name>.dylib/.so/.dll`) | planned |
 
@@ -207,14 +207,26 @@ add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other progra
 
 | mode (`--qcpu-mode`) | circuit | size | status |
 |---|---|---|---|
-| `vcpu` (default) | the virtual CPU (the quantum CPU of this repository) executes the function's machine code | large: every instruction is a machine cycle | *exists* |
+| `qcpu` (default) | the quantum CPU of this repository (a von Neumann machine of gates) executes the function's machine code | large: every instruction is a machine cycle | *exists* |
 | `qoracle` | the function compiled directly to reversible logic (qoracle) | small: e.g. 26 qubits instead of 1,242 | *exists*; section 5.5 |
 
 The mode is chosen at build time, and a program contains the circuits of that mode only: every
-`__qcpu__` function of a `qoracle` build has its own circuit, or the build fails and names the reason.
-(An earlier draft embedded both, with a run-time switch and an `auto` mode; one mode per build is
-simpler, and a `qoracle` program does not carry the virtual CPU: Code Breaker is 50 KB instead of
-1.8 MB.)
+`__qcpu__` function of a `qoracle` build has its own circuit, or the build fails and names the reason;
+a `qoracle` program does not carry the quantum CPU (Code Breaker: 50 KB instead of 1.8 MB).
+`--qcpu-mode qcpu,qoracle` embeds both.
+
+At run time the same keywords select what runs, with one setting *(exists)*:
+
+| `QCPU_MODE` | runs | available |
+|---|---|---|
+| `qcpu` | the quantum CPU | when built with `qcpu` |
+| `qoracle` | the function's own circuit | when built with `qoracle` |
+| `native` | the native fallback; no circuit | always |
+| (not set) | the mode the program was built with; the first one if both | |
+
+A mode the program was not built with stops the call with a message naming the build option.
+`QCPU_BACKEND=native` is the older name of `QCPU_MODE=native`; `QCPU_BACKEND` is kept for the
+choice between the simulator and a hardware driver.
 
 ### 5.4 Driver interface
 
@@ -343,11 +355,11 @@ alone is never treated as proven.
 
 A function outside this set is a build error in `qoracle` mode, with the reason, for example
 "`bump`: no qoracle circuit: it takes buffers (qoracle circuits cannot write memory yet). Build with
---qcpu-mode vcpu (the default)".
+--qcpu-mode qcpu (the default)".
 
 **Measured sizes** (qoracle, clang -O1, verified on all inputs):
 
-| function | inputs | qubits | Toffoli | all gates | vcpu, for comparison |
+| function | inputs | qubits | Toffoli | all gates | qcpu, for comparison |
 |---|---|---|---|---|---|
 | `is_root` (Grover predicate), compute oracle, 1-bit result | 4 bits | 26 | 28 | 67 | 1,242 qubits, 98,504 gates |
 | Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | 167,670 qubits, 14.3 million gates (one call, 245 cycles) |
@@ -386,7 +398,7 @@ of the following guarantees for every call:
 | guarantee | how | available for |
 |---|---|---|
 | E1, per-call check | the native fallback is run and the results compared; a difference fails the call | every backend (`QCPU_VERIFY`, on by default) |
-| E2, per-call model check | the simulator checks every executed instruction against the reduced-width model (every written register fits its width, flags, branches, addresses, as the CPU reference of this repository does) | `vcpu` mode on `sim`, when the data models agree (5.6.1) |
+| E2, per-call model check | the simulator checks every executed instruction against the reduced-width model (every written register fits its width, flags, branches, addresses, as the CPU reference of this repository does) | `qcpu` mode on `sim`, when the data models agree (5.6.1) |
 | E3, build-time proof | the compiled circuit equals the machine code on the whole declared domain: exhaustive verification, or a SAT equivalence check; plus proven result width and guards | `qoracle` mode on `sim`, when proven and the data models agree (5.6.1) |
 
 **`QCPU_EXACT=1` (the default) is decisive.** A call returns `QCPU_OK` only with E1, E2 or E3 as defined
@@ -507,7 +519,8 @@ the counts of every hardware call.
 
 | setting | values | default |
 |---|---|---|
-| `QCPU_BACKEND` | `sim`, `native`, driver name | `sim` |
+| `QCPU_MODE` | `qcpu`, `qoracle`, `native` | the built mode (the first one if both) |
+| `QCPU_BACKEND` | `sim`, driver name (planned); `native` = `QCPU_MODE=native` | `sim` |
 | `QCPU_SHOTS` | shots per call on a hardware driver | `32` |
 | `QCPU_VERIFY` | `0`, `1`: compare every call with the native fallback (E1) | `1` |
 | `QCPU_EXACT` | `1`: a call needs E1, E2 or E3; `0`: unchecked results allowed, status `QCPU_UNCHECKED` | `1` |
@@ -523,7 +536,7 @@ the counts of every hardware call.
 1. values given at build time;
 2. `qcpu.toml` next to the executable, then in the working directory;
 3. environment variables;
-4. per function: `QCPU_BACKEND_score=native` (environment) or a `[function.score]` table;
+4. per function: `QCPU_MODE_score=native` (environment) or a `[function.score]` table;
 5. from the program: `qcpu_set("backend", "native")`.
 
 ```toml
@@ -556,7 +569,7 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 | `QCPU_RESULT_BITS` cannot be proven | build | error with an input that needs more bits |
 | cycle limit reached | run | error; `QCPU_MAX_STEPS` raises it |
 | circuit too large for a driver | run | refused with the sizes |
-| function outside qoracle's support | build (`qoracle` mode) | error naming the reason; `--qcpu-mode vcpu` runs it |
+| function outside qoracle's support | build (`qoracle` mode) | error naming the reason; `--qcpu-mode qcpu` runs it |
 | argument wider than its `QCPU_BITS`, or overlapping buffers | run, before the circuit | `QCPU_BAD_ARGS` |
 | host and target data models differ for a function | build | E1 required for it; the differing facts listed |
 | work qubit or flag measured as 1 on hardware | run | that shot is discarded and counted |
@@ -572,7 +585,7 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
 
 `test_qcpucc` runs on all four in `.github/workflows/qcpucc.yml`.
 
-| QCPU ISA | vcpu | qoracle |
+| QCPU ISA | qcpu | qoracle |
 |---|---|---|
 | arm64 | *exists* (`qcpucc` default, library build) | *exists* (`--qcpu-mode qoracle`) |
 | riscv64, riscv32 | *exists* (library build; `--qcpu-isa`) | — |

@@ -62,7 +62,7 @@ b = [
  '<text class="l" x="490" y="240" text-anchor="middle">host side</text>',
  box("gray", 60, 252, 260, "clang for AArch64", "quantum-CPU machine code"), line(190, 308, 190, 328),
  box("purple", 60, 332, 260, "Loader and pruning", "keeps score() + callees"), line(190, 388, 190, 408),
- box2("purple", 60, 412, 260, "Circuit generator", "vcpu: the whole CPU as gates", "or qoracle: a circuit per function"),
+ box2("purple", 60, 412, 260, "Circuit generator", "qcpu: the whole CPU as gates", "or qoracle: a circuit per function"),
  box("purple", 360, 252, 260, "Rename marked bodies", "score to qpu__native_score"), line(490, 308, 490, 328),
  box("gray", 360, 332, 260, "Your C compiler", "clang or gcc, for the PC"),
  path("M190 482 L190 504 L340 504 L340 522"), path("M490 388 L490 504 L340 504", False),
@@ -73,14 +73,14 @@ b = [
 ]
 open(f"{OUT}/qcpu_build.svg", "w").write(svg(728, "qcpucc build workflow",
     "game.c goes into qcpucc.py, which builds a quantum-CPU side (clang for AArch64, loader and pruning, and the circuits: "
-    "the whole virtual CPU with --qcpu-mode vcpu, or with --qcpu-mode qoracle a small circuit per function) "
+    "the whole quantum CPU with --qcpu-mode qcpu, or with --qcpu-mode qoracle a small circuit per function) "
     "and a host side (renamed bodies, your C compiler); both are linked with the C engine into game.exe, which contains no Python.", "".join(b)))
 
 r = [
  '<text class="head" x="30" y="30">Run time: one call to score() (no Python)</text>',
  box("gray", 200, 46, 280, "main() on the CPU", "fgets, printf, rand"), line(340, 102, 340, 128),
  box("purple", 200, 132, 280, "Generated wrapper score()", "arguments into qubit registers"), line(340, 188, 340, 214),
- box("purple", 200, 218, 280, "C engine runs the circuit", "vcpu: 35M gates; qoracle: 1844"), line(340, 274, 340, 300),
+ box("purple", 200, 218, 280, "C engine runs the circuit", "qcpu: 35M gates; qoracle: 1844"), line(340, 274, 340, 300),
  box("gray", 200, 304, 280, "qpu__native_score()", "same function on the CPU (E1)"), line(340, 360, 340, 386),
  box("gray", 240, 390, 200, "Compare results"),
  path("M340 434 L340 456 L190 456 L190 482"), path("M340 456 L490 456 L490 482"),

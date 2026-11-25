@@ -7,7 +7,7 @@
  *     __qcpu__ int sum(const int *QCPU_IN(n) v, int n);     buffers: QCPU_IN / QCPU_OUT / QCPU_INOUT
  *
  * Build with qcpucc. Compiled by a plain C compiler, the markers expand to nothing and the program is an
- * ordinary C program that runs everything on the CPU (qcpu_last_call() then reports backend "none"). After a call, qcpu_last_call() describes how it ran and whether it is exact. */
+ * ordinary C program that runs everything on the CPU (qcpu_last_call() then reports mode "native"). After a call, qcpu_last_call() describes how it ran and whether it is exact. */
 #ifndef QCPU_H
 #define QCPU_H
 
@@ -45,12 +45,12 @@ typedef struct {
     const char *function;        /* name of the last __qcpu__ function called */
     const char *backend;         /* "sim" or "native" */
     const char *guarantee;       /* "E1", "native" or "none" */
-    long cycles;                 /* machine cycles of the virtual CPU (0 when it did not run) */
+    long cycles;                 /* machine cycles of the quantum CPU (0 when it did not run) */
     long long qubits;            /* qubits of the whole circuit of this call (machine + one history register per cycle) */
     long long gates;             /* gates of the whole circuit of this call */
     char message[256];           /* why the call failed or is not confirmed */
-    const char *mode;            /* "vcpu" (the virtual CPU, a von Neumann machine of gates, ran the machine code),
-                                    "qoracle" (a circuit of the function alone) or "none" (no quantum circuit ran) */
+    const char *mode;            /* "qcpu" (the quantum CPU, a von Neumann machine of gates, ran the machine code),
+                                    "qoracle" (a circuit of the function alone) or "native" (no circuit: the CPU) */
 } qcpu_call_info;
 
 #if defined(__QCPUCC__) || defined(QCPU_RUNTIME) || defined(QCPU_LIBRARY)
@@ -67,7 +67,7 @@ const char *qcpu_status_name(int status);
 #endif
 #else
 /* Built by a plain C compiler (clang, gcc, cl, CMake's add_executable): there is no quantum CPU, every
- * __qcpu__ function ran natively. qcpu_last_call() says so: status QCPU_OK, backend "none", 0 cycles. */
+ * __qcpu__ function ran natively. qcpu_last_call() says so: status QCPU_OK, mode "native", 0 cycles. */
 static inline const char *qcpu_status_name(int s) {
     static const char *const names[] = {"QCPU_OK", "QCPU_MISMATCH", "QCPU_INEXACT", "QCPU_INCOMPLETE", "QCPU_TRAP",
         "QCPU_TIE", "QCPU_INSUFFICIENT", "QCPU_UNVERIFIED", "QCPU_BAD_ARGS", "QCPU_PROBABLE", "QCPU_UNCHECKED"};
@@ -75,7 +75,7 @@ static inline const char *qcpu_status_name(int s) {
 }
 static inline int qcpu_last_call(qcpu_call_info *info) {
     if (info) {
-        qcpu_call_info z = {QCPU_OK, "", "none", "native", 0, 0, 0, "built without qcpucc: no quantum CPU", "none"};
+        qcpu_call_info z = {QCPU_OK, "", "none", "native", 0, 0, 0, "built without qcpucc: no quantum CPU", "native"};
         *info = z;
     }
     return QCPU_OK;

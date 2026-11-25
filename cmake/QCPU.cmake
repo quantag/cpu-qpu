@@ -6,7 +6,7 @@
 #
 #   include(path/to/cpu-qpu/cmake/QCPU.cmake)
 #   add_qcpu_executable(game SOURCES game.c [QCPU_ISA arm64] [QCPU_WIDTH 16] [QCPU_MEMORY 512]
-#                       [QCPU_MAX_STEPS 1000000] [QCPU_MODE vcpu|qoracle]
+#                       [QCPU_MAX_STEPS 1000000] [QCPU_MODE qcpu|qoracle]
 #                       [OPTIONS -O2 ...] [LIBS m ...])
 #   add_qcpu_library(codebreaker SOURCES codebreaker.c [same options])
 #       a shared library and an imported target "codebreaker" that other targets link with:
