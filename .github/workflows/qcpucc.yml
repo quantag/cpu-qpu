@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main, qcpu-export]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 jobs:
