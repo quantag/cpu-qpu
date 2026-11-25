@@ -146,7 +146,9 @@ qcpucc [options] files... -o output
   --qcpu-memory N                           data memory in ints, power of two (default 512)
   --qcpu-max-steps N                        default cycle limit per call (default 1000000)
   --qcpu-opt N                              optimization level of the QCPU side (default 1)
-  --qcpu-modes interpreted[,compiled]       circuits to embed (default interpreted; planned)
+  --qcpu-mode interpreted|compiled|auto     also embed a compiled circuit per function (qoracle):
+                                            compiled: for every function, auto: where possible
+                                            (default interpreted)
   --shared                                  build a library (.dylib/.so/.dll) instead of an executable
   --cc CC                                   host compiler (default cc)
   --keep DIR                                keep the generated files
@@ -154,7 +156,7 @@ qcpucc [options] files... -o output
                                             to the linker
 ```
 
-*(exists, except `--qcpu-modes`)*
+*(exists)*
 
 ### 4.3 CMake
 
@@ -162,12 +164,12 @@ qcpucc [options] files... -o output
 include(cpu-qpu/cmake/QCPU.cmake)
 
 add_qcpu_executable(game SOURCES game.c
-                    QCPU_ISA arm64 QCPU_WIDTH 16 QCPU_MODES interpreted)
+                    QCPU_ISA arm64 QCPU_WIDTH 16 QCPU_MODE auto)
 
 add_qcpu_library(codebreaker SHARED SOURCES codebreaker.c)    # for other programs to link
 ```
 
-*(exists, except `QCPU_MODES`)*: both functions run `qcpucc` through `Python3_EXECUTABLE`;
+*(exists)*: both functions run `qcpucc` through `Python3_EXECUTABLE`;
 `add_qcpu_library` gives an imported shared library target. Further arguments: `QCPU_MEMORY`,
 `QCPU_MAX_STEPS`, `OPTIONS`, `LIBS`.
 
@@ -243,6 +245,8 @@ enough for the device).
 
 ### 5.5 Compiled mode: a small dedicated circuit per function (qoracle)
 
+*(exists in part: `qcpucc --qcpu-mode compiled|auto`, see section 10 step 4 for what is still planned)*
+
 The interpreter runs any supported machine code, but every executed instruction costs a full machine
 cycle, so its circuits are far too large for any existing quantum computer. Compiled mode builds,
 for each `__qcpu__` function, a circuit that computes only that function: no program counter, no
@@ -276,14 +280,22 @@ uses; the fewer, the smaller the circuit. Annotations give them:
 __qcpu__ int QCPU_RESULT_BITS(6) score(int QCPU_BITS(8) guess);
 ```
 
-Without annotations the build uses the register width W, and reports the circuit size so that the
-annotation can be tightened. Values outside the declared width are an error at the call (the wrapper
-checks them before running the circuit).
+`QCPU_BITS(n)` declares an unsigned range (0 .. 2^n − 1), `QCPU_SBITS(n)` a signed one (−2^(n−1) ..
+2^(n−1) − 1). Without annotations the build uses the parameter's C type on the quantum CPU (`int`: 32
+bits, signed), and reports the circuit size so that the annotation can be tightened. Values outside the
+declared width are an error at the call (the wrapper checks them before running the circuit):
+`QCPU_BAD_ARGS` *(exists)*.
 
 `QCPU_RESULT_BITS(n)` is a claim about the function, so the build must prove it: every result bit above
 `n` must be the constant 0 in the logic network for all inputs of the declared domain (by construction,
 or by a SAT check of the bit). If it cannot be proven, the build fails ("`score`: result bit 6 can be 1,
 e.g. for guess = …"); the result is never silently truncated.
+
+*As implemented:* when every input of the domain is tested (at most 16 input bits), the machine code is
+run on all of them and every result must fit; otherwise the bits above `n` must be constant 0 in the logic
+network. SAT checks are planned. Messages: "`f`: QCPU_RESULT_BITS(4) is wrong: for a = 15 the result is
+16", "… cannot be proven: its inputs total 64 bits, too many to test all, and result bit 4 is not
+constant 0 in the logic".
 
 #### 5.5.1 Ordinary calls and coherent use
 
@@ -337,6 +349,7 @@ A function outside this set keeps only its interpreted circuit, and the build sa
 |---|---|---|---|---|---|
 | `is_root` (Grover predicate), compute oracle, 1-bit result | 4 bits | 26 | 28 | 67 | 1,242 qubits, 98,504 gates |
 | Code Breaker `score(guess)`, secret fixed, 6-bit result | 8 bits | 312 | 358 | 1,088 | 167,670 qubits, 14.3 million gates (one call, 245 cycles) |
+| Code Breaker `score(guess, secret)`, 6-bit result, built by `qcpucc --qcpu-mode auto` *(exists)* | 16 bits | 544 | 614 | 1,844 | 565k qubits, 35.3 million gates (one call, 245 cycles) |
 | Code Breaker `score` with colour-count arrays | 8 bits | — | — | — | rejected: writes local arrays |
 
 **Running a compiled circuit on hardware.** For an ordinary call the input is a basis state, so the
@@ -575,8 +588,10 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
    call-graph pruning, stand-in C headers for the QCPU side, the data-model probe (5.6.1).
 3. *Done except E2.* E1 by default, `qcpu_last_call`, `QCPU_ON_FAIL`, all statuses, buffer snapshots
    (5.6.2). E2 (the reference's model checks ported to the C engine) is still planned.
-4. Compiled mode: `QCPU_BITS` / `QCPU_RESULT_BITS` with proven result width; guard flags in the emitted
-   circuit; bound classification (exhaustive / proven by SAT / flagged); E3; `QCPU_MODE=compiled|auto`.
+4. *Partly done.* Compiled mode: `--qcpu-mode compiled|auto`, `QCPU_MODE` at run time, `QCPU_BITS` /
+   `QCPU_SBITS` / `QCPU_RESULT_BITS` with proven result width, `QCPU_BAD_ARGS`; circuits embedded only
+   when their loop bound is exact (all inputs tested) or there are no loops and tables, so no guard flags
+   are needed. Still planned: guard flags in the emitted circuit for sampled bounds, SAT proofs, E3.
 5. *Done.* CMake module `QCPU.cmake`.
 6. *Done for interpreted mode on Linux* (`tests/test_qcpucc.py`). Example: interactive Code Breaker
    (`examples/codebreaker/`) in both modes, tests on all three host

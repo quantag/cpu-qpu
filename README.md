@@ -466,8 +466,135 @@ How it works, at build time and at every call:
   in GitHub Actions. On a Mac: `python3 qcpucc.py examples/codebreaker/codebreaker.c -o codebreaker`
   (Apple clang does both sides). On Windows `long` is 4 bytes, on the quantum CPU 8: a function whose
   result depends on it is stopped with `QCPU_MISMATCH`, never returned wrong.
-- **Not yet:** compiled circuits from qoracle (much smaller, for real hardware), hardware drivers,
-  and the E2/E3 guarantees of the spec. `QPU_*` names still work as aliases.
+- **Compiled mode.** Each `__qcpu__` function can also become a circuit of its own, thousands of times
+  smaller: see the next section.
+- **Not yet:** run-time guards for loop bounds measured on samples (functions with loops need inputs of
+  at most 16 bits for now), compiled circuits that write memory, hardware drivers, and the E2/E3
+  guarantees of the spec. `QPU_*` names still work as aliases.
+
+## Compiled mode: each function as its own small circuit (qoracle)
+
+By default (*interpreted mode*) a `__qcpu__` function runs on a whole quantum processor: program
+memory, program counter, decoder, ALU, executing the function's machine code one instruction per
+cycle. It runs any supported code, but the circuit is huge: one call of Code Breaker's `score()` is
+245 machine cycles, 35.3 million gates on 565,000 qubits.
+
+In *compiled mode* the same function is turned into a circuit that computes only that function, with
+no processor around it. [qoracle](https://github.com/quantag/qoracle) reads the function's AArch64
+machine code (the same object file the interpreted mode uses), executes it symbolically on all paths,
+reduces it to logic, and maps the logic to reversible gates (X, CNOT, Toffoli) whose work qubits all
+return to 0:
+
+| `score()` per call | interpreted | compiled |
+|---|---|---|
+| qubits | 565,000 | 544 (16 in, 6 out, 522 work) |
+| gates | 35.3 million | 1,844 (614 Toffoli) |
+| what runs | the quantum CPU, 245 cycles of 34 instructions | the function's logic, one pass |
+
+### Using it
+
+```bash
+python3 -m pip install "qoracle @ git+https://github.com/quantag/qoracle.git"    # also in requirements.txt
+
+python3 qcpucc.py --qcpu-mode auto examples/codebreaker/codebreaker.c -o codebreaker
+./codebreaker                          # compiled circuit
+QCPU_MODE=interpreted ./codebreaker    # the same program on the whole quantum CPU
+```
+
+```
+qcpucc: codebreaker: 1 __qcpu__ function(s) on the quantum CPU (AArch64, W = 16, 34 instructions, ...): score
+qcpucc:   score: compiled circuit, 544 qubits (16 in, 6 out), 1844 gates (614 Toffoli); checked on all 65536 inputs
+...
+turn 1>   RRGG  black 2  white 0    [compiled circuit: 1844 gates on 544 qubits, checked]
+```
+
+| build option | what is embedded |
+|---|---|
+| `--qcpu-mode interpreted` (default) | the quantum CPU only |
+| `--qcpu-mode auto` | a compiled circuit for every function that qualifies; the others stay interpreted, and `qcpucc` says why |
+| `--qcpu-mode compiled` | a compiled circuit for every function, or the build fails |
+
+The quantum CPU is always embedded as well, so `QCPU_MODE=interpreted` switches back at run time without
+rebuilding (`QCPU_MODE=compiled` makes a function without a compiled circuit an error). With CMake:
+`add_qcpu_executable(game SOURCES game.c QCPU_MODE auto)`; in the example,
+`cmake -B build -DQCPU_MODE=auto`. The build takes longer: qoracle checks each circuit, about 20 s for
+`score()`.
+
+### Telling it the widths
+
+A compiled circuit has one qubit per input bit and per result bit, so it is smaller when it knows
+how many bits a value really uses. Three annotations in the definition say so; a plain compiler and the
+interpreted mode ignore them:
+
+| annotation | meaning | without it |
+|---|---|---|
+| `QCPU_BITS(n)` on a parameter | the argument is `0 .. 2^n − 1` | the C type: `int` is 32 bits, signed |
+| `QCPU_SBITS(n)` on a parameter | the argument is `−2^(n−1) .. 2^(n−1) − 1` | |
+| `QCPU_RESULT_BITS(n)` before the name | the result is always `0 .. 2^n − 1` | the C type |
+
+```c
+// Code Breaker: codes are 8 bits, the answer is at most 4 * 8 = 32
+__qcpu__ int QCPU_RESULT_BITS(6) score(int QCPU_BITS(8) guess, int QCPU_BITS(8) secret) { ... }
+```
+
+Each one is enforced:
+
+- **Arguments** outside their declared bits are refused at the call, before the circuit runs:
+  `QCPU_BAD_ARGS` ("argument 1 = 200 is outside its declared signed 8 bits (-128 .. 127)"), exit 70 by default.
+- **`QCPU_RESULT_BITS`** is a claim about the function, so the build proves it, or fails. When every input
+  is tested, the machine code is run on all of them; otherwise the higher result bits must be constant 0
+  in the logic. A false claim gives a counterexample: "`f`: QCPU_RESULT_BITS(4) is wrong: for a = 15 the
+  result is 16". The result is never silently cut.
+
+### Which functions qualify
+
+| | compiled | stays interpreted (auto) |
+|---|---|---|
+| arguments and result | integers | buffers (`QCPU_IN/OUT/INOUT`), `void` result, no arguments |
+| code | arithmetic, branches, loops, read-only tables | writing memory (local arrays, the stack), calls the compiler does not inline, floating point |
+| checked on | every input, when the inputs total at most 16 bits | |
+| or | no loops and no tables (then the translation is exact for all inputs; qoracle tests 4,096 inputs) | loops or tables with more than 16 input bits: needs run-time guards, not implemented yet |
+| quantum-CPU ISA | AArch64 (`--qcpu-isa arm64`, the default) | RISC-V, x86-64 |
+
+An example with a loop, a signed argument and a buffer, all in one file:
+
+```c
+__qcpu__ unsigned QCPU_RESULT_BITS(4) popcount(unsigned QCPU_BITS(12) x) {
+    unsigned n = 0;
+    while (x) { n += x & 1; x >>= 1; }
+    return n;
+}
+__qcpu__ int triple(int QCPU_SBITS(8) a) { return 3 * a; }
+__qcpu__ void bump(int *QCPU_INOUT(1) p) { *p += 1; }
+```
+
+```
+qcpucc:   popcount: compiled circuit, 479 qubits (12 in, 4 out), 1760 gates (578 Toffoli); checked on all 4096 inputs
+qcpucc:   triple: compiled circuit, 72 qubits (8 in, 32 out), 134 gates (26 Toffoli); checked on all 256 inputs
+qcpucc:   bump: interpreted (it takes buffers (compiled circuits cannot write memory yet))
+```
+
+### What a call guarantees
+
+Nothing changes for the program: the same wrapper, the same settings, the same statuses. Every call
+is still checked against the function compiled for this computer (`QCPU_VERIFY=1`, the default), and
+`qcpu_last_call(&info)` reports `info.mode` (`"compiled"`, `"interpreted"` or `"none"`), the circuit's
+qubits and gates. So a compiled call is checked twice: the circuit against the machine code at build
+time, and the result against the native function at every call. The test suite also runs all 65,536
+inputs of `score()` through the embedded circuit (`tests/test_qcpucc.py`, item 7, on Linux, macOS and
+Windows).
+
+### Why it matters
+
+The interpreted circuit shows that a whole von Neumann machine can be built from gates; it is far
+too large for any quantum computer. A compiled circuit is the size an algorithm can use: the same
+compute-oracle form `|x⟩|y⟩ → |x⟩|y ⊕ f(x)⟩` that Grover search and Shor's algorithm need. The Grover
+and Shor sections above run their C oracles on the whole quantum CPU (1,792 qubits for a 4-bit
+predicate); qoracle's own README runs both with compiled oracles. Still beyond today's hardware for
+`score()` (614 Toffoli gates on noisy qubits), but within reach for small predicates: qoracle's
+`is_root` is 26 qubits. Next steps: export the embedded circuits as OpenQASM for use as
+oracles, run-time guards for loops with wider inputs, and drivers for real devices. Design:
+[`docs/qcpu_spec.md`](docs/qcpu_spec.md), section 5.5.
 
 ## Calling QPU functions from a host program, like a DLL
 

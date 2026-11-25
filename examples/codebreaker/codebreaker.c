@@ -8,6 +8,7 @@
 // a complete processor, simulated) and is checked against the same function compiled for this computer.
 //
 //   qcpucc codebreaker.c -o codebreaker      (or: cmake -B build && cmake --build build)
+//   qcpucc --qcpu-mode auto codebreaker.c -o codebreaker      score() as its own small circuit (qoracle)
 //   ./codebreaker                            play; QCPU_BACKEND=native ./codebreaker runs score() on the CPU
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,9 @@ static const char COLOURS[] = "RGBY";
 static int peg(int code, int k) { return (code >> (2 * k)) & 3; }    // a code: 2 bits per peg
 
 // The answer to a guess: black (right colour, right place) * 8 + white (right colour, wrong place).
-__qcpu__ int score(int guess, int secret)
+// QCPU_BITS / QCPU_RESULT_BITS: the widths the compiled circuit needs (qcpucc --qcpu-mode auto); a plain compiler
+// and the interpreted quantum CPU ignore them. Codes are 8 bits; the answer is at most 4 * 8 = 32: 6 bits.
+__qcpu__ int QCPU_RESULT_BITS(6) score(int QCPU_BITS(8) guess, int QCPU_BITS(8) secret)
 {
     int black = 0, common = 0;
     for (int k = 0; k < PEGS; k++)
@@ -73,9 +76,12 @@ int main(int argc, char **argv)
         printf("  ");
         show(guess);
         printf("  black %d  white %d", a >> 3, a & 7);
-        if (info.cycles)
+        const char *how = strcmp(info.guarantee, "E1") == 0 ? "checked" : info.guarantee;
+        if (strcmp(info.mode, "compiled") == 0)
+            printf("    [compiled circuit: %lld gates on %lld qubits, %s]", info.gates, info.qubits, how);
+        else if (info.cycles)
             printf("    [quantum CPU: %ld cycles, %.1fM gates on %lldk qubits, %s]", info.cycles, info.gates / 1e6,
-                   info.qubits / 1000, strcmp(info.guarantee, "E1") == 0 ? "checked" : info.guarantee);
+                   info.qubits / 1000, how);
         printf("\n");
         if (a == PEGS * 8) {
             printf("Cracked in %d turn%s!\n", turn, turn > 1 ? "s" : "");

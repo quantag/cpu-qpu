@@ -130,11 +130,52 @@ static long qpu__selftest_run(const qpu__lib *L, long entry, int nargs, const lo
 }
 #endif
 
+/* compiled mode: one pass of the function's own circuit. Arguments outside their declared bits are refused. */
+static void qpu__run_circuit(qpu__ctx *c, const qpu__circuit *K, int nargs, const long long *args) {
+    for (int i = 0; i < nargs && i < K->nargs; i++) {
+        int n = K->in_bits[i];
+        long long lo = K->in_signed[i] ? -(1LL << (n - 1)) : 0, hi = K->in_signed[i] ? (1LL << (n - 1)) - 1 : (long long)((1ULL << n) - 1);
+        if (n < 64 && (args[i] < lo || args[i] > hi)) {
+            qpu__fail(c, QCPU_BAD_ARGS, "argument %d = %lld is outside its declared %s%d bits (%lld .. %lld)",
+                      i + 1, args[i], K->in_signed[i] ? "signed " : "", n, lo, hi);
+            return;
+        }
+    }
+    unsigned char *st = calloc(K->nqubits ? K->nqubits : 1, 1);
+    if (!st) qpu__die(c, "out of memory (%u qubits)", K->nqubits);
+    for (int i = 0; i < K->nargs; i++)
+        for (int b = 0; b < K->in_bits[i]; b++) st[K->in_first[i] + b] = (unsigned char)(((unsigned long long)args[i] >> b) & 1);
+    qpu__cycle(st, K->gates, K->ngates);
+    unsigned long long v = 0;
+    for (int b = 0; b < K->out_bits; b++) v |= (unsigned long long)st[K->out_first + b] << b;
+    c->ret = (long long)v;
+    for (uint32_t q = K->work_first; q < K->nqubits; q++)
+        if (st[q]) { qpu__fail(c, QCPU_INEXACT, "work qubit %u is not returned to 0 (a broken circuit)", q); break; }
+    for (int i = 0; i < K->nargs && c->status == QCPU_OK; i++)
+        for (int b = 0; b < K->in_bits[i]; b++)
+            if (st[K->in_first[i] + b] != (((unsigned long long)args[i] >> b) & 1)) {
+                qpu__fail(c, QCPU_INEXACT, "input register %d was changed (a broken circuit)", i + 1);
+                break;
+            }
+    free(st);
+}
+
 void qpu__start(qpu__ctx *c, const qpu__lib *L, const char *fn, long entry, int nargs, const long long *args,
                 qpu__buf *bufs, int nbufs) {
+    qpu__start_c(c, L, NULL, fn, entry, nargs, args, bufs, nbufs);
+}
+
+void qpu__start_c(qpu__ctx *c, const qpu__lib *L, const qpu__circuit *circ, const char *fn, long entry, int nargs,
+                  const long long *args, qpu__buf *bufs, int nbufs) {
     QPU__LOCK();
     memset(c, 0, sizeof *c);
     c->lib = L; c->fn = fn; c->bufs = bufs; c->nbufs = nbufs;
+    const char *mode = qpu__getenv("QCPU_MODE");
+    if (mode && strcmp(mode, "compiled") && strcmp(mode, "interpreted") && strcmp(mode, "auto"))
+        qpu__die(c, "QCPU_MODE=%s: use compiled, interpreted or auto", mode);
+    if (mode && !strcmp(mode, "compiled") && !circ)
+        qpu__die(c, "QCPU_MODE=compiled, but %s has no compiled circuit (build with qcpucc --qcpu-mode compiled or auto)", fn);
+    c->circ = mode && !strcmp(mode, "interpreted") ? NULL : circ;
     const char *backend = qpu__getenv("QCPU_BACKEND");
     if (backend && strcmp(backend, "native") && strcmp(backend, "sim") && strcmp(backend, "qpu"))
         qpu__die(c, "QCPU_BACKEND=%s: this program supports sim and native", backend);
@@ -168,6 +209,11 @@ void qpu__start(qpu__ctx *c, const qpu__lib *L, const char *fn, long entry, int 
     if (c->status != QCPU_OK) return;
     c->need_native = L->has_native && (c->verify || !c->qpu || c->on_fail == 1);
     if (!c->qpu) return;
+    if (c->circ) {
+        qpu__run_circuit(c, c->circ, nargs, args);
+        if (c->status != QCPU_OK) c->need_native = L->has_native && c->on_fail == 1;
+        return;
+    }
 
     unsigned char *st = malloc(L->nqubits);
     if (!st) qpu__die(c, "out of memory (%u qubits)", L->nqubits);
@@ -262,7 +308,11 @@ long long qpu__finish(qpu__ctx *c, long long native_ret) {
     qpu__last.backend = c->qpu ? "sim" : "native";
     qpu__last.guarantee = guarantee;
     qpu__last.cycles = c->cycles > 0 ? c->cycles : 0;
-    if (c->cycles > 0) {
+    qpu__last.mode = !c->qpu ? "none" : c->circ ? "compiled" : "interpreted";
+    if (c->qpu && c->circ) {
+        qpu__last.qubits = c->circ->nqubits;
+        qpu__last.gates = c->circ->ngates;
+    } else if (c->cycles > 0) {
         qpu__last.qubits = (long long)L->nqubits + (long long)(c->cycles - 1) * L->nstep;
         qpu__last.gates = (long long)c->cycles * L->ngates;
     }

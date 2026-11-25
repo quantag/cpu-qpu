@@ -4,3 +4,4 @@ qiskit-ibm-runtime>=0.40
 unicorn>=2.1
 lief>=0.15
 capstone>=5.0
+qoracle @ git+https://github.com/quantag/qoracle.git    # compiled mode of qcpucc (--qcpu-mode compiled|auto)

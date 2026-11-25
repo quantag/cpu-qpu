@@ -15,6 +15,12 @@
 #define QCPU_IN(count)
 #define QCPU_OUT(count)
 #define QCPU_INOUT(count)
+/* compiled mode (qcpucc --qcpu-mode compiled|auto): how many bits an argument and the result really use.
+ * QCPU_BITS(n): 0 .. 2^n - 1; QCPU_SBITS(n): -2^(n-1) .. 2^(n-1) - 1; QCPU_RESULT_BITS(n): the result is
+ * always 0 .. 2^n - 1 (the build proves it). Fewer bits make the compiled circuit smaller. */
+#define QCPU_BITS(n)
+#define QCPU_SBITS(n)
+#define QCPU_RESULT_BITS(n)
 /* the names of the QPU-library tool (qpu_dll.py) */
 #define QPU_IN(count)
 #define QPU_OUT(count)
@@ -39,10 +45,12 @@ typedef struct {
     const char *function;        /* name of the last __qcpu__ function called */
     const char *backend;         /* "sim" or "native" */
     const char *guarantee;       /* "E1", "native" or "none" */
-    long cycles;                 /* machine cycles of the quantum CPU run (0 when not run) */
+    long cycles;                 /* machine cycles of the quantum CPU run (0 when not run, or compiled) */
     long long qubits;            /* qubits of the whole circuit of this call (machine + one history register per cycle) */
     long long gates;             /* gates of the whole circuit of this call */
     char message[256];           /* why the call failed or is not confirmed */
+    const char *mode;            /* "interpreted" (the whole quantum CPU), "compiled" (a circuit of the function
+                                    alone, built by qoracle) or "none" (not run on a quantum circuit) */
 } qcpu_call_info;
 
 #if defined(__QCPUCC__) || defined(QCPU_RUNTIME) || defined(QCPU_LIBRARY)
@@ -67,7 +75,7 @@ static inline const char *qcpu_status_name(int s) {
 }
 static inline int qcpu_last_call(qcpu_call_info *info) {
     if (info) {
-        qcpu_call_info z = {QCPU_OK, "", "none", "native", 0, 0, 0, "built without qcpucc: no quantum CPU"};
+        qcpu_call_info z = {QCPU_OK, "", "none", "native", 0, 0, 0, "built without qcpucc: no quantum CPU", "none"};
         *info = z;
     }
     return QCPU_OK;

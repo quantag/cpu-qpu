@@ -12,6 +12,10 @@
      the emitted instructions); at W = 12, f(16) is QCPU_MISMATCH, never a silent 0; at W = 16 it is exact.
   6. Data models (spec 5.6.1): sizeof(long), (char)200 < 0 and a struct size agree with the host;
      the probe reports sizeof(long) for a Windows host compiler.
+  7. Compiled mode (qoracle, spec 5.5): Code Breaker with score() as its own circuit: the same games, every
+     call compiled and checked; all 65536 inputs of score() through the embedded circuit equal the host build;
+     QCPU_MODE=interpreted at run time; QCPU_BITS / QCPU_SBITS / QCPU_RESULT_BITS (a false claim fails the
+     build); arguments outside their bits are QCPU_BAD_ARGS; auto keeps the rest interpreted.
 Run: python3 -m tests.test_qcpucc"""
 import os, shutil, subprocess, sys, tempfile, textwrap
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -185,7 +189,104 @@ def main():
         assert any("sizeof(long): host 4, quantum CPU 8" in x for x in diffs) and "-fsigned-char" in flags, (flags, diffs)
         print(f"6) data models: sizeof(long), (char)200 < 0, struct size {seen}; "
               "a Windows host compiler: reported " + "; ".join(x for x in diffs if "long)" in x))
+        compiled_mode(d)
     print("PASS")
+
+
+def compiled_mode(d):
+    try:
+        import qoracle  # noqa: F401
+    except ImportError:
+        print("7) compiled mode: skipped (qoracle is not installed)")
+        return
+    src = os.path.join(EX, "codebreaker.c")
+    game = os.path.join(d, "cb_compiled")
+    built = sh(QCPUCC + ["--qcpu-mode", "auto", src, "-o", game])
+    out = built.stdout + built.stderr
+    assert "score: compiled circuit, 544 qubits (16 in, 6 out), 1844 gates (614 Toffoli); checked on all 65536 inputs" in out, out
+    plain = os.path.join(d, "plain")                   # built in item 1
+    moves = "RRGG\nRGBY\nYYGG\nBGRY\nBBBB\n"
+    for seed in ("7", "11", "3"):
+        want = sh([plain, seed], inp=moves, check=False)
+        got = sh([game, seed], inp=moves, check=False)
+        strip = lambda t: "\n".join(l.split("    [")[0] for l in t.splitlines())
+        assert strip(got.stdout) == strip(want.stdout) and got.returncode == want.returncode, (got.stdout, want.stdout)
+        assert got.stdout.count("[compiled circuit: 1844 gates on 544 qubits, checked]") == got.stdout.count("black "), got.stdout
+        it = sh([game, seed], env=env(QCPU_MODE="interpreted"), inp=moves, check=False)
+        assert strip(it.stdout) == strip(want.stdout) and "[quantum CPU: 245 cycles" in it.stdout, it.stdout
+
+    # every input of score() through the C engine's copy of the circuit, each checked against the host build
+    every = os.path.join(d, "every.c")
+    with open(src) as f:
+        body = f.read().split("int main(")[0]
+    open(every, "w").write(body + textwrap.dedent("""\
+        int main(void) {
+            long sum = 0; int n = 0; qcpu_call_info i;
+            for (int g = 0; g < 256; g++)
+                for (int t = 0; t < 256; t++) {
+                    sum += score(g, t);
+                    qcpu_last_call(&i);
+                    n += i.status == QCPU_OK && strcmp(i.mode, "compiled") == 0 && strcmp(i.guarantee, "E1") == 0;
+                }
+            printf("%ld %d\\n", sum, n);
+            return 0;
+        }
+        """))
+    exe = os.path.join(d, "every")
+    sh(QCPUCC + ["--qcpu-mode", "compiled", every, "-o", exe])
+    p = sh([exe])
+    sum_, n = p.stdout.split()
+    assert n == "65536" and not p.stderr, (p.stdout, p.stderr)
+    print("7) compiled mode: Code Breaker with score() as a 544-qubit, 1844-gate circuit (instead of 35.3M gates per "
+          "call): same games, every call checked; QCPU_MODE=interpreted runs the whole quantum CPU again;")
+    print(f"   all 65536 inputs of score() through the embedded circuit equal the host build (sum {sum_})")
+
+    m = os.path.join(d, "modes.c")
+    open(m, "w").write(textwrap.dedent("""\
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <qcpu.h>
+        __qcpu__ int QCPU_RESULT_BITS(4) low(int a, int b) { return (a ^ b) & 15; }
+        __qcpu__ int triple(int QCPU_SBITS(8) a) { return 3 * a; }
+        __qcpu__ unsigned popc(unsigned QCPU_BITS(12) x) { unsigned n = 0; while (x) { n += x & 1; x >>= 1; } return n; }
+        __qcpu__ void inc(int *QCPU_INOUT(1) p) { *p += 1; }
+        static const char *mode(void) { qcpu_call_info i; qcpu_last_call(&i); return i.mode; }
+        int main(int argc, char **argv) {
+            int a = atoi(argv[1]), x = 4;
+            int r1 = low(a, 7); const char *m1 = mode();
+            int r2 = triple(a); const char *m2 = mode();
+            unsigned r3 = popc((unsigned)a); const char *m3 = mode();
+            inc(&x); const char *m4 = mode();
+            printf("%d %s %d %s %u %s %d %s\\n", r1, m1, r2, m2, r3, m3, x, m4);
+            return 0;
+        }
+        """))
+    exe = os.path.join(d, "modes")
+    built = sh(QCPUCC + ["--qcpu-mode", "auto", m, "-o", exe])
+    out = built.stdout + built.stderr
+    assert "low: compiled circuit" in out and "triple: compiled circuit" in out and "popc: compiled circuit" in out, out
+    assert "inc: interpreted (it takes buffers" in out, out
+    assert sh([exe, "100"]).stdout == "3 compiled 300 compiled 3 compiled 5 interpreted\n"
+    assert sh([exe, "-100"], check=False).returncode == 70        # popc(-100): outside its 12 bits
+    p = sh([exe, "-100"], env=env(QCPU_ON_FAIL="native", QCPU_QUIET="1"))
+    assert p.stdout.split()[:4] == ["11", "compiled", "-300", "compiled"], p.stdout
+    p = sh([exe, "4095"], check=False)
+    assert p.returncode == 70 and "QCPU_BAD_ARGS" in p.stderr and "signed 8 bits" in p.stderr, p.stderr
+    p = sh([exe, "3"], env=env(QCPU_MODE="compiled"), check=False)
+    assert p.returncode == 70 and "inc has no compiled circuit" in p.stderr, p.stderr
+    p = sh(QCPUCC + ["--qcpu-mode", "compiled", m, "-o", exe + "2"], check=False)
+    assert p.returncode and "inc: no compiled circuit: it takes buffers" in p.stderr, p.stderr
+    print("   QCPU_BITS(12), QCPU_SBITS(8), QCPU_RESULT_BITS(4) on 64 input bits (proven in the logic): compiled; a "
+          "buffer function stays interpreted (auto) or is an error (compiled); arguments outside their bits: QCPU_BAD_ARGS")
+
+    bad = os.path.join(d, "claim.c")
+    for body, msg in (("int QCPU_RESULT_BITS(4) f(int QCPU_BITS(8) a) { return a + 1; }", "is wrong: for a = 15 the result is 16"),
+                      ("int QCPU_RESULT_BITS(4) f(int a, int b) { return (a + b) & 31; }", "cannot be proven")):
+        open(bad, "w").write(f"#include <qcpu.h>\n__qcpu__ {body}\nint main(void) {{ return 0; }}\n")
+        p = sh(QCPUCC + ["--qcpu-mode", "auto", bad, "-o", os.path.join(d, "claim")], check=False)
+        assert p.returncode and msg in p.stderr, p.stderr
+    print("   a false QCPU_RESULT_BITS fails the build, with a counterexample or the reason it cannot be proven")
 
 
 if __name__ == "__main__":
