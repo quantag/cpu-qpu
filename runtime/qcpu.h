@@ -15,9 +15,9 @@
 #define QCPU_IN(count)
 #define QCPU_OUT(count)
 #define QCPU_INOUT(count)
-/* compiled mode (qcpucc --qcpu-mode compiled|auto): how many bits an argument and the result really use.
+/* qcpucc --qcpu-mode qoracle: how many bits an argument and the result really use.
  * QCPU_BITS(n): 0 .. 2^n - 1; QCPU_SBITS(n): -2^(n-1) .. 2^(n-1) - 1; QCPU_RESULT_BITS(n): the result is
- * always 0 .. 2^n - 1 (the build proves it). Fewer bits make the compiled circuit smaller. */
+ * always 0 .. 2^n - 1 (the build proves it). Fewer bits make the qoracle circuit smaller. */
 #define QCPU_BITS(n)
 #define QCPU_SBITS(n)
 #define QCPU_RESULT_BITS(n)
@@ -45,12 +45,12 @@ typedef struct {
     const char *function;        /* name of the last __qcpu__ function called */
     const char *backend;         /* "sim" or "native" */
     const char *guarantee;       /* "E1", "native" or "none" */
-    long cycles;                 /* machine cycles of the quantum CPU run (0 when not run, or compiled) */
+    long cycles;                 /* machine cycles of the virtual CPU (0 when it did not run) */
     long long qubits;            /* qubits of the whole circuit of this call (machine + one history register per cycle) */
     long long gates;             /* gates of the whole circuit of this call */
     char message[256];           /* why the call failed or is not confirmed */
-    const char *mode;            /* "interpreted" (the whole quantum CPU), "compiled" (a circuit of the function
-                                    alone, built by qoracle) or "none" (not run on a quantum circuit) */
+    const char *mode;            /* "vcpu" (the virtual CPU, a von Neumann machine of gates, ran the machine code),
+                                    "qoracle" (a circuit of the function alone) or "none" (no quantum circuit ran) */
 } qcpu_call_info;
 
 #if defined(__QCPUCC__) || defined(QCPU_RUNTIME) || defined(QCPU_LIBRARY)

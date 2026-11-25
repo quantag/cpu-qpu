@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main, qcpu, compiled-mode, better-errors]
+    branches: [main, qcpu-modes]
   pull_request:
   workflow_dispatch:
 jobs:

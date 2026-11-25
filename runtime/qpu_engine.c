@@ -130,7 +130,7 @@ static long qpu__selftest_run(const qpu__lib *L, long entry, int nargs, const lo
 }
 #endif
 
-/* compiled mode: one pass of the function's own circuit. Arguments outside their declared bits are refused. */
+/* qoracle mode: one pass of the function's own circuit. Arguments outside their declared bits are refused. */
 static void qpu__run_circuit(qpu__ctx *c, const qpu__circuit *K, int nargs, const long long *args) {
     for (int i = 0; i < nargs && i < K->nargs; i++) {
         int n = K->in_bits[i];
@@ -170,12 +170,7 @@ void qpu__start_c(qpu__ctx *c, const qpu__lib *L, const qpu__circuit *circ, cons
     QPU__LOCK();
     memset(c, 0, sizeof *c);
     c->lib = L; c->fn = fn; c->bufs = bufs; c->nbufs = nbufs;
-    const char *mode = qpu__getenv("QCPU_MODE");
-    if (mode && strcmp(mode, "compiled") && strcmp(mode, "interpreted") && strcmp(mode, "auto"))
-        qpu__die(c, "QCPU_MODE=%s: use compiled, interpreted or auto", mode);
-    if (mode && !strcmp(mode, "compiled") && !circ)
-        qpu__die(c, "QCPU_MODE=compiled, but %s has no compiled circuit (build with qcpucc --qcpu-mode compiled or auto)", fn);
-    c->circ = mode && !strcmp(mode, "interpreted") ? NULL : circ;
+    c->circ = circ;                       /* qcpucc --qcpu-mode qoracle: every function has its own circuit */
     const char *backend = qpu__getenv("QCPU_BACKEND");
     if (backend && strcmp(backend, "native") && strcmp(backend, "sim") && strcmp(backend, "qpu"))
         qpu__die(c, "QCPU_BACKEND=%s: this program supports sim and native", backend);
@@ -209,6 +204,8 @@ void qpu__start_c(qpu__ctx *c, const qpu__lib *L, const qpu__circuit *circ, cons
     if (c->status != QCPU_OK) return;
     c->need_native = L->has_native && (c->verify || !c->qpu || c->on_fail == 1);
     if (!c->qpu) return;
+    if (!c->circ && !L->ngates)
+        qpu__die(c, "%s has neither a qoracle circuit nor a virtual CPU (a broken build)", fn);
     if (c->circ) {
         qpu__run_circuit(c, c->circ, nargs, args);
         if (c->status != QCPU_OK) c->need_native = L->has_native && c->on_fail == 1;
@@ -308,7 +305,7 @@ long long qpu__finish(qpu__ctx *c, long long native_ret) {
     qpu__last.backend = c->qpu ? "sim" : "native";
     qpu__last.guarantee = guarantee;
     qpu__last.cycles = c->cycles > 0 ? c->cycles : 0;
-    qpu__last.mode = !c->qpu ? "none" : c->circ ? "compiled" : "interpreted";
+    qpu__last.mode = !c->qpu ? "none" : c->circ ? "qoracle" : "vcpu";
     if (c->qpu && c->circ) {
         qpu__last.qubits = c->circ->nqubits;
         qpu__last.gates = c->circ->ngates;
