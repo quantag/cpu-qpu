@@ -601,9 +601,75 @@ compute-oracle form `|x⟩|y⟩ → |x⟩|y ⊕ f(x)⟩` that Grover search and 
 and Shor sections above run their C oracles on the whole quantum CPU (1,792 qubits for a 4-bit
 predicate); qoracle's own README runs both with qoracle circuits. Still beyond today's hardware for
 `score()` (614 Toffoli gates on noisy qubits), but within reach for small predicates: qoracle's
-`is_root` is 26 qubits. Next steps: export the embedded circuits as OpenQASM for use as
-oracles, run-time guards for loops with wider inputs, and drivers for real devices. Design:
-[`docs/qcpu_spec.md`](docs/qcpu_spec.md), section 5.5.
+`is_root` is 26 qubits. Next steps: run-time guards for loops with wider inputs, and drivers for real
+devices. Design: [`docs/qcpu_spec.md`](docs/qcpu_spec.md), section 5.5.
+
+### Using the circuits in quantum programs: `--qcpu-export`
+
+A `__qcpu__` function is ordinary C: one definite input in, one definite output out. A quantum
+program (a CUDA-Q kernel, a Qiskit circuit) needs exactly such a classical function as an *oracle*,
+applied to all inputs at once in superposition. `--qcpu-export DIR` writes each qoracle circuit for those
+toolkits:
+
+| file | for | contents |
+|---|---|---|
+| `f.qasm` | Qiskit (`qiskit.qasm3.load`), other OpenQASM 3 tools | the compute oracle `\|x⟩\|y⟩\|0⟩ → \|x⟩\|y ⊕ f(x)⟩\|0⟩` |
+| `f_phase.qasm` | Grover's search | for a one-bit result, the phase oracle `\|x⟩\|0⟩ → (−1)^f(x) \|x⟩\|0⟩` |
+| `f_cudaq.py` | CUDA-Q (Python) | the same circuits as `@cudaq.kernel` functions `f_oracle(q)` and `f_phase(q)` |
+| `f.cudaq.h` | CUDA-Q (C++) | the same as `__qpu__` functions, for `nvq++` |
+| `f.json` | any | which qubits are which argument, the result and the work qubits; gate counts |
+
+Every file holds the circuit embedded in the program, checked against the function's machine code
+(`checked on all 16 inputs`). The work qubits start and end in 0, so the oracle can be used
+coherently. With CMake: `add_qcpu_executable(... QCPU_MODE qoracle QCPU_EXPORT oracle)`.
+
+```c
+__qcpu__ int QCPU_RESULT_BITS(1) is_five(unsigned QCPU_BITS(4) x) { return x == 5; }
+```
+
+```python
+from is_five_cudaq import is_five_phase      # written by qcpucc --qcpu-export
+
+@cudaq.kernel
+def grover(iterations: int):
+    q = cudaq.qvector(18)                     # 4 for x, 14 work qubits (IS_FIVE_PHASE_QUBITS)
+    for b in range(4): h(q[b])
+    for _ in range(iterations):
+        is_five_phase(q)                      # the C function as the oracle
+        for b in range(4): h(q[b]); x(q[b])   # diffusion
+        z.ctrl(q[0], q[1], q[2], q[3])
+        for b in range(4): x(q[b]); h(q[b])
+    for b in range(4): mz(q[b])
+
+cudaq.sample(grover, 3)    # about 96% of the shots: '1010' (q[0] first), x = 5
+```
+
+(Run it from a `.py` file or Jupyter: `@cudaq.kernel` reads the kernel's source.)
+
+**A Grover solver for Code Breaker** (`examples/codebreaker/solver.c`): `consistent(secret)` says whether
+a secret code fits the answers of a game so far, using the game's own scoring. Exported, it becomes a
+phase oracle of 1,044 qubits and 4,255 gates; Grover's search finds the secret in 12 oracle calls, where
+a classical search tries up to 256 codes:
+
+```
+$ python3 qcpucc.py --qcpu-mode qoracle --qcpu-export oracle examples/codebreaker/solver.c -o solver
+qcpucc:   consistent: qoracle circuit, 1045 qubits (8 in, 1 out), 4255 gates (1074 Toffoli); checked on all 256 inputs
+$ ./solver
+codes consistent with RRGG 1/1, RGBY 0/4, YRGB 0/4: BYRG
+$ python3 examples/codebreaker/grover_solver.py oracle/consistent_phase.qasm
+after 12 Grover iterations (12 oracle calls; a classical search tries up to 256 codes):
+  BYRG  probability 0.9999
+```
+
+1,044 qubits is far beyond a state-vector simulator (CUDA-Q's included), but Grover puts only the 8
+qubits of the secret in superposition, so `grover_solver.py` runs it exactly on 256 amplitudes, reading
+the circuit from the exported file.
+
+What is checked (`tests/test_qcpu_export.py`, in CI): the exported compute oracles give the C
+function's result for every input; Qiskit loads every file; in CUDA-Q 0.17 the exported Python kernels
+run, right for every input, and Grover with the phase oracle finds the marked value; the C++ header
+type-checks against CUDA-Q's own `cudaq.h` (running it needs `nvq++`, which is not part of the pip
+package and has not been tried); the Code Breaker solver finds BYRG.
 
 ## Q-ARM: quantum gates inside an ARM binary
 
@@ -937,6 +1003,7 @@ python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs i
 python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O), dyld info and chained fixups
 python3 -m tests.test_dll                        # QPU libraries: host program + generated .so/.dll; C engine == Python simulator
 python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
+python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths

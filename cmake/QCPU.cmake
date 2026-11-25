@@ -6,7 +6,7 @@
 #
 #   include(path/to/cpu-qpu/cmake/QCPU.cmake)
 #   add_qcpu_executable(game SOURCES game.c [QCPU_ISA arm64] [QCPU_WIDTH 16] [QCPU_MEMORY 512]
-#                       [QCPU_MAX_STEPS 1000000] [QCPU_MODE qcpu|qoracle]
+#                       [QCPU_MAX_STEPS 1000000] [QCPU_MODE qcpu|qoracle] [QCPU_EXPORT dir]
 #                       [OPTIONS -O2 ...] [LIBS m ...])
 #   add_qcpu_library(codebreaker SOURCES codebreaker.c [same options])
 #       a shared library and an imported target "codebreaker" that other targets link with:
@@ -17,7 +17,7 @@ set(QCPU_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH "cpu-qpu repository")
 set(QCPU_CC "${Python3_EXECUTABLE}" "${QCPU_ROOT}/qcpucc.py")
 
 function(_qcpu_command out_var name)
-  cmake_parse_arguments(Q "" "QCPU_ISA;QCPU_WIDTH;QCPU_MEMORY;QCPU_MAX_STEPS;QCPU_MODE" "SOURCES;OPTIONS;LIBS" ${ARGN})
+  cmake_parse_arguments(Q "" "QCPU_ISA;QCPU_WIDTH;QCPU_MEMORY;QCPU_MAX_STEPS;QCPU_MODE;QCPU_EXPORT" "SOURCES;OPTIONS;LIBS" ${ARGN})
   if(NOT Q_SOURCES)
     message(FATAL_ERROR "add_qcpu_*(${name}): SOURCES is required")
   endif()
@@ -33,6 +33,9 @@ function(_qcpu_command out_var name)
   endif()
   if(Q_QCPU_MODE)
     list(APPEND args --qcpu-mode ${Q_QCPU_MODE})
+  endif()
+  if(Q_QCPU_EXPORT)
+    list(APPEND args --qcpu-export ${Q_QCPU_EXPORT})
   endif()
   if(Q_QCPU_MAX_STEPS)
     list(APPEND args --qcpu-max-steps ${Q_QCPU_MAX_STEPS})

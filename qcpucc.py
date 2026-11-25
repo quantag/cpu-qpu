@@ -292,7 +292,7 @@ EXHAUSTIVE_BITS = 16           # qoracle tests every input up to this many input
 
 def compile_functions(qobj, isa, funcs, defs, char_signed, verify_limit=4096):
     """--qcpu-mode qoracle: a circuit of each __qcpu__ function alone (spec 5.5). Every function must qualify.
-    Returns (C code, {function: C name}, report lines)."""
+    Returns (C code, {function: C name}, report lines, [oracle records for --qcpu-export])."""
     try:
         import qoracle
         from qoracle import verify as qverify, frontend as qfrontend
@@ -300,6 +300,7 @@ def compile_functions(qobj, isa, funcs, defs, char_signed, verify_limit=4096):
         raise Error("compiled mode needs qoracle: python3 -m pip install git+https://github.com/quantag/qoracle")
     by_name = {d["name"]: d for d in defs}
     code, circuits, lines = [], {}, []
+    oracles = []                                     # for --qcpu-export
     for name, ret, params in funcs:
         d = by_name[name]
 
@@ -376,9 +377,105 @@ def compile_functions(qobj, isa, funcs, defs, char_signed, verify_limit=4096):
         circuits[name] = var
         how = (f"all {rep['verification']['inputs_tested']} inputs" if exhaustive else
                f"{rep['verification']['inputs_tested']} sampled inputs, no loops or tables")
+        oracles.append(dict(name=name, proto=d["proto"], spec=spec, oracle=o, checked=how, verify_limit=verify_limit,
+                            obj=qobj))
         lines.append(f"{name}: qoracle circuit, {c.nqubits} qubits ({c.n_in} in, {c.n_out} out), {len(c.gates)} gates "
                      f"({rep['toffoli']} Toffoli); checked on {how}")
-    return "\n".join(code), circuits, lines
+    return "\n".join(code), circuits, lines, oracles
+
+
+# ------------------------------------------------------------------ export (--qcpu-export DIR)
+def qasm_ident(name):
+    from qoracle.circuit import qasm_name
+    return qasm_name(name)
+
+
+def oracle_interface(e, c, mode):
+    """The JSON description of one exported oracle."""
+    regs = [dict(name=x.name, role="input", first=f, bits=size, signed=x.signed)
+            for x, (_, f, size) in zip(e["spec"], c.regs)]
+    if mode == "compute":
+        regs.append(dict(name="result", role="output", first=c.out0, bits=c.n_out, signed=False))
+    gates = {}
+    for g in c.gates:
+        gates[g[0]] = gates.get(g[0], 0) + 1
+    return {"function": e["name"], "prototype": e["proto"], "form": mode,
+            "action": ("|inputs>|result>|0> -> |inputs>|result XOR f(inputs)>|0>" if mode == "compute" else
+                       "|inputs>|0> -> (-1)^f(inputs) |inputs>|0>"),
+            "qubits": c.nqubits, "registers": regs, "work": {"first": c.anc0, "count": c.nqubits - c.anc0,
+                                                              "note": "start in |0> and end in |0>"},
+            "gates": len(c.gates), "gate_counts": gates, "checked": e["checked"],
+            "made_by": "qcpucc --qcpu-mode qoracle (qoracle), from the function's AArch64 machine code"}
+
+
+def cudaq_python(kernel, c, info):
+    L = [f"@cudaq.kernel", f"def {kernel}(q: cudaq.qview):",
+         f'    """{info["function"]}, {info["form"]} oracle on {c.nqubits} qubits: {info["action"]}"""']
+    for g in c.gates:
+        if g[0] == "x":
+            L.append(f"    x(q[{g[1]}])")
+        elif g[0] == "z":
+            L.append(f"    z(q[{g[1]}])")
+        elif g[0] == "cx":
+            L.append(f"    x.ctrl(q[{g[1]}], q[{g[2]}])")
+        elif g[0] == "ccx":
+            L.append(f"    x.ctrl(q[{g[1]}], q[{g[2]}], q[{g[3]}])")
+        elif g[0] == "gphase":
+            L.append("    # global phase -1 (the predicate is always true): no effect unless the oracle is controlled")
+    return L
+
+
+def cudaq_cpp(kernel, c, info):
+    L = [f"// {info['function']}, {info['form']} oracle on {c.nqubits} qubits: {info['action']}",
+         f"__qpu__ void {kernel}(cudaq::qview<> q) {{"]
+    for g in c.gates:
+        if g[0] in ("x", "z"):
+            L.append(f"    {g[0]}(q[{g[1]}]);")
+        elif g[0] == "cx":
+            L.append(f"    x<cudaq::ctrl>(q[{g[1]}], q[{g[2]}]);")
+        elif g[0] == "ccx":
+            L.append(f"    x<cudaq::ctrl>(q[{g[1]}], q[{g[2]}], q[{g[3]}]);")
+        elif g[0] == "gphase":
+            L.append("    // global phase -1 (the predicate is always true): no effect unless the oracle is controlled")
+    return L + ["}"]
+
+
+def export_oracles(outdir, oracles, sources):
+    """Each qoracle circuit for other quantum toolkits: OpenQASM 3, a CUDA-Q Python module, a CUDA-Q C++ header and a
+    JSON description; for a function with a one-bit result also its phase oracle (Grover). Returns the files."""
+    import json
+    import qoracle
+    os.makedirs(outdir, exist_ok=True)
+    files = []
+    src = ", ".join(os.path.basename(s) for s in sources)
+    for e in oracles:
+        name = e["name"]
+        forms = [("compute", e["oracle"].circuit, f"{name}_oracle")]
+        if e["oracle"].circuit.n_out == 1:             # a predicate: also the phase oracle
+            ph = qoracle.build(e["obj"], name, e["spec"], out_bits=1, mode="phase", verify_limit=e["verify_limit"])
+            forms.append(("phase", ph.circuit, f"{name}_phase"))
+        head = (f"Generated by qcpucc --qcpu-export from {src}: {e['proto']}. Checked on {e['checked']}; "
+                "every gate is X, CNOT, Toffoli (and Z in a phase oracle).")
+        infos, py, cpp = [], [f'"""{head}"""', "import cudaq", ""], [
+            f"// {head}", "#pragma once", "#include <cudaq.h>", ""]
+        for mode, c, kernel in forms:
+            info = oracle_interface(e, c, mode)
+            info["kernel"] = kernel
+            infos.append(info)
+            stem = name if mode == "compute" else f"{name}_phase"
+            path = os.path.join(outdir, stem + ".qasm")
+            regs = "; ".join(f"{r['name']}: {r['bits']} qubits" for r in info["registers"])
+            open(path, "w").write(c.qasm3(f"{name}, {mode} oracle: {info['action']}. {head} Registers: {regs}; "
+                                          f"anc: {info['work']['count']} work qubits, {info['work']['note']}."))
+            files.append(path)
+            py += [f"{kernel.upper()}_QUBITS = {c.nqubits}"] + cudaq_python(kernel, c, info) + ["", ""]
+            cpp += [f"constexpr std::size_t {kernel}_qubits = {c.nqubits};"] + cudaq_cpp(kernel, c, info) + [""]
+        for path, text in ((os.path.join(outdir, f"{name}_cudaq.py"), "\n".join(py).rstrip() + "\n"),
+                           (os.path.join(outdir, f"{name}.cudaq.h"), "\n".join(cpp)),
+                           (os.path.join(outdir, f"{name}.json"), json.dumps(infos, indent=2) + "\n")):
+            open(path, "w").write(text)
+            files.append(path)
+    return files
 
 
 # ------------------------------------------------------------------ build
@@ -391,6 +488,8 @@ def parse_modes(text):
 
 def build(a, cflags, ldflags, sources):
     modes = parse_modes(a.qcpu_mode)
+    if a.qcpu_export and "qoracle" not in modes:
+        raise Error("--qcpu-export writes qoracle circuits: build with --qcpu-mode qoracle (or qcpu,qoracle)")
     host_cc = shlex.split(a.cc or os.environ.get("CC") or default_cc(), posix=os.name != "nt")
     host_macros = macros(host_cc, [])
     system = host_os(host_macros)
@@ -444,8 +543,12 @@ def build(a, cflags, ldflags, sources):
             funcs = qpu_dll.parse_header(hdr)
             extra_c, circuits, mode_lines, B = "", {}, [], None
             if "qoracle" in modes:             # a circuit of each function alone
-                extra_c, circuits, mode_lines = compile_functions(qobj, isa, funcs, all_defs,
-                                                                  "__CHAR_UNSIGNED__" not in host_macros)
+                extra_c, circuits, mode_lines, oracles = compile_functions(qobj, isa, funcs, all_defs,
+                                                                           "__CHAR_UNSIGNED__" not in host_macros)
+                if a.qcpu_export:
+                    exported = export_oracles(a.qcpu_export, oracles, sources)
+                    mode_lines.append(f"exported {len(exported)} file(s) to {a.qcpu_export}: OpenQASM 3, CUDA-Q "
+                                      "(Python, C++), JSON")
             if "qcpu" in modes:                # the quantum CPU (von Neumann machine of gates) runs the machine code
                 try:
                     B = qpu_dll.build_machine(qobj, isa, funcs, a.qcpu_width, a.qcpu_memory, roots=names)
@@ -518,6 +621,10 @@ def main(argv=None):
     ap.add_argument("--qcpu-memory", type=int, default=512, help="data memory in ints, a power of two (default 512)")
     ap.add_argument("--qcpu-max-steps", type=int, default=1000000, help="default cycle limit per call")
     ap.add_argument("--qcpu-opt", default="1", help="optimisation level of the quantum-CPU code (default 1)")
+    ap.add_argument("--qcpu-export", metavar="DIR",
+                    help="with --qcpu-mode qoracle: also write each function's circuit for other quantum toolkits: "
+                         "OpenQASM 3, a CUDA-Q kernel (Python module and C++ header) and a JSON description; a "
+                         "function with a one-bit result also as a phase oracle (Grover)")
     ap.add_argument("--qcpu-mode", default="qcpu", metavar="qcpu|qoracle|qcpu,qoracle",
                     help="qcpu: a quantum CPU (von Neumann machine of gates) runs the machine code of every __qcpu__ "
                          "function (default); qoracle: each __qcpu__ function becomes a circuit of its own (qoracle), "

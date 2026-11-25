@@ -326,6 +326,18 @@ proven loop bound and proven table ranges (section 5.5.2); otherwise the flags w
 the input. Direct tests: basis inputs against the native function, and, for the phase use, the state
 after `H^n · U_f · H^n` on `|0…0⟩|−⟩` compared with the exact expected state vector.
 
+**Export for quantum programs** *(exists)*: `qcpucc --qcpu-mode qoracle --qcpu-export DIR` writes each
+function's circuit for other toolkits: OpenQASM 3 (`f.qasm`, compute oracle), CUDA-Q kernels (`f_cudaq.py`
+with `@cudaq.kernel f_oracle(q)`, `f.cudaq.h` with `__qpu__ void f_oracle(cudaq::qview<> q)`) and the
+register layout (`f.json`: inputs, result, work qubits). For a one-bit result the build also makes the
+phase oracle `f_phase` (`|x⟩|0⟩ → (−1)^{f(x)} |x⟩|0⟩`, with a Z on the result literal instead of a copy,
+no `|−⟩` qubit needed), checked like the compute oracle. Only functions whose circuits need no guard
+flags are exported, so the work qubits are 0 for every input in the domain and coherent use is exact.
+Tested: every input through the exported compute oracles; Qiskit loads the files; in CUDA-Q 0.17 the
+Python kernels are right for every input and Grover with the phase kernel finds the marked value; the
+C++ header type-checks against CUDA-Q's `cudaq.h` (not yet compiled with `nvq++`). Example: Grover's
+search for the Code Breaker secret with the game's scoring as the oracle (`examples/codebreaker/solver.c`).
+
 #### 5.5.2 Loop bounds and other guards
 
 Unrolling needs a bound, and a symbolic execution can also reach states the circuit cannot represent
@@ -611,7 +623,8 @@ allowed where E2 or E3 applies, or together with `QCPU_EXACT=0`.
    optimizing compiler may turn the expression into a mask, `and w0, w0, #0xffffff`, and remove the
    intermediate value); `sizeof(long)`, `(char)200 < 0` and a struct layout across host systems;
    `increment(int *QCPU_INOUT(1) p)` under E1, and a failed call leaving its buffers untouched.
-7. Driver interface with counts; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits
+7. *Done in part:* qoracle circuits exported for quantum programs (`--qcpu-export`: OpenQASM 3, CUDA-Q
+   Python and C++, JSON). Still planned: QIR, the driver interface with counts; `file` driver (OpenQASM 3), then `aer` and `ibm` for compiled circuits
    that fit, with the result contract of section 5.8.
 8. Configuration file and per-function settings; call log.
 
