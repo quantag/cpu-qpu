@@ -34,6 +34,14 @@ def box(c, x, y, w, title, sub=None):
         s += f'<text class="t" x="{x+w/2}" y="{y+22}" text-anchor="middle" dominant-baseline="central">{title}</text>'
     return s + '</g>'
 
+def box2(c, x, y, w, title, sub1, sub2):
+    """A box with a title and two subtitle lines (70 high)."""
+    return (f'<g class="{c}"><rect x="{x}" y="{y}" width="{w}" height="70" rx="8" stroke-width="0.8"/>'
+            f'<text class="t" x="{x+w/2}" y="{y+18}" text-anchor="middle" dominant-baseline="central">{title}</text>'
+            f'<text class="s" x="{x+w/2}" y="{y+38}" text-anchor="middle" dominant-baseline="central">{sub1}</text>'
+            f'<text class="s" x="{x+w/2}" y="{y+55}" text-anchor="middle" dominant-baseline="central">{sub2}</text></g>')
+
+
 def line(x1, y1, x2, y2, head=True):
     return f'<line class="arr" x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}"' + (' marker-end="url(#a)"/>' if head else '/>')
 
@@ -54,26 +62,25 @@ b = [
  '<text class="l" x="490" y="240" text-anchor="middle">host side</text>',
  box("gray", 60, 252, 260, "clang for AArch64", "quantum-CPU machine code"), line(190, 308, 190, 328),
  box("purple", 60, 332, 260, "Loader and pruning", "keeps score() + callees"), line(190, 388, 190, 408),
- box("purple", 60, 412, 260, "Circuit generator", "the whole CPU as gates"), line(190, 468, 190, 488),
- box("purple", 60, 492, 260, "qoracle (mode auto)", "a small circuit per function"),
+ box2("purple", 60, 412, 260, "Circuit generator", "qcpu: the whole CPU as gates", "or qoracle: a circuit per function"),
  box("purple", 360, 252, 260, "Rename marked bodies", "score to qpu__native_score"), line(490, 308, 490, 328),
  box("gray", 360, 332, 260, "Your C compiler", "clang or gcc, for the PC"),
- path("M190 548 L190 570 L340 570 L340 588"), path("M490 388 L490 570 L340 570", False),
- box("gray", 210, 592, 260, "Link", "plus C engine qpu_engine.c"), line(340, 648, 340, 676),
- box("teal", 210, 680, 260, "game.exe", "contains no Python"),
- '<g class="purple"><rect x="150" y="758" width="14" height="14" rx="3" stroke-width="0.8"/></g><text class="l" x="172" y="769">our Python (build only)</text>',
- '<g class="gray"><rect x="360" y="758" width="14" height="14" rx="3" stroke-width="0.8"/></g><text class="l" x="382" y="769">ordinary compiler tools</text>',
+ path("M190 482 L190 504 L340 504 L340 522"), path("M490 388 L490 504 L340 504", False),
+ box("gray", 210, 526, 260, "Link", "plus C engine qpu_engine.c"), line(340, 582, 340, 610),
+ box("teal", 210, 614, 260, "game.exe", "contains no Python"),
+ '<g class="purple"><rect x="150" y="692" width="14" height="14" rx="3" stroke-width="0.8"/></g><text class="l" x="172" y="703">our Python (build only)</text>',
+ '<g class="gray"><rect x="360" y="692" width="14" height="14" rx="3" stroke-width="0.8"/></g><text class="l" x="382" y="703">ordinary compiler tools</text>',
 ]
-open(f"{OUT}/qcpu_build.svg", "w").write(svg(794, "qcpucc build workflow",
-    "game.c goes into qcpucc.py, which builds a quantum-CPU side (clang for AArch64, loader and pruning, circuit generator, "
-    "and with --qcpu-mode auto qoracle's small circuit per function) "
+open(f"{OUT}/qcpu_build.svg", "w").write(svg(728, "qcpucc build workflow",
+    "game.c goes into qcpucc.py, which builds a quantum-CPU side (clang for AArch64, loader and pruning, and the circuits: "
+    "the whole quantum CPU with --qcpu-mode qcpu, or with --qcpu-mode qoracle a small circuit per function) "
     "and a host side (renamed bodies, your C compiler); both are linked with the C engine into game.exe, which contains no Python.", "".join(b)))
 
 r = [
  '<text class="head" x="30" y="30">Run time: one call to score() (no Python)</text>',
  box("gray", 200, 46, 280, "main() on the CPU", "fgets, printf, rand"), line(340, 102, 340, 128),
  box("purple", 200, 132, 280, "Generated wrapper score()", "arguments into qubit registers"), line(340, 188, 340, 214),
- box("purple", 200, 218, 280, "C engine runs the circuit", "CPU: 35M gates; compiled: 1844"), line(340, 274, 340, 300),
+ box("purple", 200, 218, 280, "C engine runs the circuit", "qcpu: 35M gates; qoracle: 1844"), line(340, 274, 340, 300),
  box("gray", 200, 304, 280, "qpu__native_score()", "same function on the CPU (E1)"), line(340, 360, 340, 386),
  box("gray", 240, 390, 200, "Compare results"),
  path("M340 434 L340 456 L190 456 L190 482"), path("M340 456 L490 456 L490 482"),

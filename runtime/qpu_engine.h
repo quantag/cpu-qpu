@@ -17,13 +17,14 @@
  * each work on their own copy of the buffers, and the caller's buffers change once, only on success.
  *
  * Environment (read at each call; the older QPU_* names are accepted too):
- *   QCPU_BACKEND    sim (default; also "qpu"): the quantum CPU in the built-in simulator | native
+ *   QCPU_MODE       qcpu (the quantum CPU) | qoracle (the function's own circuit) | native (the host build
+ *                   only); default: the mode the program was built with (qcpucc --qcpu-mode), the first one
+ *                   if both. QCPU_BACKEND=native is the older name of QCPU_MODE=native.
  *   QCPU_VERIFY     1 (default): compare every call with the host build (guarantee E1) | 0
  *   QCPU_EXACT      1 (default): a call needs a guarantee, else QCPU_UNVERIFIED | 0: allow unchecked
  *   QCPU_ON_FAIL    abort (default): stop with a message | native: use the host build's result | status
  *   QCPU_MAX_STEPS  machine cycles before a call is stopped (default: given at build time)
- *   QCPU_QUIET      1: no notes on stderr
- *   QCPU_MODE       compiled (default where a function has a compiled circuit) | interpreted | auto */
+ *   QCPU_QUIET      1: no notes on stderr */
 #ifndef QPU_ENGINE_H
 #define QPU_ENGINE_H
 #include <stddef.h>
@@ -60,9 +61,10 @@ typedef struct {
     int user_cell, user_cells;        /* where buffers go (cell index, number of cells) */
     long max_steps;
     int has_native;                   /* the host build of the functions is in the library */
+    int qoracle_first;                /* built with --qcpu-mode qoracle,...: qoracle is the default mode */
 } qpu__lib;
 
-typedef struct {                      /* compiled mode: a circuit of one function alone (qoracle) */
+typedef struct {                      /* qcpucc --qcpu-mode qoracle: a circuit of one function alone */
     uint32_t nqubits;
     const uint32_t *gates;            /* 3 words per gate, as in qpu__lib (op 0 x, 1 cx, 2 ccx) */
     long ngates;
@@ -103,13 +105,13 @@ typedef struct {                      /* one call, between qpu__start and qpu__f
     int exact;                        /* QCPU_EXACT */
     int alias[QPU__MAXBUF];           /* buffer b shares its data with buffer alias[b] (== b if not) */
     long long cell_of[QPU__MAXBUF];   /* first data-memory cell of buffer b */
-    const qpu__circuit *circ;         /* compiled mode: the circuit this call runs (NULL: interpreted) */
+    const qpu__circuit *circ;         /* qoracle mode: the circuit this call runs (NULL: the quantum CPU) */
 } qpu__ctx;
 
 /* Run fn (entry PC) on the quantum machine. Holds a lock until qpu__finish. */
 void qpu__start(qpu__ctx *c, const qpu__lib *lib, const char *fn, long entry, int nargs, const long long *args,
                 qpu__buf *bufs, int nbufs);
-/* The same, with the function's compiled circuit (NULL if it has none); QCPU_MODE picks which one runs. */
+/* The same, with the function's own circuit (qoracle mode), or NULL: the quantum CPU runs it. */
 void qpu__start_c(qpu__ctx *c, const qpu__lib *lib, const qpu__circuit *circ, const char *fn, long entry, int nargs,
                   const long long *args, qpu__buf *bufs, int nbufs);
 /* For the host build: a copy of buffer b to call it with. */

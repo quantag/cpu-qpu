@@ -5,7 +5,7 @@
 
     qcpucc game.c -o game                     an executable for this computer
     qcpucc lib.c --shared -o libgame.dylib    a library (.dylib / .so)
-    qcpucc --qcpu-mode auto game.c -o game    also a small circuit per function (qoracle), where possible
+    qcpucc --qcpu-mode qoracle game.c -o game each function as a small circuit of its own (qoracle)
     ./game                                    __qcpu__ calls run on the quantum CPU (simulated), checked
     QCPU_BACKEND=native ./game                the same program, everything on the CPU
 
@@ -290,9 +290,9 @@ def type_bits(ctype, char_signed):
 EXHAUSTIVE_BITS = 16           # qoracle tests every input up to this many input bits
 
 
-def compile_functions(qobj, isa, funcs, defs, mode, char_signed, verify_limit=4096):
-    """Compiled circuits (spec 5.5) for the __qcpu__ functions that qualify. Returns (C code, {function: C name},
-    report lines). mode "compiled": every function must qualify; "auto": the others stay interpreted."""
+def compile_functions(qobj, isa, funcs, defs, char_signed, verify_limit=4096):
+    """--qcpu-mode qoracle: a circuit of each __qcpu__ function alone (spec 5.5). Every function must qualify.
+    Returns (C code, {function: C name}, report lines)."""
     try:
         import qoracle
         from qoracle import verify as qverify, frontend as qfrontend
@@ -304,14 +304,13 @@ def compile_functions(qobj, isa, funcs, defs, mode, char_signed, verify_limit=40
         d = by_name[name]
 
         def skip(why):
-            if mode == "compiled":
-                raise Error(f"{name}: no compiled circuit: {why} (build with --qcpu-mode auto to keep it interpreted)")
-            lines.append(f"{name}: interpreted ({why})")
+            raise Error(f"{name}: no qoracle circuit: {why}. Build with --qcpu-mode qcpu (the default): the virtual "
+                        "CPU runs any supported code")
         if isa.name != "arm64":
-            skip(f"compiled mode reads AArch64 machine code, the quantum CPU here is {isa.title}")
+            skip(f"qoracle reads AArch64 machine code, and --qcpu-isa is {isa.title}")
             continue
         if any(p.direction for p in params):
-            skip("it takes buffers (compiled circuits cannot write memory yet)")
+            skip("it takes buffers (qoracle circuits cannot write memory yet)")
             continue
         if ret == "void":
             skip("it returns nothing")
@@ -377,13 +376,21 @@ def compile_functions(qobj, isa, funcs, defs, mode, char_signed, verify_limit=40
         circuits[name] = var
         how = (f"all {rep['verification']['inputs_tested']} inputs" if exhaustive else
                f"{rep['verification']['inputs_tested']} sampled inputs, no loops or tables")
-        lines.append(f"{name}: compiled circuit, {c.nqubits} qubits ({c.n_in} in, {c.n_out} out), {len(c.gates)} gates "
+        lines.append(f"{name}: qoracle circuit, {c.nqubits} qubits ({c.n_in} in, {c.n_out} out), {len(c.gates)} gates "
                      f"({rep['toffoli']} Toffoli); checked on {how}")
     return "\n".join(code), circuits, lines
 
 
 # ------------------------------------------------------------------ build
+def parse_modes(text):
+    modes = [x.strip() for x in text.split(",") if x.strip()]
+    if not modes or len(set(modes)) != len(modes) or any(x not in ("qcpu", "qoracle") for x in modes):
+        raise Error(f"--qcpu-mode {text}: use qcpu, qoracle, or both (qcpu,qoracle)")
+    return modes
+
+
 def build(a, cflags, ldflags, sources):
+    modes = parse_modes(a.qcpu_mode)
     host_cc = shlex.split(a.cc or os.environ.get("CC") or default_cc(), posix=os.name != "nt")
     host_macros = macros(host_cc, [])
     system = host_os(host_macros)
@@ -435,25 +442,26 @@ def build(a, cflags, ldflags, sources):
                            "-fno-asynchronous-unwind-tables", "-nostdlibinc", "-isystem", QINC, "-I", RT,
                            "-D__QCPU_SIDE__=1"] + dm_flags + pairs + [unity, "-c", "-o", qobj], "compiling for the quantum CPU")
             funcs = qpu_dll.parse_header(hdr)
-            try:
-                B = qpu_dll.build_machine(qobj, isa, funcs, a.qcpu_width, a.qcpu_memory, roots=names)
-            except qpu_dll.BuildError as e:
-                msg = str(e)
-                if "unresolved" in msg or "cannot print" in msg:
-                    msg = (msg.replace("functions in a QPU library cannot print", "I/O stays on the CPU")
-                           + " (a __qcpu__ function, or a function it calls, uses the C library; __qcpu__ code must be pure)")
-                raise Error(msg)
-            if B["unsupported"]:
-                print(f"qcpucc: warning: {len(B['unsupported'])} instruction(s) the quantum CPU does not implement; "
-                      "a call that reaches one fails with QCPU_TRAP: " + "; ".join(e["asm"] for e in B["unsupported"][:5]),
-                      file=sys.stderr)
-            extra_c, circuits, mode_lines = "", {}, []
-            if a.qcpu_mode != "interpreted":
-                extra_c, circuits, mode_lines = compile_functions(qobj, isa, funcs, all_defs, a.qcpu_mode,
+            extra_c, circuits, mode_lines, B = "", {}, [], None
+            if "qoracle" in modes:             # a circuit of each function alone
+                extra_c, circuits, mode_lines = compile_functions(qobj, isa, funcs, all_defs,
                                                                   "__CHAR_UNSIGNED__" not in host_macros)
+            if "qcpu" in modes:                # the quantum CPU (von Neumann machine of gates) runs the machine code
+                try:
+                    B = qpu_dll.build_machine(qobj, isa, funcs, a.qcpu_width, a.qcpu_memory, roots=names)
+                except qpu_dll.BuildError as e:
+                    msg = str(e)
+                    if "unresolved" in msg or "cannot print" in msg:
+                        msg = (msg.replace("functions in a QPU library cannot print", "I/O stays on the CPU")
+                               + " (a __qcpu__ function, or a function it calls, uses the C library; __qcpu__ code must be pure)")
+                    raise Error(msg)
+                if B["unsupported"]:
+                    print(f"qcpucc: warning: {len(B['unsupported'])} instruction(s) the quantum CPU does not implement; "
+                          "a call that reaches one fails with QCPU_TRAP: " + "; ".join(e["asm"] for e in B["unsupported"][:5]),
+                          file=sys.stderr)
             gen = os.path.join(d, "qcpu_wrappers.c")
             open(gen, "w").write(qpu_dll.library_source(os.path.splitext(os.path.basename(out))[0], hdr, funcs, B,
-                                                        a.qcpu_max_steps, True, circuits, extra_c))
+                                                        a.qcpu_max_steps, True, circuits, extra_c, modes[0] == "qoracle"))
             if a.keep:
                 shutil.copy(gen, out + ".qcpu_wrappers.c")
             gobj = os.path.join(d, "qcpu_wrappers.o")
@@ -480,11 +488,17 @@ def build(a, cflags, ldflags, sources):
         if system == "linux":
             link.append("-lpthread")
         run(link + ldflags, "linking")
-    if all_defs:
+    if all_defs and B:
         m = B["m"]
-        print(f"qcpucc: {out}: {len(names)} __qcpu__ function(s) on the quantum CPU ({isa.title}, W = {B['W']}, "
+        print(f"qcpucc: {out}: qcpu: {len(names)} __qcpu__ function(s) on the quantum CPU ({isa.title}, W = {B['W']}, "
               f"{len(B['code'])} {'bytes' if isa.unit == 1 else 'instructions'}, {m.n} qubits, {len(B['tmpl'])} gates "
               f"per cycle): {', '.join(names)}", file=sys.stderr)
+    if all_defs and circuits:
+        print(f"qcpucc: {out}: qoracle: {len(names)} __qcpu__ function(s) as circuits of their own: {', '.join(names)}", file=sys.stderr)
+    if all_defs and len(modes) == 2:
+        print(f"qcpucc: {out}: both modes; at run time QCPU_MODE=qcpu, qoracle or native (default {modes[0]})",
+              file=sys.stderr)
+    if all_defs:
         for line in mode_lines:
             print("qcpucc:   " + line, file=sys.stderr)
         if dm_diffs:
@@ -504,10 +518,11 @@ def main(argv=None):
     ap.add_argument("--qcpu-memory", type=int, default=512, help="data memory in ints, a power of two (default 512)")
     ap.add_argument("--qcpu-max-steps", type=int, default=1000000, help="default cycle limit per call")
     ap.add_argument("--qcpu-opt", default="1", help="optimisation level of the quantum-CPU code (default 1)")
-    ap.add_argument("--qcpu-mode", choices=("interpreted", "compiled", "auto"), default="interpreted",
-                    help="interpreted: the whole quantum CPU runs each function (default); compiled: also a small "
-                         "circuit of each function alone (qoracle), required for every function; auto: compiled where "
-                         "possible. The program runs the compiled circuit unless QCPU_MODE=interpreted")
+    ap.add_argument("--qcpu-mode", default="qcpu", metavar="qcpu|qoracle|qcpu,qoracle",
+                    help="qcpu: a quantum CPU (von Neumann machine of gates) runs the machine code of every __qcpu__ "
+                         "function (default); qoracle: each __qcpu__ function becomes a circuit of its own (qoracle), "
+                         "much smaller; a function that cannot is a build error. Both (qcpu,qoracle): QCPU_MODE picks "
+                         "at run time, the first one by default")
     ap.add_argument("--cc", help="host C compiler (default $CC, else cc)")
     ap.add_argument("--keep", action="store_true", help="keep the generated wrapper source next to the output")
     a, rest = ap.parse_known_args(argv)
