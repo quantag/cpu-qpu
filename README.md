@@ -596,6 +596,23 @@ predicate); qoracle's own README runs both with compiled oracles. Still beyond t
 oracles, run-time guards for loops with wider inputs, and drivers for real devices. Design:
 [`docs/qcpu_spec.md`](docs/qcpu_spec.md), section 5.5.
 
+## Q-ARM: quantum gates inside an ARM binary
+
+Q-ARM embeds OpenQASM 2 unitary gates in an AArch64 binary as *CPU-skippable packets*: each packet starts
+with a branch over itself, so an ordinary ARM CPU skips the quantum part and runs the rest of the
+program unchanged, while the quantum interpreter recognizes the packet and applies its gates
+coherently.
+
+```bash
+python3 qarm.py compile examples/qarm/bell.qasm -o bell
+python3 qarm.py run bell.bin
+```
+
+The packet format, the ABI and what is supported are in [`docs/qarm.md`](docs/qarm.md); validation in
+[`docs/qarm_validation.md`](docs/qarm_validation.md). This first, coherent version has no reset,
+mid-circuit measurement or classical feedback. Plain ARM behavior is unchanged. Test:
+`python3 -m pytest -q tests/test_qarm.py`.
+
 ## Calling QPU functions from a host program, like a DLL
 
 A host program can call functions that run on the quantum machine as ordinary C functions, through
@@ -910,6 +927,7 @@ python3 -m tests.test_c_programs clang x86_64    # the same C cases compiled for
 python3 -m tests.test_x86 150 7 8,12,16          # x86-64: decoder, circuit vs instruction model, traps, boundary cases, random programs
 python3 -m tests.test_macos             # linked macOS arm64 executables (Mach-O), dyld info and chained fixups
 python3 -m tests.test_dll                        # QPU libraries: host program + generated .so/.dll; C engine == Python simulator
+python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths
