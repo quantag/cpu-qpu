@@ -2,7 +2,7 @@
 
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
-extension, and no claim of a speedup today (section 8).
+extension, and no claim of a speedup today (section 9).
 
 ## 1. The idea
 
@@ -149,7 +149,110 @@ plain CPU, `W0` = 0 sends the program down the classical path, as now. A ticket 
 by the runtime, so a program could submit several searches and collect them later. That is how CUDA-Q's
 `cudaq::sample_async` and Qiskit's `job.result()` already work.
 
-## 6. What is checked
+## 6. VQE
+
+The variational quantum eigensolver finds the ground-state energy of a molecule. It fits Q-ARM's split
+directly. The optimizer is ordinary C on the CPU. The coprocessor prepares a parameterized state
+|ψ(θ)⟩ and measures ⟨ψ(θ)|H|ψ(θ)⟩. The quantum part is data, not code: a Hamiltonian and an ansatz,
+held in two tables in the program's memory.
+
+### Instructions
+
+| opcode | name | in | out |
+|---|---|---|---|
+| `0x20` | `QVLOAD` | `X1` = Hamiltonian, `X2` = ansatz | `W0` = 1 and `X3` = handle, or 2 (refused) |
+| `0x21` | `QEXPECT` | `X3` = handle, `X1` = θ (doubles), `W2` = shots (0: config.json's) | `W0` = 1, `D0` = E(θ), `D1` = standard error |
+| `0x22` | `QEXPECTN` | `X3` = handle, `X1` = k parameter vectors, `W2` = k, `X4` = k doubles | `W0` = 1, the k energies at `X4` |
+| `0x24` | `QSESSION` | `W1` = 1 open, 0 close | `W0` = 1 |
+| `0x26` | `QVFREE` | `X3` = handle | `W0` = 1 |
+
+On a plain CPU every packet leaves `W0` = 0, and `include/qarm.h` takes the classical path. That path is
+a state-vector simulation in C, exact up to `QARM_VQE_MAX_QUBITS` qubits (default 12; link with `-lm`).
+Opcodes `0x23` (`QGRAD`, a parameter-shift gradient in one job) and `0x25` (`QVSAMPLE`, the final
+state's bitstrings) are reserved for the next step.
+
+### Tables (include/qarm.h)
+
+```c
+typedef struct { uint64_t x, z; double c; } qarm_pauli;   // c · P, P on qubit q: I X Z Y for (x_q, z_q) = 00 10 01 11
+typedef struct { uint32_t qubits, terms; double constant; const qarm_pauli *t; } qarm_hamiltonian;
+typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
+typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
+```
+
+The ansatz starts from the basis state `init` (Hartree–Fock, say) and applies `QARM_X`, `QARM_H`,
+`QARM_CX`, `QARM_CZ`, `QARM_RY` and `QARM_RZ` (angle = `scale · θ[param]`). It can also apply
+`QARM_PAULI_ROT`, exp(−i · scale · θ[param] · P(x, z)), which is how UCC excitations are written. Up to 64
+qubits and 255 parameters.
+
+### The C API
+
+```c
+qarm_vqe v;
+qarm_vqe_load(&h, &ansatz, &v);          // 1: coprocessor, 0: classical, -1: refused
+qarm_session(1);                          // reserve a QPU for the loop (no-op elsewhere)
+qarm_expect_n(&v, thetas, k, energies);   // a batch: one job
+double e = qarm_expect(&v, theta, &err);  // one energy and its standard error
+qarm_session(0);
+qarm_vqe_free(&v);
+```
+
+### The demo: `examples/qarm/h2_vqe.c`
+
+H₂ at 0.735 Å (STO-3G) uses the parity mapping, reduced to 2 qubits with 5 Pauli terms; the nuclear
+repulsion goes in the constant. The ansatz has one parameter and one CNOT. The optimizer does four rounds
+of a 17-point grid, each round finer around the lowest point. Each round is one `QEXPECTN`, so on a QPU the
+whole optimization is 5 jobs: 4 batches and a final `QEXPECT`. The final energy is measured again, because
+the lowest of 17 noisy values is biased low.
+
+```
+$ clang -O1 -iquote include examples/qarm/h2_vqe.c -o h2_vqe -lm
+$ ./h2_vqe                                    # a plain CPU
+E(-2.918398) = -1.137306 Ha; exact ground state -1.137306 Ha, difference 0.0 mHa
+$ python3 qarm_exec.py h2_vqe                 # the same, from the runtime's exact simulator
+$ python3 qarm_exec.py --backend preview h2_vqe
+[qarm: QVLOAD: 2 qubits, 5 Pauli terms, an ansatz of 3 operations (1 two-qubit) with 1 parameter; on preview: noise model of fake_fez (156 qubits): 2 measurement bases, readout correction, up to 1 two-qubit gates after transpiling]
+...
+$ python3 qarm_exec.py --qpu h2_vqe           # config.json: a real IBM device
+```
+
+### How energies are measured
+
+- **Exact simulator** (the default): a state vector, synchronous, standard error 0.
+- **Backends from config.json** (`simulator`, `aer`, `preview`, `ibm`):
+  - At `QVLOAD` the terms are grouped greedily into qubit-wise commuting measurement bases. H₂ needs
+    two: Z for `IZ`, `ZI` and `ZZ`, and X for `XX`. The circuits are transpiled once.
+  - Each `QEXPECTN` is **one Sampler job**: one circuit per basis, each with all k parameter vectors.
+  - On `preview` and `ibm` the job also measures all-0 and all-1 on the same physical qubits. Each
+    distribution is then corrected with the per-qubit readout matrices: **readout correction** in the
+    same job, at no extra trip through the queue. Turn it off with `"options": {"readout_mitigation": false}`.
+  - The Sampler is used rather than the Estimator because it runs on every backend, the Open Plan
+    included. The local Estimator of the noise models simulates every qubit of the device. IBM's own
+    error mitigation (resilience levels, ZNE) is not used yet.
+- **`QSESSION`** opens an IBM Session on `ibm`, so the optimizer's jobs skip the queue after the first.
+  The Open Plan has no sessions; then each job queues on its own, and the report says so.
+
+Measured on H₂ (`tests/test_qarm_vqe.py`):
+
+| where | energy | from the exact value |
+|---|---|---|
+| plain CPU, exact simulator | −1.137306 Ha | 0 |
+| noise model of Fez, 1024–4000 shots | about −1.10 to −1.13 Ha | 10–35 mHa |
+| noise model of Torino, without / with readout correction | −0.967 / −1.127 Ha | 170 / 11 mHa |
+
+Chemical accuracy is 1.6 mHa. Reaching it on hardware needs more shots and the mitigation above.
+
+### Checks
+
+Noise can push an energy below the true ground state, so a measured energy cannot be checked by
+re-running something, the way `QSEARCH` checks its answer. The checks are instead:
+- three independent implementations of the same tables must agree: the C state vector, the runtime's
+  numpy state vector, and the Qiskit circuits on Aer;
+- on noisy backends, the result must fall within a tolerance of the exact value.
+
+The exact value is available on the plain-CPU path of the same binary, for molecules small enough.
+
+## 7. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:
 
@@ -161,16 +264,27 @@ by the runtime, so a program could submit several searches and collect them late
   `ibm` backend's local channel (the code path of a real device: one job, without the login); Code
   Breaker's oracle refused as larger than the device.
 
-## 7. Next
+`tests/test_qarm_vqe.py`, in the same places:
+
+- `h2_vqe` on the plain CPU and under the runtime gives the same output, with the ground state to 1e-6;
+- every ansatz operation and Y terms, 3 qubits: the C path and the runtime agree to 1e-9. With Qiskit,
+  the Aer energies agree with them within 5 standard errors;
+- refused tables: an operation outside the register, too many qubits for the exact simulator;
+- with Qiskit: `h2_vqe` on the noise model of Fez within 0.1 Ha, and through the local channel of the
+  `ibm` backend (a session, 5 jobs).
+
+## 8. Next
 
 - More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
   `QPERIOD` (period finding).
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
+- VQE: `QGRAD` and `QVSAMPLE`; IBM's error mitigation; a build-time tool that writes the tables of
+  a molecule as a C header (PySCF, Jordan–Wigner or parity mapping).
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.
 
-## 8. What this is and is not
+## 9. What this is and is not
 
 It does not make programs faster today: the classical part runs as fast as before, but a quantum
 instruction is simulated, and on hardware Grover's search pays off only for large searches. What it

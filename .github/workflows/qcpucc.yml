@@ -41,6 +41,8 @@ jobs:
         run: python -m tests.test_qcpu_search
       - name: test_qarm_exec (Q-ARM v2)
         run: python -m tests.test_qarm_exec
+      - name: test_qarm_vqe (Q-ARM v2 VQE; Qiskit parts in the job below)
+        run: python -m tests.test_qarm_vqe
   export:
     # the exported circuits in Qiskit and in CUDA-Q itself
     runs-on: ubuntu-latest
@@ -59,3 +61,5 @@ jobs:
         run: python -m tests.test_qcpu_run
       - name: test_qarm_exec on QPU backends
         run: python -m tests.test_qarm_exec
+      - name: test_qarm_vqe on QPU backends
+        run: python -m tests.test_qarm_vqe

@@ -796,6 +796,24 @@ $ python3 qarm_exec.py --qpu tiny_search               # config.json's backend, 
 A QPU is asynchronous, so `QSEARCH` sends one job with all of Grover's iteration counts and waits for it.
 Every answer is still checked by running the program's own function, and an oracle larger than the device
 is refused before anything is submitted ([`docs/qarm_v2.md`](docs/qarm_v2.md#5-on-a-real-qpu)).
+
+### VQE: the molecule's energy from a C optimizer
+
+Five more instructions (`QVLOAD`, `QEXPECT`, `QEXPECTN`, `QSESSION`, `QVFREE`) let a C program run the
+variational quantum eigensolver. The optimizer is the program's own code on the CPU. The coprocessor
+measures ⟨ψ(θ)|H|ψ(θ)⟩ for a Hamiltonian and an ansatz described in two C tables. On a plain CPU,
+`qarm.h` computes the energy exactly from the state vector.
+
+```
+$ clang -O1 -iquote include examples/qarm/h2_vqe.c -o h2_vqe -lm
+$ ./h2_vqe                                         # exact, on this CPU
+$ python3 qarm_exec.py --backend preview h2_vqe    # noise model of IBM Fez, readout corrected
+$ python3 qarm_exec.py --qpu h2_vqe                # config.json's device: 5 jobs in all
+```
+
+H₂ at 0.735 Å takes 2 qubits and one CNOT. The exact result is −1.137306 Ha; the noise models of Fez and
+Torino give it to within about 10–35 mHa. Each batch of parameter vectors is one job, so an async QPU
+queues once per optimizer round ([`docs/qarm_v2.md`](docs/qarm_v2.md#6-vqe)).
 No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
 the classical path elsewhere, both computing the same function.
 
@@ -1143,6 +1161,7 @@ python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AAr
 python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
 python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
 python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py (and on QPU backends)
+python3 -m tests.test_qarm_vqe                   # Q-ARM v2 VQE: H2 on a CPU, the runtime, Aer, IBM noise models
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
