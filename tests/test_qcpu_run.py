@@ -6,9 +6,10 @@
      search with is_three (x == 3, 2 bits, one iteration) gives 3 every shot.
   2. backend "preview" (IBM's noise model of a real device): the right answers are by far the most frequent.
   3. backend "ibm" through qiskit-ibm-runtime's local channel (the code path of a real device, without the login),
-     with the device set in config.local.json over config.json: a job id, the right answer.
-  4. a missing API key, an unknown backend or preview device, a missing config file, a compute oracle instead of a
-     phase oracle: clear errors. config.local.json (where the API key goes) is ignored by git.
+     configured as {"backend": "ibm", "mode": "sampler", "shots": ..., "options": {...}}: a job id, the right answer.
+  4. config.json: options go to the chosen backend (ibm_token, instance, device); the older "ibm" section still
+     works; a mode other than sampler, a missing API key, an unknown backend or preview device, a missing config
+     file, a compute oracle instead of a phase oracle: clear errors. config.json is ignored by git.
 Run: python3 -m tests.test_qcpu_run"""
 import json, os, subprocess, sys, tempfile, textwrap
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,14 +36,9 @@ def main():
                         src, "-o", os.path.join(d, "s")], check=True, capture_output=True)
         bv, gr = os.path.join(out, "hidden_phase.qasm"), os.path.join(out, "is_three_phase.qasm")
 
-        def cfg(local=None, **kw):
+        def cfg(**kw):
             path = os.path.join(d, "config.json")
             json.dump(kw, open(path, "w"))
-            lp = os.path.join(d, "config.local.json")
-            if local:
-                json.dump(local, open(lp, "w"))
-            elif os.path.exists(lp):
-                os.remove(lp)
             return qcpu_run.load_config(path)
 
         # 1. ideal
@@ -55,7 +51,7 @@ def main():
 
         # 2. preview: the noise model of a real IBM device
         r1 = qcpu_run.run("bv", bv, cfg(backend="preview", shots=1000), expect=0xB5)
-        r2 = qcpu_run.run("grover", gr, cfg(backend="preview", shots=1000), expect=3)
+        r2 = qcpu_run.run("grover", gr, cfg(backend="preview", shots=1000, options={"device": "fez"}), expect=3)
         assert r1["results"][0]["x"] == 181 and r1["right_answer_fraction"] > 0.6, r1
         assert r2["results"][0]["x"] == 3 and r2["right_answer_fraction"] > 0.5, r2
         print(f"2) preview ({r1['backend'].split(':')[1].split(' (')[0].strip()}): Bernstein-Vazirani "
@@ -63,17 +59,27 @@ def main():
               f"Grover {r2['right_answer_fraction']:.1%} right ({r2['two_qubit_gates']} two-qubit gates; random 25%)")
 
         # 3. the IBM code path, local channel
-        r = qcpu_run.run("bv", bv, cfg(backend="ibm", shots=500,
-                                       local={"ibm": {"channel": "local", "backend": "fake_torino"}}), expect=0xB5)
+        r = qcpu_run.run("bv", bv, cfg(backend="ibm", mode="sampler", shots=500,
+                                       options={"channel": "local", "device": "fake_torino"}), expect=0xB5)
         assert r["backend"].startswith("ibm: fake_torino") and r["job_id"] and r["results"][0]["x"] == 181, r
         print(f"3) ibm, local channel (fake_torino): job {r['job_id'][:8]}..., 181 in {r['right_answer_fraction']:.1%} "
-              "of shots: the path of a real device, without the login; the device came from config.local.json")
+              "of shots: the path of a real device, without the login")
 
         # 4. errors
+        c = cfg(backend="ibm", mode="sampler", shots=1024,
+                options={"ibm_token": "abc", "instance": "one", "device": "ibm_aachen"})
+        assert (c["ibm"]["token"], c["ibm"]["instance"], c["ibm"]["backend"], c["shots"]) == ("abc", "one", "ibm_aachen", 1024), c
+        c = cfg(backend="ibm", ibm={"token": "xyz", "backend": "ibm_fez"})                  # the older form
+        assert (c["ibm"]["token"], c["ibm"]["backend"]) == ("xyz", "ibm_fez"), c
+        try:
+            cfg(backend="ibm", mode="estimator")
+            raise AssertionError("estimator")
+        except SystemExit as e:
+            assert "mode 'estimator': supported: sampler" in str(e), e
         os.environ.pop("IBM_QUANTUM_TOKEN", None)
-        for kw, msg in (({"backend": "ibm"}, "needs your IBM Quantum API key: put it in config.local.json"),
+        for kw, msg in (({"backend": "ibm"}, "needs your IBM Quantum API key: \"options\": {\"ibm_token\""),
                         ({"backend": "qpu"}, "backend 'qpu': use simulator, aer, preview, ibm"),
-                        ({"backend": "preview", "preview": {"device": "nowhere"}}, "is not a known IBM device")):
+                        ({"backend": "preview", "options": {"device": "nowhere"}}, "is not a known IBM device")):
             try:
                 qcpu_run.run("bv", bv, cfg(**kw))
                 raise AssertionError(kw)
@@ -85,10 +91,11 @@ def main():
         p = subprocess.run([sys.executable, os.path.join(ROOT, "qcpu_run.py"), "bv", os.path.join(out, "hidden.qasm"), "--backend", "simulator"],
                            capture_output=True, text=True, cwd=d)
         assert p.returncode == 1 and "give the phase oracle" in p.stderr, p.stderr
-        ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", "config.local.json"], cwd=ROOT).returncode == 0
-        assert ignored, "config.local.json must be in .gitignore"
-        print("4) errors: no API key, an unknown backend or device, a missing config file, a compute oracle; "
-              "config.local.json is ignored by git")
+        ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", "config.json"], cwd=ROOT).returncode == 0
+        assert ignored, "config.json must be in .gitignore"
+        print("4) config.json: options to the chosen backend (ibm_token, instance, device), the older ibm section, mode "
+              "sampler only; errors: no API key, an unknown backend or device, a missing config file, a compute oracle; "
+              "config.json is ignored by git")
     print("PASS")
 
 

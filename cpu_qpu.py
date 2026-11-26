@@ -43,25 +43,44 @@ DEFAULTS = {
     "ibm": {"channel": "ibm_quantum_platform", "token": "env:IBM_QUANTUM_TOKEN", "instance": None,
             "backend": "least_busy", "optimization_level": 1},
     "preview": {"device": "fez"},     # qcpu_run.py --backend preview: an IBM device's noise model, no account
+    "mode": "sampler",                # Qiskit Runtime primitive for ibm: sampler (measurement counts)
 }
 
 
+MODES = ("sampler",)
+
+
 def load_config(path):
-    """DEFAULTS, then config.json (path), then config.local.json beside it: the local file is ignored by git and is
-    the place for secrets such as the IBM Quantum API key."""
+    """DEFAULTS, then config.json (path), if it exists. config.json is personal (git ignores it; see config.example.json):
+        {"backend": "ibm", "mode": "sampler", "shots": 1024,
+         "options": {"ibm_token": "...", "instance": "...", "device": "ibm_aachen"}}
+    "options" belongs to the backend named in "backend": for ibm ibm_token (or "env:VAR"), instance, device (a name or
+    least_busy), channel, optimization_level; for aer method; for preview device. The older form with "ibm", "aer" and
+    "preview" sections is read too."""
     cfg = json.loads(json.dumps(DEFAULTS))
-    local = os.path.join(os.path.dirname(os.path.abspath(path)), "config.local.json") if path else None
-    for f in (path, local):
-        if f and os.path.exists(f):
-            try:
-                user = json.load(open(f))
-            except json.JSONDecodeError as e:
-                raise SystemExit(f"{f}: not valid JSON: {e}")
-            for k, v in user.items():
-                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                    cfg[k].update(v)
-                else:
-                    cfg[k] = v
+    if not (path and os.path.exists(path)):
+        return cfg
+    try:
+        user = json.load(open(path))
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{path}: not valid JSON: {e}")
+    options = user.pop("options", None)
+    for k, v in user.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k].update(v)
+        else:
+            cfg[k] = v
+    if options is not None:
+        if not isinstance(options, dict):
+            raise SystemExit(f"{path}: \"options\" must be an object")
+        backend = cfg.get("backend")
+        if backend == "ibm":
+            rename = {"ibm_token": "token", "device": "backend"}
+            cfg["ibm"].update({rename.get(k, k): v for k, v in options.items()})
+        elif backend in ("aer", "preview"):
+            cfg[backend].update(options)
+    if cfg.get("mode", "sampler") not in MODES:
+        raise SystemExit(f"{path}: mode '{cfg['mode']}': supported: " + ", ".join(MODES))
     return cfg
 
 

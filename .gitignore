@@ -16,5 +16,5 @@ examples/dll/main_cpu
 paper/
 paper2/
 
-# local settings over config.json, such as your IBM Quantum API key: never commit it
-config.local.json
+# your configuration, with your IBM Quantum API key (see config.example.json): never commit it
+config.json

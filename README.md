@@ -734,18 +734,29 @@ bv with hidden (int hidden(int x)) on preview: noise model of fake_fez (156 qubi
   the expected answer 181: 89.4% of shots (a random guess: 0.4%)
 ```
 
-**Backends** (`backend` in `config.json`, or `--backend`): `simulator` (ideal), `aer` (with the `aer`
-settings), `preview` (the noise model of an IBM device, `"preview": {"device": "fez"}`; no account),
-`ibm` (a real device, with the `ibm` settings below). `--save run.json` keeps the result, with the job id.
+**Backends** (`backend` in `config.json`, or `--backend`): `simulator` (ideal), `aer`, `preview` (the
+noise model of an IBM device, `"options": {"device": "fez"}`; no account), `ibm` (a real device, with
+the options below). `--save run.json` keeps the result, with the job id.
 
-**Your IBM Quantum account.** The free Open Plan is enough: these circuits take seconds. Put your API key
-in `config.local.json` beside `config.json` (copy `config.local.example.json`); every tool reads it over
-`config.json`, and git ignores it, so the key is never committed. Or keep `"token": "env:IBM_QUANTUM_TOKEN"`
-and set that environment variable. `"backend": "least_busy"` or a device name chooses the machine.
+**Your IBM Quantum account.** The free Open Plan is enough: these circuits take seconds. Copy
+`config.example.json` to `config.json` and fill in your API key, instance and device. Git ignores
+`config.json`, so the key is never committed:
 
 ```json
-{ "ibm": { "token": "your API key", "instance": null } }
+{
+  "backend": "ibm",
+  "mode": "sampler",
+  "shots": 1024,
+  "options": {
+    "ibm_token": "your IBM Quantum API key",
+    "instance": "your instance (CRN or name)",
+    "device": "ibm_aachen"
+  }
+}
 ```
+
+`"device": "least_busy"` takes whichever device is least busy. `"ibm_token": "env:IBM_QUANTUM_TOKEN"`
+reads the key from that environment variable instead.
 
 Larger oracles are still too deep for today's noise: Grover on 3 and 4 bits with the circuits
 qoracle makes now. `x == 3` should be one controlled-Z; it is 12 Toffoli gates today, since qoracle
@@ -972,9 +983,16 @@ returns the same exit status as the program compiled natively.
 
 ## config.json
 
+Every tool reads `config.json` in this repository: your own file, which git ignores because it can
+hold your IBM Quantum API key. Copy `config.example.json` to start. Without `config.json` every setting
+has its default (shown here as one file):
+
 ```json
 {
   "backend": "simulator",
+  "mode": "sampler",
+  "shots": 1024,
+  "options": {},
   "register_width": "auto",
   "registers": "auto",
   "memory_words": "auto",
@@ -984,17 +1002,16 @@ returns the same exit status as the program compiled natively.
   "compiler": "auto",
   "cflags": ["-O1", "-fno-stack-protector"],
   "output_records": 32,
-  "stack_bytes": 256,
-  "shots": 1024,
-  "aer": {"method": "matrix_product_state"},
-  "ibm": {"channel": "ibm_quantum_platform", "token": "env:IBM_QUANTUM_TOKEN",
-          "instance": null, "backend": "least_busy", "optimization_level": 1}
+  "stack_bytes": 256
 }
 ```
 
 | key | meaning |
 |---|---|
-| `backend` | `simulator`: exact simulation of the circuit on its basis-state input (fast, any size). `aer`: Qiskit Aer, sampled with `shots`. `ibm`: IBM Quantum hardware through Qiskit Runtime (`token` may be `env:VAR`). `preview` (`qcpu_run.py` only): the noise model of the IBM device in `"preview": {"device": "fez"}`. |
+| `backend` | `simulator`: exact simulation of the circuit on its basis-state input (fast, any size). `aer`: Qiskit Aer, sampled with `shots`. `ibm`: IBM Quantum hardware through Qiskit Runtime. `preview` (`qcpu_run.py` only): the noise model of an IBM device. |
+| `mode` | the Qiskit Runtime primitive: `sampler` (measurement counts; the only one so far). |
+| `shots` | measurements per run (default 1024). |
+| `options` | settings of the chosen backend. `ibm`: `ibm_token` (or `env:VAR`), `instance`, `device` (a name or `least_busy`), `channel` (default `ibm_quantum_platform`), `optimization_level` (default 1). `aer`: `method` (default `matrix_product_state`). `preview`: `device` (`fez`, `torino`, ...). |
 | `arch` | architecture for `.c` input and raw binaries when `--arch` is not given: `arm64` (default), `riscv64`, `riscv32`, `x86_64`. Object files carry their own. |
 | `register_width` | W, bits per register (8 to 16). `auto` = smallest W that holds the code and data addresses. |
 | `registers` | `auto` = only registers the code uses; `all` = X0..X30; or a list. |
@@ -1007,9 +1024,8 @@ returns the same exit status as the program compiled natively.
 | `output_records` | how many printf/puts/putchar calls the output log keeps (default 32). |
 | `stack_bytes` | stack reserved at the top of data memory (default 256). |
 
-Settings in `config.local.json` beside `config.json` are read over it by every tool. Git ignores that
-file: it is the place for the IBM Quantum API key (`{"ibm": {"token": "..."}}`, see
-`config.local.example.json`).
+The older form, with `"ibm": {"token": ..., "backend": ...}` and `"aer": {"method": ...}` sections, is
+still read.
 
 Before submitting to hardware the runner checks the circuit's width against the device. A run
 that does not fit is reported as not submitted, with the reason.

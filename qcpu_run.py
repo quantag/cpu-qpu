@@ -7,13 +7,15 @@
     python3 qcpu_run.py bv oracle/hidden_phase.qasm                    # Bernstein-Vazirani: f(x) = parity(x & s)
     python3 qcpu_run.py grover oracle/is_three_phase.qasm --expect 3   # Grover's search
 
-Where it runs comes from config.json, the configuration of every tool here, and config.local.json beside it
-(ignored by git: put your IBM Quantum API key there; see config.local.example.json). --backend overrides it:
+Where it runs comes from config.json in this repository (your own file, ignored by git; copy config.example.json):
+    {"backend": "ibm", "mode": "sampler", "shots": 1024,
+     "options": {"ibm_token": "your API key", "instance": "your instance", "device": "ibm_aachen"}}
+"backend" (or --backend):
     simulator   an ideal simulator (qiskit-aer)
-    aer         Qiskit Aer with config.json's "aer" settings
-    preview     IBM's noise model of a real device ("preview": {"device": "fez"}), no account
-    ibm         a real IBM quantum computer: "ibm": {"channel", "token" (or "env:VAR"), "instance", "backend"
-                (a device name or least_busy), "optimization_level"}
+    aer         Qiskit Aer; options: method
+    preview     IBM's noise model of a real device, no account; options: device (fez, torino, ...)
+    ibm         a real IBM quantum computer; options: ibm_token (or "env:VAR"), instance, device (a name or
+                least_busy), channel, optimization_level
 The oracle is the phase form written by qcpucc --qcpu-export (|x>|0> -> (-1)^f(x) |x>|0>), with its .json beside it."""
 import argparse
 import json
@@ -35,9 +37,11 @@ class Error(Exception):
     pass
 
 
-def load_config(path, backend=None):
-    """config.json and config.local.json (cpu_qpu.load_config), with --backend over "backend"."""
-    if path and not os.path.exists(path):
+def load_config(path=None, backend=None):
+    """config.json (cpu_qpu.load_config), with --backend over "backend"."""
+    if path is None:                          # the repository's config.json, if you made one; else the defaults
+        path = os.path.join(ROOT, "config.json")
+    elif not os.path.exists(path):
         raise Error(f"{path}: no such file")
     sys.path.insert(0, ROOT)
     import cpu_qpu
@@ -112,9 +116,9 @@ def backend_for(cfg, min_qubits):
         token = os.environ.get(token[4:])
     if ibm.get("channel") != "local" and not token:
         where = ibm.get("token", "")
-        raise Error("backend 'ibm' needs your IBM Quantum API key: put it in config.local.json "
-                    "(\"ibm\": {\"token\": \"...\"}, see config.local.example.json)"
-                    + (f" or set the environment variable {where[4:]}" if where.startswith("env:") else ""))
+        raise Error("backend 'ibm' needs your IBM Quantum API key: \"options\": {\"ibm_token\": \"...\"} in "
+                    "config.json (see config.example.json)"
+                    + (f", or set the environment variable {where[4:]}" if where.startswith("env:") else ""))
     kw = {"channel": ibm.get("channel", "ibm_quantum_platform")}
     if kw["channel"] != "local":
         kw["token"] = token
@@ -183,8 +187,8 @@ def main(argv=None):
     ap.add_argument("algorithm", choices=("bv", "grover"),
                     help="bv: Bernstein-Vazirani (f(x) = parity(x & s): s in one call); grover: Grover's search")
     ap.add_argument("oracle", help="NAME_phase.qasm written by qcpucc --qcpu-export")
-    ap.add_argument("--config", default=os.path.join(ROOT, "config.json"),
-                    help="configuration (default: config.json of this repository, with config.local.json beside it)")
+    ap.add_argument("--config",
+                    help="configuration (default: config.json of this repository; see config.example.json)")
     ap.add_argument("--backend", choices=BACKENDS, help="overrides config.json's backend")
     ap.add_argument("--iterations", type=int, help="Grover iterations (default: for one solution)")
     ap.add_argument("--expect", type=lambda v: int(v, 0), help="the right answer, to report how often it was measured")
