@@ -784,6 +784,18 @@ the secret code: BYRG
 
 Build the predicate with `-O1` and its helpers inlined (vector instructions and calls cannot become an
 oracle yet). Design, packet format, the runtime and its limits: [`docs/qarm_v2.md`](docs/qarm_v2.md).
+
+`QSEARCH` can also run on a real IBM quantum computer, or on IBM's noise model of one, from `config.json`.
+The demo is `examples/qarm/tiny_search.c`, a 2-bit predicate whose oracle takes 9 qubits:
+
+```
+$ python3 qarm_exec.py --backend preview tiny_search   # noise model of IBM Fez, no account
+$ python3 qarm_exec.py --qpu tiny_search               # config.json's backend, e.g. "ibm"
+```
+
+A QPU is asynchronous, so `QSEARCH` sends one job with all of Grover's iteration counts and waits for it.
+Every answer is still checked by running the program's own function, and an oracle larger than the device
+is refused before anything is submitted ([`docs/qarm_v2.md`](docs/qarm_v2.md#5-on-a-real-qpu)).
 No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
 the classical path elsewhere, both computing the same function.
 
@@ -1130,7 +1142,7 @@ python3 -m tests.test_dll                        # QPU libraries: host program +
 python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
 python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
 python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
-python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py
+python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py (and on QPU backends)
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)

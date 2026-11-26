@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, qarm-qpu]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -50,10 +50,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Tools
-        run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Python packages
-        run: python -m pip install unicorn lief capstone qiskit qiskit-qasm3-import qiskit-aer qiskit-ibm-runtime cudaq "qoracle @ git+https://github.com/quantag/qoracle.git"
+        run: python -m pip install unicorn lief capstone numpy qiskit qiskit-qasm3-import qiskit-aer qiskit-ibm-runtime cudaq "qoracle @ git+https://github.com/quantag/qoracle.git"
       - name: test_qcpu_export
         run: python -m tests.test_qcpu_export
       - name: test_qcpu_run
         run: python -m tests.test_qcpu_run
+      - name: test_qarm_exec on QPU backends
+        run: python -m tests.test_qarm_exec

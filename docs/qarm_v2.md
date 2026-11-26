@@ -2,7 +2,7 @@
 
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
-extension, and no claim of a speedup today (section 7).
+extension, and no claim of a speedup today (section 8).
 
 ## 1. The idea
 
@@ -98,24 +98,79 @@ Apple Silicon Mac) or Linux (ELF, dynamically linked, PIE or not).
   is in superposition, so the state is 2^bits amplitudes; the oracle's phases come from running its
   gates on all basis inputs at once (bit planes). `QCPU_SEED=n` makes the measurements repeatable.
 
-## 5. What is checked
+## 5. On a real QPU
+
+`QSEARCH` can run on the backends of `qcpu_run.py`, configured in `config.json` (your own file, ignored
+by git; see `config.example.json`):
+
+```
+$ clang -O1 -iquote include examples/qarm/tiny_search.c -o tiny_search
+$ python3 qarm_exec.py tiny_search                     # the exact simulator
+$ python3 qarm_exec.py --backend preview tiny_search   # IBM's noise model of Fez, no account
+[qarm: QSEARCH is_three, 2 bits on preview: noise model of fake_fez (156 qubits): 9 qubits, 2 circuits (1024 shots each, up to 155 two-qubit gates), job 5597ba3d-..., 9.9 s: x = 3, measured 1029 times of 2048 (1. most frequent answer), checked by running is_three]
+Q-ARM QSEARCH: x = 3
+$ python3 qarm_exec.py --qpu tiny_search               # config.json's backend: "ibm" is a real device
+```
+
+`--qpu` uses `config.json` (`--config FILE`: another one); `--backend simulator|aer|preview|ibm` overrides
+its `"backend"`. With none of these, the exact simulator is used, so no run spends QPU time unless asked.
+
+**Synchronous and asynchronous.** The simulator answers at once, so `QSEARCH` there is adaptive: BBHT
+picks each round's iteration count after the previous round's answer failed the check. A QPU is
+asynchronous. Each job waits in a queue, from seconds to hours, and the free plan has 10 minutes of QPU time
+per 28 days. Round-by-round adaptivity would queue once per round, so on a QPU `QSEARCH` is not adaptive.
+It sends **one job** holding Grover's circuit for every iteration count `j = 0 .. floor(pi/4 sqrt(2^bits))`.
+The job id is reported as soon as the job is sent, so you can follow it on the IBM Quantum dashboard. The
+emulated CPU waits at the packet until the job is done, as a CPU waits on a slow device. Then the measured
+answers of all the circuits are pooled and checked by running `f`, most frequent first.
+
+**Noise.** It changes which answers are measured, never what `QSEARCH` returns. `W3` is always an answer
+for which the program's own `f` returned 1. If noise hides every solution, the result is `W0 = 2` (none
+found), the same as for a search with no solution. A program that must tell those two cases apart can call
+it again or search classically.
+
+**Size.** The oracle is built from the function's machine code, so its qubit count is the function's
+register footprint: `is_three` takes 9 qubits, Code Breaker's `consistent()` takes 1066–1120. The backend
+refuses an oracle larger than the device, with the numbers (`needs 1120 qubits, fake_fez has 156: not
+run`, exit code 70), before anything is submitted. In practice the limit today is depth, not width:
+`is_three` already has 155 two-qubit gates after transpiling to Fez, where one CZ would do.
+
+**Async instructions (design, not implemented).** A program that should keep working while the QPU
+runs needs the asynchrony in the instruction set rather than hidden in the runtime:
+
+| opcode | name | in | out |
+|---|---|---|---|
+| `0x12` | `QSUBMIT` | `X1` = f, `W2` = bits | `W0` = 1 and `X3` = ticket, or `W0` = 0 (no coprocessor) |
+| `0x13` | `QPOLL` | `X3` = ticket | `W0` = 1 done, 3 still queued or running |
+| `0x14` | `QWAIT` | `X3` = ticket | as `QSEARCH`: `W0` = 1 and `W3` = x, or `W0` = 2 |
+
+On the simulator, `QSUBMIT` would compute the answer at once and `QPOLL` would always report done. On a
+plain CPU, `W0` = 0 sends the program down the classical path, as now. A ticket is the backend's job id held
+by the runtime, so a program could submit several searches and collect them later. That is how CUDA-Q's
+`cudaq::sample_async` and Qiskit's `job.result()` already work.
+
+## 6. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:
 
 - the Code Breaker binary on the plain CPU (classical, `BYRG`) and under the runtime (Grover, `BYRG`);
 - a second program: `printf` formats, `puts`, `putchar`, the exit code, `QAVAIL`; `QSEARCH` with several
   solutions, none, and 12 bits; the same output on the plain CPU, except `QAVAIL`;
-- errors: a predicate that calls a function, a C library function the runtime lacks.
+- errors: a predicate that calls a function, a C library function the runtime lacks;
+- with Qiskit (the export job, Linux x86-64): `tiny_search` on the noise model of Fez and through the
+  `ibm` backend's local channel (the code path of a real device: one job, without the login); Code
+  Breaker's oracle refused as larger than the device.
 
-## 6. Next
+## 7. Next
 
 - More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
   `QPERIOD` (period finding).
-- Backends from `config.json`: the noise model of an IBM device and real devices, for oracles small
-  enough (`qcpu_run.py`).
+- `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
+- Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
+  becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.
 
-## 7. What this is and is not
+## 8. What this is and is not
 
 It does not make programs faster today: the classical part runs as fast as before, but a quantum
 instruction is simulated, and on hardware Grover's search pays off only for large searches. What it

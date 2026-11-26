@@ -8,11 +8,16 @@
   2. A second program: printf formats, puts, putchar, an exit code; QSEARCH with several solutions (any one is
      right), with none (0), and at 12 bits; QAVAIL.
   3. Errors: a predicate that calls another function (exit 70, the reason); a missing library function.
+  4. (with qiskit, qiskit-aer, qiskit-ibm-runtime) QSEARCH on a QPU backend from a config file:
+     examples/qarm/tiny_search.c on IBM's noise model of Fez and through the "ibm" backend's local channel (the
+     code path of a real device, one asynchronous job, without the login); Code Breaker's 1000-qubit oracle is
+     refused as larger than the device.
 Run: python3 -m tests.test_qarm_exec   (needs an arm64 C compiler: the host's on arm64, else aarch64-linux-gnu-gcc)"""
 import os, platform, re, shutil, subprocess, sys, tempfile, textwrap
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXEC = [sys.executable, os.path.join(ROOT, "qarm_exec.py")]
 DEMO = os.path.join(ROOT, "examples", "qarm", "codebreaker_search.c")
+TINY = os.path.join(ROOT, "examples", "qarm", "tiny_search.c")
 
 
 def toolchain():
@@ -114,6 +119,32 @@ def main():
         assert p.returncode == 70 and "which this runtime does not provide" in p.stderr, p.stderr
         print("3) errors: a predicate that calls another function, a library function the runtime lacks: exit 70 "
               "with the reason")
+
+        try:
+            import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401
+        except ImportError as e:
+            print(f"4) skipped: {e.name} is not installed")
+        else:
+            import json
+            def config(**c):
+                path = os.path.join(d, "config.json")
+                json.dump(dict({"mode": "sampler"}, **c), open(path, "w"))
+                return path
+            exe4 = os.path.join(d, "tiny_search")
+            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), TINY, "-o", exe4])
+            done = []
+            for c in ({"backend": "preview", "shots": 400, "options": {"device": "fez"}},
+                      {"backend": "ibm", "shots": 400, "options": {"channel": "local", "device": "fake_torino"}}):
+                p = sh(EXEC + ["--config", config(**c), exe4], check=False)
+                assert p.returncode == 0 and p.stdout == "Q-ARM QSEARCH: x = 3\n", (p.returncode, p.stdout, p.stderr)
+                m = re.search(r"QSEARCH is_three, 2 bits on (.+?): (\d+) qubits, 2 circuits .* job (\S+), .*: x = 3, "
+                              r"measured (\d+) times of 800", p.stderr)
+                assert m and m.group(3) != "None", p.stderr
+                done.append(f"{m.group(1).replace('preview: ', '')} x = 3 ({int(m.group(4)) / 8:.0f}% of shots)")
+            p = sh(EXEC + ["--config", config(backend="preview", shots=100), exe], check=False)
+            assert p.returncode == 70 and re.search(r"needs \d+ qubits, fake_fez has 156: not run", p.stderr), p.stderr
+            print("4) QSEARCH on a QPU backend from a config file, one job: " + "; ".join(done)
+                  + "; Code Breaker's oracle refused as larger than the device")
     print("PASS")
 
 
