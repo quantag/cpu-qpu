@@ -762,6 +762,31 @@ Larger oracles are still too deep for today's noise: Grover on 3 and 4 bits with
 qoracle makes now. `x == 3` should be one controlled-Z; it is 12 Toffoli gates today, since qoracle
 follows the machine code's comparison literally. Smaller circuits for small functions are the next step.
 
+## Q-ARM v2: one binary, quantum instructions with a classical fallback
+
+An ordinary arm64 program can contain quantum instructions that a plain CPU skips. `include/qarm.h`
+gives C two of them: `qarm_available()` and `qarm_search(f, bits, &x)`, Grover's search for an `x` with
+`f(x) == 1`. On a plain CPU they take the classical path. Under the Q-ARM runtime `qarm_exec.py`, the same
+binary runs its ordinary instructions in a 64-bit ARM emulator and its quantum instructions on a quantum
+coprocessor (the exact simulator). The oracle is built from `f`'s machine code in the binary, and each
+answer is checked by running `f` itself.
+
+```
+$ clang -O1 -iquote include examples/qarm/codebreaker_search.c -o codebreaker_search
+$ ./codebreaker_search                       # on an arm64 Mac or Linux machine
+searching classically on this CPU
+the secret code: BYRG
+$ python3 qarm_exec.py codebreaker_search    # the same file
+searching with Grover's search on the quantum coprocessor (Q-ARM)
+[qarm: QSEARCH consistent, 8 bits: Grover's search with a 1066-qubit, 4349-gate oracle from consistent's machine code: x = 78 after 31 oracle calls in 15 rounds, checked by running consistent]
+the secret code: BYRG
+```
+
+Build the predicate with `-O1` and its helpers inlined (vector instructions and calls cannot become an
+oracle yet). Design, packet format, the runtime and its limits: [`docs/qarm_v2.md`](docs/qarm_v2.md).
+No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
+the classical path elsewhere, both computing the same function.
+
 ## Q-ARM: quantum gates inside an ARM binary
 
 Q-ARM embeds OpenQASM 2 unitary gates in an AArch64 binary as *CPU-skippable packets*: each packet starts
@@ -1105,6 +1130,7 @@ python3 -m tests.test_dll                        # QPU libraries: host program +
 python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
 python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
 python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
+python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
