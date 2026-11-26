@@ -15,3 +15,6 @@ examples/dll/main_cpu
 # articles are kept out of the repository
 paper/
 paper2/
+
+# your configuration, with your IBM Quantum API key (see config.example.json): never commit it
+config.json

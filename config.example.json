@@ -1,0 +1,10 @@
+{
+  "backend": "ibm",
+  "mode": "sampler",
+  "shots": 1024,
+  "options": {
+    "ibm_token": "your IBM Quantum API key",
+    "instance": "your instance (CRN or name)",
+    "device": "ibm_aachen"
+  }
+}

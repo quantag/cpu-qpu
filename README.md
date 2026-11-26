@@ -710,6 +710,58 @@ superposition, so the state is 256 amplitudes, updated exactly. To get the oracl
 simulator runs its 4,255 gates on each of the 256 basis inputs once, which a simulator cannot avoid; a
 quantum computer would apply them to all inputs at once, in each of the calls. Up to 24 bits.
 
+## On a real quantum computer: `qcpu_run.py`
+
+`qcpu_run.py` takes a phase oracle exported by `qcpucc --qcpu-export`, builds a quantum algorithm around
+it, and runs it on a simulator, on the noise model of a real IBM device, or on a real IBM quantum
+computer. Two algorithms are small enough for today's devices:
+
+| algorithm | C function | what it shows | on the noise model of IBM Fez |
+|---|---|---|---|
+| `bv`: Bernstein–Vazirani | `int hidden(int QCPU_BITS(8) x) { return __builtin_parity(x & 0xB5); }` | the hidden mask in **one** call of the function; a classical program needs 8 | 181 = 0xB5 in 89% of shots (random guess: 0.4%); 22 two-qubit gates |
+| `grover`: Grover's search | `int is_three(int QCPU_BITS(2) x) { return x == 3; }` | the marked input after one oracle call | 3 in 73% of shots (random: 25%); 155 two-qubit gates |
+
+```bash
+python3 qcpucc.py --qcpu-mode qoracle --qcpu-export oracle hidden.c -o hidden
+python3 qcpu_run.py bv oracle/hidden_phase.qasm --expect 0xB5 --backend preview     # noise model, no account
+python3 qcpu_run.py bv oracle/hidden_phase.qasm --expect 0xB5 --backend ibm         # a real IBM quantum computer
+```
+
+```
+bv with hidden (int hidden(int x)) on preview: noise model of fake_fez (156 qubits); no account used
+  circuit: 9 qubits, 1 oracle call(s), 22 two-qubit gates and depth 62 on the device; 1024 shots in 9.3 s
+  x =    181  (10110101)     915 shots   89.4%
+  the expected answer 181: 89.4% of shots (a random guess: 0.4%)
+```
+
+**Backends** (`backend` in `config.json`, or `--backend`): `simulator` (ideal), `aer`, `preview` (the
+noise model of an IBM device, `"options": {"device": "fez"}`; no account), `ibm` (a real device, with
+the options below). `--save run.json` keeps the result, with the job id.
+
+**Your IBM Quantum account.** The free Open Plan is enough: these circuits take seconds. Copy
+`config.example.json` to `config.json` and fill in your API key, instance and device. Git ignores
+`config.json`, so the key is never committed:
+
+```json
+{
+  "backend": "ibm",
+  "mode": "sampler",
+  "shots": 1024,
+  "options": {
+    "ibm_token": "your IBM Quantum API key",
+    "instance": "your instance (CRN or name)",
+    "device": "ibm_aachen"
+  }
+}
+```
+
+`"device": "least_busy"` takes whichever device is least busy. `"ibm_token": "env:IBM_QUANTUM_TOKEN"`
+reads the key from that environment variable instead.
+
+Larger oracles are still too deep for today's noise: Grover on 3 and 4 bits with the circuits
+qoracle makes now. `x == 3` should be one controlled-Z; it is 12 Toffoli gates today, since qoracle
+follows the machine code's comparison literally. Smaller circuits for small functions are the next step.
+
 ## Q-ARM: quantum gates inside an ARM binary
 
 Q-ARM embeds OpenQASM 2 unitary gates in an AArch64 binary as *CPU-skippable packets*: each packet starts
@@ -931,9 +983,16 @@ returns the same exit status as the program compiled natively.
 
 ## config.json
 
+Every tool reads `config.json` in this repository: your own file, which git ignores because it can
+hold your IBM Quantum API key. Copy `config.example.json` to start. Without `config.json` every setting
+has its default (shown here as one file):
+
 ```json
 {
   "backend": "simulator",
+  "mode": "sampler",
+  "shots": 1024,
+  "options": {},
   "register_width": "auto",
   "registers": "auto",
   "memory_words": "auto",
@@ -943,17 +1002,16 @@ returns the same exit status as the program compiled natively.
   "compiler": "auto",
   "cflags": ["-O1", "-fno-stack-protector"],
   "output_records": 32,
-  "stack_bytes": 256,
-  "shots": 1024,
-  "aer": {"method": "matrix_product_state"},
-  "ibm": {"channel": "ibm_quantum_platform", "token": "env:IBM_QUANTUM_TOKEN",
-          "instance": null, "backend": "least_busy", "optimization_level": 1}
+  "stack_bytes": 256
 }
 ```
 
 | key | meaning |
 |---|---|
-| `backend` | `simulator`: exact simulation of the circuit on its basis-state input (fast, any size). `aer`: Qiskit Aer, sampled with `shots`. `ibm`: IBM Quantum hardware through Qiskit Runtime (`token` may be `env:VAR`). |
+| `backend` | `simulator`: exact simulation of the circuit on its basis-state input (fast, any size). `aer`: Qiskit Aer, sampled with `shots`. `ibm`: IBM Quantum hardware through Qiskit Runtime. `preview` (`qcpu_run.py` only): the noise model of an IBM device. |
+| `mode` | the Qiskit Runtime primitive: `sampler` (measurement counts; the only one so far). |
+| `shots` | measurements per run (default 1024). |
+| `options` | settings of the chosen backend. `ibm`: `ibm_token` (or `env:VAR`), `instance`, `device` (a name or `least_busy`), `channel` (default `ibm_quantum_platform`), `optimization_level` (default 1). `aer`: `method` (default `matrix_product_state`). `preview`: `device` (`fez`, `torino`, ...). |
 | `arch` | architecture for `.c` input and raw binaries when `--arch` is not given: `arm64` (default), `riscv64`, `riscv32`, `x86_64`. Object files carry their own. |
 | `register_width` | W, bits per register (8 to 16). `auto` = smallest W that holds the code and data addresses. |
 | `registers` | `auto` = only registers the code uses; `all` = X0..X30; or a list. |
@@ -965,6 +1023,9 @@ returns the same exit status as the program compiled natively.
 | `cflags` | compiler flags for `.c` input, default `["-O1", "-fno-stack-protector"]`. |
 | `output_records` | how many printf/puts/putchar calls the output log keeps (default 32). |
 | `stack_bytes` | stack reserved at the top of data memory (default 256). |
+
+The older form, with `"ibm": {"token": ..., "backend": ...}` and `"aer": {"method": ...}` sections, is
+still read.
 
 Before submitting to hardware the runner checks the circuit's width against the device. A run
 that does not fit is reported as not submitted, with the reason.
@@ -1044,6 +1105,7 @@ python3 -m tests.test_dll                        # QPU libraries: host program +
 python3 -m pytest -q tests/test_qarm.py         # Q-ARM: OpenQASM packets in AArch64 binaries, skipped by a CPU
 python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 3 and CUDA-Q kernels; Grover
 python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
+python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
 python3 -m tests.test_fuzz 300 7 8,12,16 # random A64 programs at three register widths

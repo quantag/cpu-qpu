@@ -48,6 +48,8 @@ jobs:
       - name: Tools
         run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm
       - name: Python packages
-        run: python -m pip install unicorn lief capstone qiskit qiskit-qasm3-import cudaq "qoracle @ git+https://github.com/quantag/qoracle.git"
+        run: python -m pip install unicorn lief capstone qiskit qiskit-qasm3-import qiskit-aer qiskit-ibm-runtime cudaq "qoracle @ git+https://github.com/quantag/qoracle.git"
       - name: test_qcpu_export
         run: python -m tests.test_qcpu_export
+      - name: test_qcpu_run
+        run: python -m tests.test_qcpu_run
