@@ -1,0 +1,6 @@
+{
+  "ibm": {
+    "token": "PASTE-YOUR-IBM-QUANTUM-API-KEY-HERE",
+    "instance": null
+  }
+}

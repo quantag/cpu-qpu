@@ -42,18 +42,26 @@ DEFAULTS = {
     "aer": {"method": "matrix_product_state"},
     "ibm": {"channel": "ibm_quantum_platform", "token": "env:IBM_QUANTUM_TOKEN", "instance": None,
             "backend": "least_busy", "optimization_level": 1},
+    "preview": {"device": "fez"},     # qcpu_run.py --backend preview: an IBM device's noise model, no account
 }
 
 
 def load_config(path):
+    """DEFAULTS, then config.json (path), then config.local.json beside it: the local file is ignored by git and is
+    the place for secrets such as the IBM Quantum API key."""
     cfg = json.loads(json.dumps(DEFAULTS))
-    if path and os.path.exists(path):
-        user = json.load(open(path))
-        for k, v in user.items():
-            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                cfg[k].update(v)
-            else:
-                cfg[k] = v
+    local = os.path.join(os.path.dirname(os.path.abspath(path)), "config.local.json") if path else None
+    for f in (path, local):
+        if f and os.path.exists(f):
+            try:
+                user = json.load(open(f))
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"{f}: not valid JSON: {e}")
+            for k, v in user.items():
+                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                    cfg[k].update(v)
+                else:
+                    cfg[k] = v
     return cfg
 
 

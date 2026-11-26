@@ -15,3 +15,6 @@ examples/dll/main_cpu
 # articles are kept out of the repository
 paper/
 paper2/
+
+# local settings over config.json, such as your IBM Quantum API key: never commit it
+config.local.json
