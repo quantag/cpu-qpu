@@ -16,7 +16,12 @@ coprocessor here:
                          built by qoracle from f's machine code in this program; every measured answer is
                          checked by running f itself. W0 = 1 and W3 = x, or W0 = 2 if there is none.
 
-The coprocessor is the exact simulator of this runtime. A report of each quantum instruction goes to
+The coprocessor is the exact simulator of this runtime (synchronous: QSEARCH answers at once). With --qpu
+it is the backend of config.json (qcpu_run.py: simulator, aer, preview = a device's noise model, ibm = a
+real IBM quantum computer), --backend over its "backend". A QPU is asynchronous: jobs wait in a queue, so
+QSEARCH sends one job holding Grover's circuit for every iteration count 0..floor(pi/4 sqrt(2^bits)), waits
+for it (the job id is reported at once) and checks the measured answers by running f, most frequent first.
+Noise costs answers that fail the check, never a wrong W3. A report of each quantum instruction goes to
 stderr (-q: none)."""
 import argparse
 import math
@@ -177,10 +182,10 @@ def c_format(fmt, args, read_str):
 
 
 class Runtime:
-    def __init__(self, program, argv, quiet=False):
+    def __init__(self, program, argv, quiet=False, qpu=None):
         from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
         from unicorn import arm64_const as A
-        self.p, self.A, self.quiet = program, A, quiet
+        self.p, self.A, self.quiet, self.qpu = program, A, quiet, qpu
         self.mu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
         page = lambda v: v & ~0xFFF
         for addr, size, content, _ in program.segments:
@@ -328,6 +333,8 @@ class Runtime:
             self.set_x(0, 0)
             raise QarmError(f"QSEARCH {name}: bits = {bits}; 1 to 16")
         circuit = phase_oracle(self, fn, name, bits)
+        if self.qpu is not None:
+            return self.qsearch_qpu(fn, name, bits, circuit)
         x, calls, rounds = grover(circuit, bits, lambda v: self.call(fn, v) == 1)
         if x is None:
             self.set_x(0, 2)
@@ -339,6 +346,21 @@ class Runtime:
             self.note(f"QSEARCH {name}, {bits} bits: Grover's search with a {circuit['qubits']}-qubit, "
                       f"{circuit['gates']}-gate oracle from {name}'s machine code: x = {x} after {calls} oracle "
                       f"calls in {rounds} rounds, checked by running {name}")
+
+    def qsearch_qpu(self, fn, name, bits, circuit):
+        """QSEARCH on config.json's backend: one job, then the answers checked by running f."""
+        x, info = grover_qpu(circuit, bits, self.qpu, lambda v: self.call(fn, v) == 1, self.note)
+        head = (f"QSEARCH {name}, {bits} bits on {info['backend']}: {circuit['qubits']} qubits, "
+                f"{info['circuits']} circuits ({info['shots']} shots each, up to {info['two_qubit_gates']} two-qubit "
+                f"gates), job {info['job_id']}, {info['seconds']} s")
+        if x is None:
+            self.set_x(0, 2)
+            self.note(f"{head}: none of the {info['distinct']} measured answers passes {name}")
+        else:
+            self.set_x(0, 1)
+            self.set_x(3, x)
+            self.note(f"{head}: x = {x}, measured {info['hits']} times of {info['total']} "
+                      f"({info['rank']}. most frequent answer), checked by running {name}")
 
     def note(self, text):
         if not self.quiet:
@@ -524,14 +546,85 @@ def grover(circuit, bits, check, seed=None):
     return None, calls, rounds
 
 
+def qiskit_oracle(circuit):
+    """The phase oracle as a Qiskit circuit (its global phase is dropped: it does not change what is measured)."""
+    from qiskit import QuantumCircuit
+    qc = QuantumCircuit(circuit["n"], name="oracle")
+    for g in circuit["list"]:
+        if g[0] == "x":
+            qc.x(g[1])
+        elif g[0] == "cx":
+            qc.cx(g[1], g[2])
+        elif g[0] == "ccx":
+            qc.ccx(g[1], g[2], g[3])
+        elif g[0] == "z":
+            qc.z(g[1])
+    return qc
+
+
+def grover_qpu(circuit, bits, cfg, check, note=lambda t: None):
+    """Grover's search on a (possibly asynchronous) backend of qcpu_run: every iteration count 0..floor(pi/4 sqrt N)
+    in one job, since the number of solutions is unknown and a QPU queues each job. The measured answers are checked,
+    most frequent first. Returns (x or None, report)."""
+    import time
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import qcpu_run
+        from qiskit import transpile
+        from qiskit_ibm_runtime import SamplerV2
+    except ImportError as e:
+        raise QarmError(f"--qpu needs qiskit, qiskit-aer and qiskit-ibm-runtime ({e})")
+    xs = list(range(circuit["first"], circuit["first"] + bits))
+    oracle = qiskit_oracle(circuit)
+    top = max(1, int(math.pi / 4 * math.sqrt(1 << bits)))
+    qcs = [qcpu_run.build("grover", oracle, xs, j) for j in range(top + 1)]
+    try:
+        dev, where = qcpu_run.backend_for(cfg, circuit["n"])      # refuses a circuit larger than the device
+    except qcpu_run.Error as e:
+        raise QarmError(f"--qpu: {e}")
+    level = int(cfg["ibm"].get("optimization_level", 1))
+    ts = transpile(qcs, dev, optimization_level=level, seed_transpiler=1)
+    twoq = max(sum(v for k, v in t.count_ops().items() if k in ("cx", "cz", "ecr", "rzz")) for t in ts)
+    shots = int(cfg["shots"])
+    t0 = time.time()
+    job = SamplerV2(mode=dev).run(ts, shots=shots)             # submitted: on a QPU it now waits in the queue
+    job_id = job.job_id() if hasattr(job, "job_id") else None
+    if cfg["backend"] == "ibm":
+        note(f"QSEARCH: job {job_id} sent to {dev.name}, waiting for it (a QPU job queues; see the IBM Quantum dashboard)")
+    counts = {}
+    for t, r in zip(ts, job.result()):                          # blocks until the job is done
+        for k, v in r.data[t.cregs[0].name].get_counts().items():
+            counts[int(k, 2)] = counts.get(int(k, 2), 0) + v
+    info = {"backend": where.split(";")[0], "job_id": job_id, "circuits": len(ts), "shots": shots,
+            "two_qubit_gates": twoq, "seconds": round(time.time() - t0, 1), "distinct": len(counts),
+            "total": sum(counts.values())}
+    for rank, (x, n) in enumerate(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])), 1):
+        if check(x):
+            info.update(hits=n, rank=rank)
+            return x, info
+    return None, info
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("program")
     ap.add_argument("args", nargs="*")
     ap.add_argument("-q", "--quiet", action="store_true", help="no report of quantum instructions")
+    ap.add_argument("--qpu", action="store_true", help="QSEARCH on the backend of config.json instead of the exact "
+                    "simulator")
+    ap.add_argument("--config", help="the configuration (default: config.json in this repository); implies --qpu")
+    ap.add_argument("--backend", help="simulator, aer, preview or ibm, over config.json's; implies --qpu")
     a = ap.parse_args(argv)
     try:
-        rt = Runtime(Program(a.program), [a.program] + a.args, a.quiet)
+        qpu = None
+        if a.qpu or a.config or a.backend:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import qcpu_run
+            try:
+                qpu = qcpu_run.load_config(a.config, a.backend)
+            except qcpu_run.Error as e:
+                raise QarmError(f"--qpu: {e}")
+        rt = Runtime(Program(a.program), [a.program] + a.args, a.quiet, qpu)
         code = rt.run()
     except QarmError as e:
         sys.stdout.flush()

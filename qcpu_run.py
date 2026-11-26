@@ -108,6 +108,8 @@ def backend_for(cfg, min_qubits):
         if cls is None:
             raise Error(f"preview device '{name}' is not a known IBM device (for example fez, torino)")
         dev = cls()
+        if dev.num_qubits < min_qubits:
+            raise Error(f"the circuit needs {min_qubits} qubits, {dev.name} has {dev.num_qubits}: not run")
         return dev, f"preview: noise model of {dev.name} ({dev.num_qubits} qubits); no account used"
     from qiskit_ibm_runtime import QiskitRuntimeService
     ibm = cfg["ibm"]
@@ -137,9 +139,21 @@ def backend_for(cfg, min_qubits):
     return dev, f"ibm: {dev.name} ({dev.num_qubits} qubits)"
 
 
-def run(kind, qasm, cfg, iterations=None, expect=None, shots=None):
+def sample(qc, dev, cfg, shots):
+    """Transpile qc for dev and run it with the Sampler. Returns (counts, job id, two-qubit gates, depth, seconds)."""
     from qiskit import transpile
     from qiskit_ibm_runtime import SamplerV2
+    t = transpile(qc, dev, optimization_level=int(cfg["ibm"].get("optimization_level", 1)), seed_transpiler=1)
+    ops = t.count_ops()
+    twoq = sum(v for k, v in ops.items() if k in ("cx", "cz", "ecr", "rzz"))
+    t0 = time.time()
+    job = SamplerV2(mode=dev).run([t], shots=shots)
+    res = job.result()[0]
+    counts = res.data[t.cregs[0].name].get_counts()
+    return counts, (job.job_id() if hasattr(job, "job_id") else None), twoq, t.depth(), time.time() - t0
+
+
+def run(kind, qasm, cfg, iterations=None, expect=None, shots=None):
     oracle, xs, info = load_oracle(qasm)
     n, N = len(xs), 1 << len(xs)
     if kind == "bv":
@@ -148,20 +162,13 @@ def run(kind, qasm, cfg, iterations=None, expect=None, shots=None):
         iterations = max(1, int(math.pi / 4 * math.sqrt(N)))   # for one solution
     qc = build(kind, oracle, xs, iterations)
     dev, where = backend_for(cfg, oracle.num_qubits)
-    t = transpile(qc, dev, optimization_level=int(cfg["ibm"].get("optimization_level", 1)), seed_transpiler=1)
-    ops = t.count_ops()
-    twoq = sum(v for k, v in ops.items() if k in ("cx", "cz", "ecr", "rzz"))
     shots = int(shots or cfg["shots"])
-    t0 = time.time()
-    job = SamplerV2(mode=dev).run([t], shots=shots)
-    res = job.result()[0]
-    counts = res.data[t.cregs[0].name].get_counts()
-    elapsed = time.time() - t0
+    counts, job_id, twoq, depth, elapsed = sample(qc, dev, cfg, shots)
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])
     out = {"algorithm": kind, "oracle": os.path.abspath(qasm), "function": info["function"], "prototype": info["prototype"],
-           "backend": where, "job_id": job.job_id() if hasattr(job, "job_id") else None, "shots": shots,
+           "backend": where, "job_id": job_id, "shots": shots,
            "iterations": iterations, "argument_bits": n, "circuit_qubits": oracle.num_qubits,
-           "two_qubit_gates": twoq, "depth": t.depth(), "seconds": round(elapsed, 1),
+           "two_qubit_gates": twoq, "depth": depth, "seconds": round(elapsed, 1),
            "results": [{"x": int(b, 2), "bits": b, "count": c} for b, c in ranked[:8]]}
     if expect is not None:
         out["expected"] = expect
