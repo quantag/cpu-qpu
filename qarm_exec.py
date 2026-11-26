@@ -15,6 +15,9 @@ coprocessor here:
     QSEARCH              X1 = address of f, W2 = bits: Grover's search for an x with f(x) = 1. The oracle is
                          built by qoracle from f's machine code in this program; every measured answer is
                          checked by running f itself. W0 = 1 and W3 = x, or W0 = 2 if there is none.
+    QVLOAD QEXPECT       VQE (qarm_vqe.py): a Hamiltonian and an ansatz from two tables in the program; the
+    QEXPECTN QSESSION    energy <psi(theta)|H|psi(theta)> in D0 (QEXPECT) or for k parameter vectors (QEXPECTN)
+    QVFREE
 
 The coprocessor is the exact simulator of this runtime (synchronous: QSEARCH answers at once). With --qpu
 it is the backend of config.json (qcpu_run.py: simulator, aer, preview = a device's noise model, ibm = a
@@ -36,6 +39,8 @@ STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH = 0x10, 0x11
+OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x24, 0x26
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -138,10 +143,11 @@ class Program:
 
 # ------------------------------------------------------------------ the C library, served by the runtime
 def c_format(fmt, args, read_str):
-    """printf: %d %i %u %x %X %c %s %p %% with flags, width, precision, l/ll/z/h."""
+    """printf: %d %i %u %x %X %c %s %p %f %e %g %% with flags, width, precision, l/ll/z/h.
+    args(floating) returns the next variadic argument's 64 bits."""
     import re
-    out, ai, pos = [], 0, 0
-    for m in re.finditer(r"%([-+ #0]*)(\d+|\*)?(?:\.(\d+|\*))?(hh|h|ll|l|z|j|t)?([diouxXcsp%])", fmt):
+    out, pos = [], 0
+    for m in re.finditer(r"%([-+ #0]*)(\d+|\*)?(?:\.(\d+|\*))?(hh|h|ll|l|L|z|j|t)?([diouxXcspfFeEgGaA%])", fmt):
         out.append(fmt[pos:m.start()])
         pos = m.end()
         flags, width, prec, length, conv = m.groups()
@@ -149,17 +155,17 @@ def c_format(fmt, args, read_str):
             out.append("%")
             continue
 
-        def nxt():
-            nonlocal ai
-            v = args(ai)
-            ai += 1
-            return v
+        def nxt(floating=False):
+            return args(floating)
         if width == "*":
             width = str(nxt())
         if prec == "*":
             prec = str(nxt())
-        v = nxt()
-        if conv in "di":
+        v = nxt(conv in "fFeEgGaA")
+        if conv in "fFeEgGaA":
+            v = struct.unpack("<d", struct.pack("<Q", v & 0xFFFFFFFFFFFFFFFF))[0]
+            conv = {"a": "e", "A": "E"}.get(conv, conv)
+        elif conv in "di":
             v = v & 0xFFFFFFFFFFFFFFFF if length in ("l", "ll", "z", "j", "t") else v & 0xFFFFFFFF
             bits = 64 if length in ("l", "ll", "z", "j", "t") else 32
             v = v - (1 << bits) if v >> (bits - 1) else v
@@ -186,6 +192,7 @@ class Runtime:
         from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
         from unicorn import arm64_const as A
         self.p, self.A, self.quiet, self.qpu = program, A, quiet, qpu
+        self.vqe, self.session = {}, False
         self.mu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
         page = lambda v: v & ~0xFFF
         for addr, size, content, _ in program.segments:
@@ -252,7 +259,7 @@ class Runtime:
             w0, w1, w2 = struct.unpack_from("<III", code, off)
             if w0 == PACKET_BRANCH and w1 == PACKET_MAGIC:
                 version, op = w2 >> 24, (w2 >> 16) & 0xFF
-                if version == 2 and op in (OP_QAVAIL, OP_QSEARCH):
+                if version == 2 and op in OPS:
                     found.append(lo + off)
                 elif version == 1:
                     raise QarmError(f"Q-ARM v1 gate packet at {lo + off:#x}: run it with qarm.py")
@@ -276,14 +283,22 @@ class Runtime:
         return out.decode("utf-8", "replace")
 
     def vararg(self, first_reg):
-        """The i-th variadic argument: on macOS on the stack, on Linux in registers, then the stack."""
+        """The variadic arguments in turn: get(floating) -> 64 bits. On macOS all on the stack; on Linux integers in
+        X registers and doubles in D registers, then both on the stack."""
         sp = self.mu.reg_read(self.A.UC_ARM64_REG_SP)
+        state = {"x": first_reg, "d": 0, "stack": 0}
+        stack = lambda: struct.unpack("<Q", self.mu.mem_read(sp + 8 * state["stack"], 8))[0]
 
-        def get(i):
-            if self.p.kind == "macos":
-                return struct.unpack("<Q", self.mu.mem_read(sp + 8 * i, 8))[0]
-            r = first_reg + i
-            return self.x(r) if r < 8 else struct.unpack("<Q", self.mu.mem_read(sp + 8 * (r - 8), 8))[0]
+        def get(floating=False):
+            if self.p.kind != "macos":
+                kind, limit = ("d", 8) if floating else ("x", 8)
+                if state[kind] < limit:
+                    r = state[kind]
+                    state[kind] += 1
+                    return self.mu.reg_read(self.A.UC_ARM64_REG_D0 + r) if floating else self.x(r)
+            v = stack()
+            state["stack"] += 1
+            return v
         return get
 
     def ret(self, value=None):
@@ -310,6 +325,8 @@ class Runtime:
             self.set_x(0, 1)
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE):
+            self.vqe_op(op)
         mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
 
     def call(self, fn, arg):
@@ -361,6 +378,86 @@ class Runtime:
             self.set_x(3, x)
             self.note(f"{head}: x = {x}, measured {info['hits']} times of {info['total']} "
                       f"({info['rank']}. most frequent answer), checked by running {name}")
+
+    # VQE (qarm_vqe.py)
+    def set_d(self, n, v):
+        self.mu.reg_write(self.A.UC_ARM64_REG_D0 + n, struct.unpack("<Q", struct.pack("<d", v))[0])
+
+    def doubles(self, addr, n):
+        return list(struct.unpack(f"<{n}d", bytes(self.mu.mem_read(addr, 8 * n)))) if n else []
+
+    def vqe_op(self, op):
+        from unicorn import UcError
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import qarm_vqe
+        try:
+            if op == OP_QVLOAD:
+                read = lambda a, n: bytes(self.mu.mem_read(a, n))
+                problem = qarm_vqe.Problem(read, self.x(1), self.x(2))
+                if self.qpu is not None:
+                    measured = qarm_vqe.Measured(problem, self.qpu, self.note)
+                    where = (f"on {measured.where.split(';')[0]}: {len(measured.isa)} measurement bases"
+                             + (", readout correction" if measured.mitigate else "") + ", up to "
+                             f"{measured.two_qubit} two-qubit gates after transpiling")
+                else:
+                    if problem.n > qarm_vqe.MAX_EXACT_QUBITS:
+                        raise qarm_vqe.VqeError(f"{problem.n} qubits: the exact simulator takes up to "
+                                                f"{qarm_vqe.MAX_EXACT_QUBITS}")
+                    measured, where = None, "on the exact simulator"
+                handle = len(self.vqe) + 1
+                self.vqe[handle] = (problem, measured)
+                if measured is not None and self.session:
+                    self.note("QSESSION: " + measured.open_session())
+                self.set_x(0, 1)
+                self.set_x(3, handle)
+                self.note(f"QVLOAD: {problem.describe()}; {where}")
+            elif op == OP_QSESSION:
+                self.session = bool(self.x(1) & 0xFFFFFFFF)
+                done = []
+                for problem, measured in self.vqe.values():
+                    if measured is not None:
+                        done.append(measured.open_session() if self.session else (measured.close_session() or "closed"))
+                self.set_x(0, 1)
+                if self.qpu is not None and done:
+                    self.note("QSESSION: " + "; ".join(done))
+            elif op == OP_QVFREE:
+                entry = self.vqe.pop(self.x(3), None)
+                if entry and entry[1] is not None:
+                    entry[1].close_session()
+                self.set_x(0, 1)
+            else:
+                entry = self.vqe.get(self.x(3))
+                if entry is None:
+                    raise qarm_vqe.VqeError(f"no problem loaded with handle {self.x(3)}")
+                problem, measured = entry
+                k = 1 if op == OP_QEXPECT else self.x(2) & 0xFFFFFFFF
+                if not 1 <= k <= 4096:
+                    raise qarm_vqe.VqeError(f"QEXPECTN: k = {k}; 1 to 4096")
+                thetas = [self.doubles(self.x(1) + 8 * problem.params * i, problem.params) for i in range(k)]
+                shots = (self.x(2) & 0xFFFFFFFF) if op == OP_QEXPECT else 0
+                if measured is None:
+                    es, errs, how = problem.exact(thetas), [0.0] * k, "exact"
+                else:
+                    es, errs, job, sec = measured.energies(thetas, shots)
+                    how = f"job {job}, {sec} s"
+                name = "QEXPECT" if op == OP_QEXPECT else "QEXPECTN"
+                if op == OP_QEXPECT:
+                    self.set_d(0, es[0])
+                    self.set_d(1, errs[0])
+                    self.note(f"{name}: E = {es[0]:.6f}" + (f" +- {errs[0]:.6f}" if errs[0] else "") + f" Ha ({how})")
+                else:
+                    self.mu.mem_write(self.x(4), struct.pack(f"<{k}d", *es))
+                    m = min(range(k), key=lambda i: es[i])
+                    self.note(f"{name}: {k} energies ({how}); lowest {es[m]:.6f} Ha" +
+                              (f" +- {errs[m]:.6f}" if errs[m] else ""))
+                self.set_x(0, 1)
+        except qarm_vqe.VqeError as e:
+            self.set_x(0, 2)
+            self.note(f"VQE instruction refused: {e}")
+            if op != OP_QVLOAD:
+                raise QarmError(f"VQE: {e}")
+        except UcError as e:
+            raise QarmError(f"VQE: a table or an array is not readable or writable: {e}")
 
     def note(self, text):
         if not self.quiet:
