@@ -84,7 +84,9 @@ class Program:
         if b.has_function_starts:                            # offsets from the start of __TEXT
             starts |= {f + text.virtual_address if f < text.virtual_address else f for f in b.function_starts.functions}
         self.starts = sorted(starts)
-        self.text = (text.virtual_address, text.virtual_size)
+        code = b.get_section("__text")
+        self.text = (code.virtual_address, code.size)                  # the code: function ends, packets
+        self.code_segment = (text.virtual_address, text.virtual_size)  # __TEXT: also constant data
 
     def _elf(self, b, lief):
         if b.header.machine_type != lief.ELF.ARCH.AARCH64:
@@ -117,6 +119,7 @@ class Program:
         self.starts = sorted(self.functions)
         text = next(s for s in b.segments if s.type == lief.ELF.Segment.TYPE.LOAD and s.has(lief.ELF.Segment.FLAGS.X))
         self.text = (self.base + text.virtual_address, text.virtual_size)
+        self.code_segment = self.text
 
     def function_bytes(self, addr, mem):
         """The machine code of the function at addr: up to its size (ELF), or to the next function start."""
@@ -439,11 +442,12 @@ def phase_oracle(rt, fn, name, bits):
         from qoracle import frontend
     except ImportError:
         raise QarmError("QSEARCH needs qoracle: python3 -m pip install git+https://github.com/quantag/qoracle")
-    lo, size = rt.p.text
-    section = bytes(rt.mu.mem_read(lo & ~0xFFF, (lo + size - (lo & ~0xFFF) + 0xFFF) & ~0xFFF))
+    lo, size = rt.p.code_segment                         # the segment with the code, constants included
+    page = lo & ~0xFFF
+    section = bytes(rt.mu.mem_read(page, ((lo + size + 0xFFF) & ~0xFFF) - page))
     data = [(a & ~0xFFF, bytes(rt.mu.mem_read(a & ~0xFFF, ((a + s + 0xFFF) & ~0xFFF) - (a & ~0xFFF))), seg)
             for a, s, _, seg in rt.p.segments if not (a <= lo < a + s)]
-    image = frontend.Image(code=rt.p.function_bytes(fn, rt.mu), entry=fn, section=section, section_addr=lo & ~0xFFF,
+    image = frontend.Image(code=rt.p.function_bytes(fn, rt.mu), entry=fn, section=section, section_addr=page,
                            data=data)
     load = frontend.load
     frontend.load = lambda obj, function: image        # qoracle.build reads this image instead of an object file
