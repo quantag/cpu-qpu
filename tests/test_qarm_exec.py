@@ -54,7 +54,7 @@ def main():
         else:
             how = None
         p = sh(EXEC + [exe], env=dict(os.environ, QCPU_SEED="3"))
-        assert "searching with Grover's search on the quantum coprocessor (Q-ARM)" in p.stdout, p.stdout
+        assert "searching with Grover's search on the quantum coprocessor (Q-ARM)" in p.stdout, (p.stdout, p.stderr)
         assert "the secret code: BYRG" in p.stdout, p.stdout
         m = re.search(r"QSEARCH consistent, 8 bits: Grover's search with a (\d+)-qubit, (\d+)-gate oracle from "
                       r"consistent's machine code: x = 78 after (\d+) oracle calls", p.stderr)

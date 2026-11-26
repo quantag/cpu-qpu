@@ -344,7 +344,7 @@ class Runtime:
     def run(self):
         from unicorn import UcError
         try:
-            self.mu.emu_start(self.p.main, HALT + 0x1000)
+            self.mu.emu_start(self.p.main, HALT + 0xF00)       # never reached: main returns to HALT, which stops
         except UcError as e:
             pc = self.mu.reg_read(self.A.UC_ARM64_REG_PC)
             raise QarmError(f"the program stopped at {pc:#x}: {e}")
