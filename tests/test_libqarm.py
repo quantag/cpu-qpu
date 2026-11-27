@@ -7,6 +7,8 @@
   2. backend simulator: the sampled energies agree with the exact ones within 5 standard errors.
   3. The async API (qarm_expect_n_async, qarm_job_ready, qarm_job_wait) in the plain and the native build.
   4. Refused: inconsistent tables; "aer" (Python only) falls back to exact; ibm in a build without libcurl.
+  6. QSEARCH's engine (qarm_search.c) on hand-written oracles: x == 3 in 2 bits; x & 5 == 5 in 4 bits (four answers);
+     a predicate with no answer; an oracle that leaves a work qubit set (refused).
   5. (libcurl, qiskit, qiskit-aer) backend ibm against tests/ibm_mock.py, a local stand-in for IBM's REST API that
      checks every circuit is an ISA circuit for ibm_fez: the 3-qubit ansatz (a SWAP on the chain) within 5 standard
      errors; h2_vqe with Fez's calibrated errors, readout corrected, within 20 mHa; a session; the Open Plan's
@@ -17,7 +19,8 @@ from tests.test_qarm_vqe import ALL_OPS, EXACT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INC = os.path.join(ROOT, "include")
-LIB = [os.path.join(ROOT, "runtime", "libqarm", f) for f in ("qarm_rt.c", "qarm_sim.c", "qarm_json.c", "qarm_ibm.c")]
+LIB = [os.path.join(ROOT, "runtime", "libqarm", f) for f in ("qarm_rt.c", "qarm_sim.c", "qarm_json.c", "qarm_ibm.c",
+                                                                  "qarm_search.c")]
 H2 = os.path.join(ROOT, "examples", "qarm", "h2_vqe.c")
 EXE = ".exe" if os.name == "nt" else ""
 
@@ -46,6 +49,29 @@ int main(void) {
     printf("polls %d\n", polls);
     for (int i = 0; i < 3; i++) printf("%.9f %.6f\n", e[i], err[i]);
     qarm_vqe_free(&v);
+    return 0;
+}
+"""
+
+
+SEARCH = r"""
+#include <stdio.h>
+#include "qarm.h"
+static int run(const char *text) {
+    char err[300], report[600];
+    qarm_oracle *o = qarm_rt_oracle_parse(text, err, sizeof err);
+    if (!o) { printf("parse: %s\n", err); return -1; }
+    int x = -1, s = qarm_rt_search(o, &x, report, sizeof report);
+    printf("%d %d | %s\n", s, x, report);
+    qarm_rt_oracle_free(o);
+    return s;
+}
+int main(void) {
+    /* f(x) = x0 and x1: ccx onto a work qubit, z on it, uncompute */
+    run("qarm-oracle 1 is_three 3 0 2 3\nccx 0 1 2\nz 2\nccx 0 1 2\n");
+    run("qarm-oracle 1 bits_0_2 5 0 4 3\nccx 0 2 4\nz 4\nccx 0 2 4\n");
+    run("qarm-oracle 1 never 3 0 2 1\nx 2\n");
+    run("qarm-oracle 1 none 3 0 2 0\n");
     return 0;
 }
 """
@@ -138,6 +164,19 @@ def main():
         p = sh([nocurl], dict(env, QARM_BACKEND="ibm"), check=False)
         assert p.returncode == 2 and "built without libcurl" in p.stderr, p.stderr
         print("4) refused: an ansatz of the wrong size; aer falls back to exact; ibm without libcurl")
+
+        src = os.path.join(d, "search.c")
+        open(src, "w").write(SEARCH)
+        sexe = os.path.join(d, "search" + EXE)
+        build(cc, src, sexe, True, curl)
+        lines = sh([sexe], {"QARM_SEED": "1"}).stdout.splitlines()
+        assert lines[0].startswith("1 3 |"), lines
+        x = int(lines[1].split()[1])
+        assert lines[1].startswith("1 ") and x & 5 == 5, lines
+        assert lines[2].startswith("-1 ") and "leaves qubit 2 at 1" in lines[2], lines
+        assert lines[3].startswith("2 ") and "no x with f(x) = 1" in lines[3], lines
+        print(f"6) QSEARCH's engine: x == 3 found; x & 5 == 5 found ({x}); an oracle that leaves a work qubit set refused;"
+              " no answer reported")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

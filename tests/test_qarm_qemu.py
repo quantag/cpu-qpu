@@ -7,7 +7,9 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
      (no SVE) and -cpu max (SVE: the vector registers are z0, z1).
   2. examples/qarm/vqe_from_file.c, which reads its Hamiltonian with fopen and sorts with qsort: runs under QEMU;
      qarm_exec.py stops at fopen.
-  3. QAVAIL's features: tiny_search takes its classical path under the plugin (QSEARCH is not in it yet) and says so.
+  3. QSEARCH under the plugin, from the guest program's own machine code (tools/qarm_oracle.py, then Grover in
+     libqarm): tiny_search finds x = 3; Code Breaker finds the secret with its ~1100-qubit oracle; without the
+     helper, QAVAIL reports no QSEARCH and the program searches classically.
   4. The simulator backend (plugin option backend=simulator); without the plugin, the classical path.
   5. (libcurl, qiskit, qiskit-aer) the ibm backend against tests/ibm_mock.py: 3 qubits within 5 standard errors.
   6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
@@ -54,7 +56,8 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
+        for name, src in (("cb", os.path.join(EX, "codebreaker_search.c")),
+                          ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
             if src is None:
                 src = os.path.join(d, "all_ops.c")
@@ -83,9 +86,15 @@ def main():
               "stops at fopen")
 
         p = sh(qemu() + [exe["tiny"]])
-        assert p.stdout == "classical search: x = 3\n" and "QSEARCH: not in the QEMU backend yet" in p.stderr, p
-        assert sh(EXEC + ["-q", exe["tiny"]]).stdout == "Q-ARM QSEARCH: x = 3\n"
-        print("3) QAVAIL's features: tiny_search searches classically under the plugin, with QSEARCH under qarm_exec.py")
+        assert p.stdout == "Q-ARM QSEARCH: x = 3\n" and "the phase oracle of is_three from its machine code" in p.stderr, p
+        p = sh(qemu() + [exe["cb"]])
+        m = re.search(r"QSEARCH consistent, 8 bits: oracle of (\d+) qubits and (\d+) gates", p.stderr)
+        assert m and "the secret code: BYRG" in p.stdout, (p.stdout, p.stderr)
+        p = sh(qemu(",helper=/nonexistent/qarm_oracle.py") + [exe["tiny"]])
+        assert p.stdout == "classical search: x = 3\n", p
+        print(f"3) QSEARCH under the plugin from the guest's own machine code: tiny_search x = 3; Code Breaker BYRG "
+              f"with a {m.group(1)}-qubit, {m.group(2)}-gate oracle of consistent(); without the helper, the classical "
+              "path")
 
         p = subprocess.run(qemu(",quiet=on,backend=simulator") + [exe["all"]], capture_output=True, text=True,
                            env=dict(os.environ, QARM_SEED="3"))

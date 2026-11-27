@@ -11,10 +11,19 @@
  * tables from guest memory, calls libqarm and writes the results back. Then the branch skips the packet, as it
  * does on a plain CPU. Needs QEMU 10.1 or newer (plugin API with qemu_plugin_write_register).
  *
- *   QAVAIL    W0 = 1, W1 = QARM_F_VQE
+ *   QAVAIL    W0 = 1, W1 = QARM_F_VQE | QARM_F_SEARCH (the latter when the oracle helper is there)
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
- *   QSEARCH   not executed (W0 stays 0): qarm.h takes the classical path; its oracle needs qoracle, which is Python */
+ *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
+ *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
+ *             libqarm (qarm_search.c): W0 = 1 and W3 = x, or W0 = 2 for none. If no oracle can be built, W0 stays 0
+ *             and the program takes its classical path. qarm.h checks every answer by calling f itself. */
+#include <errno.h>
+#include <fcntl.h>
+#include <glib/gstdio.h>
 #include <glib.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <qemu-plugin.h>
 #include <stdint.h>
@@ -36,6 +45,13 @@ enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21,
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
 static GMutex lock;
 static int quiet, told_search;
+static char *helper, *python;
+static int have_search;
+static GHashTable *oracles;            /* function address -> qarm_oracle *, or a failure marker */
+#define ORACLE_FAILED ((qarm_oracle *)1)
+#ifndef QARM_TOOLS_DIR
+#define QARM_TOOLS_DIR "tools"
+#endif
 
 typedef struct {                       /* a problem loaded by QVLOAD: host copies of the guest's tables */
     qarm_hamiltonian h;
@@ -177,6 +193,87 @@ static int qgrad(void)
     return status;
 }
 
+/* runs argv; its stdout and stderr in *out, *err. posix_spawn, not fork: fork's atfork handlers take QEMU's RCU lock,
+ * which waits for this vCPU thread, so a fork from a vCPU callback deadlocks */
+static int run(char *const argv[], gchar **out, gchar **err)
+{
+    extern char **environ;
+    gchar *po = NULL, *pe = NULL;
+    int fo = g_file_open_tmp("qarm-oracle-XXXXXX", &po, NULL), fe = g_file_open_tmp("qarm-oracle-XXXXXX", &pe, NULL);
+    int status = -1;
+    pid_t pid;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    if (fo >= 0 && fe >= 0) {
+        posix_spawn_file_actions_adddup2(&fa, fo, 1);
+        posix_spawn_file_actions_adddup2(&fa, fe, 2);
+        if (posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ) == 0) {
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    if (fo >= 0) close(fo);
+    if (fe >= 0) close(fe);
+    if (po) { g_file_get_contents(po, out, NULL, NULL); g_unlink(po); g_free(po); }
+    if (pe) { g_file_get_contents(pe, err, NULL, NULL); g_unlink(pe); g_free(pe); }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static qarm_oracle *oracle_for(uint64_t fn, unsigned bits)
+{
+    qarm_oracle *o = g_hash_table_lookup(oracles, (gpointer)(uintptr_t)fn);
+    if (o) return o == ORACLE_FAILED ? NULL : o;
+    o = ORACLE_FAILED;
+    const char *path = qemu_plugin_path_to_binary();
+    unsigned char code[32];
+    if (have_search && path && rd(fn, code, sizeof code)) {
+        char func[32], nb[16], hex[2 * sizeof code + 1];
+        snprintf(func, sizeof func, "%#llx", (unsigned long long)fn);
+        snprintf(nb, sizeof nb, "%u", bits);
+        for (size_t i = 0; i < sizeof code; i++) snprintf(hex + 2 * i, 3, "%02x", code[i]);
+        char *argv[] = {python, helper, "--elf", (char *)path, "--function", func, "--code", hex, "--bits", nb, NULL};
+        gchar *out = NULL, *err = NULL;
+        gint64 t0 = g_get_monotonic_time();
+        int status = run(argv, &out, &err);
+        if (status < 0) {
+            note("QSEARCH: cannot run %s %s", python, helper);
+        } else if (status != 0) {
+            note("QSEARCH: no oracle for the function at %s: %s", func, err && *err ? g_strstrip(err) : "the helper failed");
+        } else {
+            char perr[300];
+            qarm_oracle *p = qarm_rt_oracle_parse(out, perr, sizeof perr);
+            if (p) {
+                o = p;
+                note("QSEARCH: the phase oracle of %s from its machine code: %d qubits, %d gates (%.1f s)",
+                     qarm_rt_oracle_name(p), qarm_rt_oracle_qubits(p), qarm_rt_oracle_gates(p), (g_get_monotonic_time() - t0) / 1e6);
+            } else
+                note("QSEARCH: the helper's oracle: %s", perr);
+        }
+        g_free(out);
+        g_free(err);
+    }
+    g_free((gpointer)path);
+    g_hash_table_insert(oracles, (gpointer)(uintptr_t)fn, o);
+    return o == ORACLE_FAILED ? NULL : o;
+}
+
+static void qsearch(void)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits) : NULL;
+    if (!o) {
+        if (!told_search++) note("QSEARCH: the program takes its classical path");
+        return;                                        /* W0 stays 0 */
+    }
+    int found = 0;
+    char report[600];
+    int s = qarm_rt_search(o, &found, report, sizeof report);
+    note("%s", report);
+    if (s == 1) { set_x(0, 1); set_x(3, (uint64_t)(uint32_t)found); }
+    else if (s == 2) set_x(0, 2);
+}
+
 static void packet(unsigned int vcpu, void *udata)
 {
     (void)vcpu;
@@ -189,10 +286,10 @@ static void packet(unsigned int vcpu, void *udata)
     switch (op) {
     case OP_QAVAIL:
         set_x(0, 1);
-        set_x(1, QARM_F_VQE);
+        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH : 0));
         break;
     case OP_QSEARCH:
-        if (!told_search++) note("QSEARCH: not in the QEMU backend yet; the program takes its classical path");
+        qsearch();
         break;
     case OP_QVLOAD:
         set_x(0, qvload(x(1), x(2)));
@@ -275,11 +372,21 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
         const char *v = eq + 1;
         if (!strcmp(argv[i], "config")) g_setenv("QARM_CONFIG", v, TRUE);
         else if (!strcmp(argv[i], "backend")) g_setenv("QARM_BACKEND", v, TRUE);
+        else if (!strcmp(argv[i], "helper")) helper = g_strdup(v);
+        else if (!strcmp(argv[i], "python")) python = g_strdup(v);
         else if (!strcmp(argv[i], "quiet")) {
             quiet = !strcmp(v, "on") || !strcmp(v, "true") || !strcmp(v, "1");
             if (quiet) g_setenv("QARM_QUIET", "1", TRUE);
-        } else { fprintf(stderr, "qarm-qemu: unknown option %s (config, backend, quiet)\n", argv[i]); return -1; }
+        } else {
+            fprintf(stderr, "qarm-qemu: unknown option %s (config, backend, quiet, helper, python)\n", argv[i]);
+            return -1;
+        }
     }
+    if (!helper) helper = g_strdup(g_getenv("QARM_ORACLE_HELPER") ? g_getenv("QARM_ORACLE_HELPER")
+                                                                    : QARM_TOOLS_DIR "/qarm_oracle.py");
+    if (!python) python = g_strdup("python3");
+    have_search = g_file_test(helper, G_FILE_TEST_EXISTS);
+    oracles = g_hash_table_new(g_direct_hash, g_direct_equal);
     problems = g_ptr_array_new_with_free_func(problem_free);
     qemu_plugin_register_vcpu_init_cb(id, vcpu_init);
     qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans);

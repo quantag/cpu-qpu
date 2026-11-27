@@ -875,8 +875,10 @@ $ qemu-aarch64 -plugin build/qemu/libqarm-qemu.so,config=config.json ./h2_vqe   
 ```
 
 Unlike `qarm_exec.py`, it runs programs that use the real C library: files, `malloc`, `qsort`
-(`examples/qarm/vqe_from_file.c`). It is also about 12x faster on `h2_vqe`. `QSEARCH` takes its classical
-path there for now ([`docs/qarm_v2.md`](docs/qarm_v2.md#8-q-arm-under-qemu)).
+(`examples/qarm/vqe_from_file.c`). It is also about 12x faster on `h2_vqe`. `QSEARCH` works there too:
+the plugin builds the oracle from the guest program's own machine code, so Code Breaker's compiled
+`consistent()` becomes a 1120-qubit oracle and Grover finds the code
+([`docs/qarm_v2.md`](docs/qarm_v2.md#8-q-arm-under-qemu)).
 No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
 the classical path elsewhere, both computing the same function.
 
