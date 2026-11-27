@@ -355,11 +355,12 @@ static void finish_local(qarm_job *j)
             }
             for (long b = 0; b < N; b++) p[b] = sv->lr[b] * sv->lr[b] + sv->li[b] * sv->li[b];
             for (long b = 0; b < N; b++) q[b] = 0;
-            for (int s = 0; s < j->shots; s++) {
-                double u = uniform(), acc = 0;
-                long b = 0;
-                for (; b < N - 1; b++) { acc += p[b]; if (u < acc) break; }
-                q[b] += 1.0 / j->shots;
+            for (long b = 1; b < N; b++) p[b] += p[b - 1];          /* the cumulative distribution */
+            for (int s = 0; s < j->shots; s++) {                      /* each shot by binary search */
+                double u = uniform() * p[N - 1];
+                long lo = 0, hi = N - 1;
+                while (lo < hi) { long mid = (lo + hi) / 2; if (u < p[mid]) hi = mid; else lo = mid + 1; }
+                q[lo] += 1.0 / j->shots;
             }
             double m, v;
             moments(r, &r->groups[g], q, &m, &v);
