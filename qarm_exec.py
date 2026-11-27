@@ -88,6 +88,8 @@ class Program:
             if s.name == "__PAGEZERO" or not s.virtual_size:
                 continue
             self.segments.append((s.virtual_address, s.virtual_size, bytes(s.content), s.name))
+            if s.name != "__TEXT" and s.init_protection & 4:     # an executable segment added by a tool
+                self.code_ranges.append((s.virtual_address, len(s.content)))
         text = b.get_segment("__TEXT")
         self.main = text.virtual_address + b.main_command.entrypoint
         for bnd in b.bindings:                               # imported functions and data (GOT entries)

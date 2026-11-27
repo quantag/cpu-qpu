@@ -9,9 +9,10 @@
      loops, with the same output.
   2. The trampoline disassembles (capstone) as described in the tool: B at the function, the packet, the check, the
      moved instruction, the branch back.
-  3. Refused: an unknown symbol; a function whose first instruction is PC-relative (ADRP); a Mach-O file.
-Run: python3 -m tests.test_qarm_patch   (needs an arm64 C compiler that makes ELF: aarch64-linux-gnu-gcc, or cc on
-Linux arm64)"""
+  3. Refused: an unknown symbol; a function whose first instruction is PC-relative (ADRP); a file that is neither.
+On macOS the binary is Mach-O: the tool adds a __QARM segment and signs the output ad hoc, and the patched binary
+runs natively (the original loops) and under qarm_exec.py (QSEARCH, QMIN).
+Run: python3 -m tests.test_qarm_patch   (needs an arm64 C compiler: aarch64-linux-gnu-gcc, or cc on arm64)"""
 import os, re, struct, subprocess, sys, tempfile
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
 
@@ -39,11 +40,9 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         exe, out = os.path.join(d, "legacy"), os.path.join(d, "legacy.qarm")
         sh(cc + ["-O1", LEGACY, "-o", exe])
-        if open(exe, "rb").read(4) != b"\x7fELF":
-            print("skipped: the arm64 compiler makes Mach-O; qarm_patch.py patches ELF")
-            return
+        macos = open(exe, "rb").read(4) != b"\x7fELF"
         p = sh(PATCH + [exe, "--search", "find_key=valid_key:12", "--min", "cheapest_route=route_cost:12", "-o", out])
-        assert p.stderr.count("moved to the trampoline") == 2, p.stderr
+        assert p.stderr.count("moved to the trampoline") == 2 and (not macos or "signed ad hoc" in p.stderr), p.stderr
         want = "key: 90 (valid)\ncheapest route: 1381 (cost 0)\n"
         q = sh(EXEC + [out])
         assert q.stdout == want, q.stdout
@@ -60,8 +59,9 @@ def main():
 
         import lief, capstone
         b = lief.parse(out)
+        b = b.at(0) if hasattr(b, "at") else b
         md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
-        find = next(s.value for s in b.symbols if s.name == "find_key")
+        find = next(s.value for s in b.symbols if s.name in ("find_key", "_find_key") and s.value)
         first = next(md.disasm(bytes(b.get_content_from_virtual_address(find, 4)), find))
         assert first.mnemonic == "b", first
         tramp = int(first.op_str.lstrip("#"), 16)
@@ -82,11 +82,11 @@ def main():
         sh(cc + ["-O1", src, "-o", aexe])
         p = sh(PATCH + [aexe, "--search", "lookup=pred:4", "-o", out], check=False)
         assert p.returncode == 2 and "PC-relative (adrp" in p.stderr, p.stderr
-        macho = os.path.join(d, "fake")
-        open(macho, "wb").write(b"\xcf\xfa\xed\xfe" + bytes(60))
-        p = sh(PATCH + [macho, "--search", "a=b:4", "-o", out], check=False)
-        assert p.returncode == 2 and "not an ELF file" in p.stderr, p.stderr
-        print("3) refused: an unknown symbol, a function that starts with ADRP, a file that is not ELF")
+        junk = os.path.join(d, "junk")
+        open(junk, "wb").write(b"#!/bin/sh\n" + bytes(60))
+        p = sh(PATCH + [junk, "--search", "a=b:4", "-o", out], check=False)
+        assert p.returncode == 2 and "neither ELF nor Mach-O" in p.stderr, p.stderr
+        print("3) refused: an unknown symbol, a function that starts with ADRP, a file that is neither ELF nor Mach-O")
     print("PASS")
 
 
