@@ -2,7 +2,7 @@
 
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
-extension, and no claim of a speedup today (section 9).
+extension, and no claim of a speedup today (section 10).
 
 ## 1. The idea
 
@@ -252,7 +252,92 @@ re-running something, the way `QSEARCH` checks its answer. The checks are instea
 
 The exact value is available on the plain-CPU path of the same binary, for molecules small enough.
 
-## 7. What is checked
+## 7. The native runtime: libqarm
+
+`qarm_exec.py` emulates the ARM CPU, so a program under it runs at the speed of Unicorn plus Python.
+**libqarm** (`runtime/libqarm`, C) is the other way to run the same source. The program runs natively,
+at full speed, on any CPU: Apple Silicon, x86-64, ARM Linux. Its VQE calls go to a C runtime that talks
+to the QPU itself, with no Python at run time.
+
+```
+$ cc -O2 -DQARM_RUNTIME -iquote include examples/qarm/h2_vqe.c runtime/libqarm/*.c -o h2_vqe -lcurl -lm
+$ ./h2_vqe                                              # exact, native
+$ QARM_CONFIG=config.json ./h2_vqe                      # config.json's backend: a real IBM device
+$ QARM_CONFIG=config.json QARM_BACKEND=simulator ./h2_vqe
+```
+
+With CMake: `cmake -S runtime/libqarm -B build/libqarm && cmake --build build/libqarm`, then link
+`qarm` (it defines `QARM_RUNTIME`). Without libcurl, add `-DQARM_NO_CURL`; the `ibm` backend is then
+absent. That is the default on Windows, where libcurl is not part of the system.
+
+**Three builds of one source** (`include/qarm.h`):
+
+| build | VQE calls | where |
+|---|---|---|
+| plain, any compiler | the classical path: an exact state vector in the header | any CPU |
+| arm64, GCC or clang | Q-ARM packets: classical on a CPU, quantum under `qarm_exec.py` | ARM, or emulated |
+| `-DQARM_RUNTIME` + libqarm | libqarm: exact, simulator or ibm | any CPU, native |
+
+**Backends.** libqarm reads a config file only when `QARM_CONFIG` names one, in `config.json`'s format,
+so no run spends QPU time unless asked. `QARM_BACKEND` overrides the file's `"backend"`.
+- `exact`, the default: a state vector, synchronous, standard error 0.
+- `simulator`: the same state vector, with shots sampled in each measurement basis. `QARM_SEED` makes
+  a run repeatable.
+- `ibm`: IBM Quantum's REST API, over libcurl.
+- `aer` and `preview` are Qiskit and need Python: use `qarm_exec.py`.
+
+**The `ibm` backend, step by step:**
+1. **Sign in.** Exchange `ibm_token` (or `env:VAR`) for a bearer token at IBM Cloud IAM, and find the
+   CRN of `instance` by name with IBM Cloud Global Search; a CRN can also be given directly. The CRN's
+   region picks the API: `eu-de.quantum.cloud.ibm.com` for European devices such as Aachen.
+2. **Read the device.** Its configuration and properties. Only the CZ gate set is supported: Heron
+   devices such as Fez, Torino, Aachen, Marrakesh and Kingston.
+3. **Transpile in C.** IBM's service runs only ISA circuits: the device's own gates, on connected
+   qubits. libqarm therefore:
+   - chooses a chain of n connected qubits with the lowest readout and CZ errors;
+   - moves qubits along the chain with SWAPs when a two-qubit gate's qubits are not neighbours;
+   - writes CX as H CZ H;
+   - fuses the one-qubit gates between two CZs into `rz sx rz sx rz`.
+4. **Send one job per batch.** Each `QEXPECTN` batch is one Sampler job: OpenQASM 3 on physical qubits
+   (`cz $12, $13;`), with every parameter vector and measurement basis, plus the two readout calibration
+   circuits.
+5. **Wait asynchronously.** The job's state is polled (`poll_seconds`, default 5). The samples are read
+   from `data.c.samples` and readout corrected as in section 6.
+6. **Sessions.** `qarm_session(1)` opens an IBM session. The Open Plan refuses sessions; then each job
+   queues on its own, and the report says so.
+
+**Async in C.** `qarm.h` now has an asynchronous form of `QEXPECTN` in all three builds:
+
+```c
+qarm_job *j = qarm_expect_n_async(&v, thetas, k);   // sent; on a QPU it is now in the queue
+while (qarm_job_ready(j) == 0)
+    do_other_work();                                 // the CPU keeps working
+qarm_job_wait(j, energies, errors);                  // the results; frees the job
+```
+
+With libqarm on `ibm`, `qarm_job_ready` polls IBM once and never waits. In the other builds the batch is
+computed when it is sent, so the job is ready at once. This is the asynchronous instruction set of
+section 5 (`QSUBMIT` / `QPOLL` / `QWAIT`), as a C API.
+
+**What is not native yet.** `qarm_search` is classical in a libqarm build. Its oracle is built from the
+function's machine code by qoracle, which is Python. A native `QSEARCH` needs that oracle compiled at
+build time into a file next to the binary.
+
+**Tested without an account.** `tests/ibm_mock.py` is a local stand-in for IBM's REST API. It has the
+same paths, headers and JSON; the real configuration and properties of `ibm_fez` (from
+qiskit-ibm-runtime's files); jobs that are Queued, then Running, then Completed. It rejects any circuit
+that is not ISA for the device, and runs the rest on Aer, ideal or with Fez's calibrated gate and readout
+errors. It is no proof that IBM's service accepts the same requests: that takes a run on a real device.
+
+| `tests/test_libqarm.py` | result |
+|---|---|
+| native exact vs the plain build | the same output; every operation on 3 qubits to 1e-9 |
+| simulator, 20000 shots | within 2 standard errors of exact |
+| `ibm` via the mock, ideal, 3 qubits | ISA circuits with a SWAP (12 CZ), within 1 standard error |
+| `ibm` via the mock, Fez's errors, H₂ | −1.1330 Ha (+4.3 mHa), 5 jobs in a session |
+| the async program on the mock | polls the job while it is queued and running |
+
+## 8. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:
 
@@ -273,18 +358,23 @@ The exact value is available on the plain-CPU path of the same binary, for molec
 - with Qiskit: `h2_vqe` on the noise model of Fez within 0.1 Ha, and through the local channel of the
   `ibm` backend (a session, 5 jobs).
 
-## 8. Next
+`tests/test_libqarm.py`, with the host's own compiler (Linux, macOS, Windows without libcurl): the cases
+in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcurl.
+
+## 9. Next
 
 - More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
   `QPERIOD` (period finding).
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
+- libqarm: `QSEARCH` from a build-time oracle file; a first run on a real IBM device, recorded here;
+  devices with the ECR gate set.
 - VQE: `QGRAD` and `QVSAMPLE`; IBM's error mitigation; a build-time tool that writes the tables of
   a molecule as a C header (PySCF, Jordan–Wigner or parity mapping).
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.
 
-## 9. What this is and is not
+## 10. What this is and is not
 
 It does not make programs faster today: the classical part runs as fast as before, but a quantum
 instruction is simulated, and on hardware Grover's search pays off only for large searches. What it

@@ -34,6 +34,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | One arm64 binary with quantum instructions and a classical fallback | `include/qarm.h`, `qarm_exec.py` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QSESSION` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
+| The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 
 ## Quick start
 
@@ -827,6 +828,24 @@ $ python3 qarm_exec.py --qpu h2_vqe                # config.json's device: 5 job
 H₂ at 0.735 Å takes 2 qubits and one CNOT. The exact result is −1.137306 Ha; the noise models of Fez and
 Torino give it to within about 10–35 mHa. Each batch of parameter vectors is one job, so an async QPU
 queues once per optimizer round ([`docs/qarm_v2.md`](docs/qarm_v2.md#6-vqe)).
+
+### Native: libqarm, the Q-ARM runtime in C
+
+The same source also builds natively, on any CPU, with no emulator and no Python at run time. libqarm
+(`runtime/libqarm`) computes the energies exactly, samples them, or runs them on a real IBM device over
+IBM's REST API. To do that it transpiles the circuits in C to the device's gates and connected qubits,
+sends one asynchronous job per batch, and corrects the readout:
+
+```
+$ cc -O2 -DQARM_RUNTIME -iquote include examples/qarm/h2_vqe.c runtime/libqarm/*.c -o h2_vqe -lcurl -lm
+$ ./h2_vqe                                  # exact
+$ QARM_CONFIG=config.json ./h2_vqe          # config.json's IBM device
+```
+
+`qarm.h` also gains an asynchronous form, `qarm_expect_n_async`, `qarm_job_ready` and `qarm_job_wait`,
+so the CPU keeps working while a job is queued. The `ibm` backend is tested against a local mock of
+IBM's API that rejects any non-ISA circuit; it has not run on a real device yet
+([`docs/qarm_v2.md`](docs/qarm_v2.md#7-the-native-runtime-libqarm)).
 No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
 the classical path elsewhere, both computing the same function.
 
@@ -1175,6 +1194,7 @@ python3 -m tests.test_qcpu_export                # qoracle circuits as OpenQASM 
 python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's search from C
 python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py (and on QPU backends)
 python3 -m tests.test_qarm_vqe                   # Q-ARM v2 VQE: H2 on a CPU, the runtime, Aer, IBM noise models
+python3 -m tests.test_libqarm                    # libqarm, native: exact, simulator, ibm against a mock of IBM's API
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
