@@ -10,6 +10,7 @@
   2. The trampoline disassembles (capstone) as described in the tool: B at the function, the packet, the check, the
      moved instruction, the branch back.
   3. Refused: an unknown symbol; a function whose first instruction is PC-relative (ADRP); a file that is neither.
+  4. --scan finds both loops (the options it prints are those of 1); --auto patches them, with the same result.
 On macOS the binary is Mach-O: the tool adds a __QARM segment and signs the output ad hoc, and the patched binary
 runs natively (the original loops) and under qarm_exec.py (QSEARCH, QMIN).
 Run: python3 -m tests.test_qarm_patch   (needs an arm64 C compiler: aarch64-linux-gnu-gcc, or cc on arm64)"""
@@ -71,7 +72,8 @@ def main():
         assert words[k - 1] == 0x14000008 and words[k + 1] == 0x02110000, words[k - 1:k + 2]
         tail = [f"{i.mnemonic} {i.op_str}".strip() for i in md.disasm(code[4 * (k + 7):], tramp + 4 * (k + 7))][:22]
         assert tail[0] == "cmp x0, #1" and tail[1].startswith("b.ne") and any(t.startswith("bl #") for t in tail) and "ret" in tail, tail
-        assert "stp x29, x30, [sp, #-0x20]!" in tail and tail[tail.index("stp x29, x30, [sp, #-0x20]!") + 1].startswith("b #"), tail
+        back = [i for i, t in enumerate(tail) if t == "ldp x29, x30, [sp], #0x50"][1]   # the fallback's frame pop
+        assert tail[back + 1].startswith("stp ") and tail[back + 2].startswith("b #"), tail   # the moved STP, B back
         print("2) the trampoline: B at find_key; the QSEARCH packet; W0 = 1 then the check by calling valid_key; the "
               "fallback restores the arguments, runs the moved STP and branches back")
 
@@ -87,6 +89,13 @@ def main():
         p = sh(PATCH + [junk, "--search", "a=b:4", "-o", out], check=False)
         assert p.returncode == 2 and "neither ELF nor Mach-O" in p.stderr, p.stderr
         print("3) refused: an unknown symbol, a function that starts with ADRP, a file that is neither ELF nor Mach-O")
+        p = sh(PATCH + [exe, "--scan"])
+        assert "--search find_key=valid_key:12" in p.stdout and "--min cheapest_route=route_cost:12" in p.stdout, p.stdout
+        assert len(p.stdout.splitlines()) == 2, p.stdout
+        sh(PATCH + [exe, "--auto", "-o", out])
+        assert sh(EXEC + ["-q", out]).stdout == want
+        print("4) --scan: find_key (QSEARCH on valid_key, 12 bits) and cheapest_route (QMIN on route_cost) found in the "
+              "machine code; --auto patches both: the same output")
     print("PASS")
 
 

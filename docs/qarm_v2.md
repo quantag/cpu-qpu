@@ -735,6 +735,22 @@ The patch is careful about the prologue:
 - Every branch is direct, so BTI-guarded pages need no new landing pads.
 - A PC-relative first instruction is refused.
 
+`--scan` looks for such loops in the machine code and prints the options to patch them. It looks for a
+counter from 0 to 2^BITS that is passed to a leaf function, whose result either leaves the loop (a search)
+or is compared with the best so far (a minimum). `--auto` patches what it finds:
+
+```
+$ python3 tools/qarm_patch.py legacy_search --scan
+cheapest_route: QMIN on route_cost, 12 bits (a counter to 4096 passed to route_cost, its result compared with the best so far): --min cheapest_route=route_cost:12
+find_key: QSEARCH on valid_key, 12 bits (a counter to 4096 passed to valid_key, the loop left when it returns nonzero (cbnz)): --search find_key=valid_key:12
+```
+
+The scan is a heuristic. What the function promises is still for the user to confirm: for example, that
+it may return any key that matches, not only the first one.
+
+On macOS the tool patches Mach-O. It adds a `__QARM` segment and re-signs the output ad hoc
+(`codesign -s -`).
+
 `qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
 
 ## 9. What is checked

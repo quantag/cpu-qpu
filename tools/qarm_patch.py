@@ -11,6 +11,10 @@
                           restores the arguments and runs FUNC's own code.
 --min FUNC=COST:BITS      FUNC returns an x in 0 .. 2^BITS - 1 with the least COST(x) (signed int): QMIN, checked by
                           calling COST, then x is returned.
+--scan                    list the functions that look like such loops (a counter from 0 to 2^BITS passed to a leaf
+                          function, its result tested, or compared with the best so far), with the options to patch
+                          them. --auto patches every one found (-o needed). The scan is a heuristic over the machine
+                          code; what the function promises is still the user's to confirm.
 
 FUNC and PRED are symbol names (the binary must not be stripped of them) or addresses (0x...). FUNC's contract is
 the user's statement: the patch is right exactly when FUNC's result may be any such x. PRED and COST must satisfy
@@ -137,6 +141,70 @@ def patch_point(code, addr):
     return ins.address, struct.unpack_from("<I", code, 4 * i)[0], f"{ins.mnemonic} {ins.op_str}", pac
 
 
+def _functions(binary):
+    """{address: (name, size)} of the defined functions with sizes (ELF) or the next symbol's address (Mach-O)."""
+    out = {}
+    for s in binary.symbols:
+        if s.value and s.name and getattr(s, "size", 0):
+            out[s.value] = (s.name, s.size)
+    if not out:                                           # Mach-O: sizes from the next function's start
+        starts = sorted({s.value for s in binary.symbols if s.value and s.name.startswith("_")})
+        names = {s.value: s.name for s in binary.symbols if s.value and s.name.startswith("_")}
+        for a, nxt in zip(starts, starts[1:] + [starts[-1] + 4096] if starts else []):
+            out[a] = (names[a], min(nxt - a, 4096))
+    return out
+
+
+def scan(binary):
+    """[(op, func, callee, bits, why)]: brute-force loops over a counter that is passed to a leaf function."""
+    import capstone
+    md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+    funcs = _functions(binary)
+    insns = {}
+    for a, (name, size) in funcs.items():
+        try:
+            insns[a] = list(md.disasm(bytes(binary.get_content_from_virtual_address(a, size)), a))
+        except Exception:
+            insns[a] = []
+    leaf = {a for a, ins in insns.items()
+            if ins and not any(i.mnemonic in ("bl", "blr", "svc") for i in ins)
+            and not any(r in i.op_str for i in ins for r in (" v", " q", " d0", " s0"))}
+    found = []
+    for a, ins in insns.items():
+        name = funcs[a][0].lstrip("_")
+        bound = None
+        for k, i in enumerate(ins):                     # cmp wR, #2^k (lsl #12 allowed), a backward b.cond after
+            m = i.mnemonic
+            if m == "cmp" and i.op_str.startswith("w"):
+                parts = [p.strip() for p in i.op_str.split(",")]
+                if len(parts) >= 2 and parts[1].startswith("#"):
+                    v = int(parts[1][1:], 0) << (12 if len(parts) == 3 and parts[2] == "lsl #12" else 0)
+                    nxt = ins[k + 1] if k + 1 < len(ins) else None
+                    back = nxt is not None and nxt.mnemonic.startswith("b.") and int(nxt.op_str.lstrip("#"), 16) < nxt.address
+                    for bits in range(1, 32):
+                        if back and v in ((1 << bits), (1 << bits) - 1):
+                            bound = (parts[0], bits)
+        if not bound:
+            continue
+        reg, bits = bound
+        for k, i in enumerate(ins[:-2]):                # mov w0, wR; bl P (a leaf); then the test of w0
+            if i.mnemonic == "mov" and i.op_str == f"w0, {reg}" and ins[k + 1].mnemonic == "bl":
+                callee = int(ins[k + 1].op_str.lstrip("#"), 16)
+                if callee not in leaf or callee not in funcs:
+                    continue
+                after = ins[k + 2]
+                pname = funcs[callee][0].lstrip("_")
+                if after.mnemonic in ("cbnz", "cbz") and after.op_str.startswith("w0") or \
+                        after.mnemonic in ("tbnz", "tbz") and after.op_str.startswith("w0, #0"):
+                    found.append((QSEARCH, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, "
+                                  f"the loop left when it returns nonzero ({after.mnemonic})"))
+                elif after.mnemonic == "cmp" and after.op_str.startswith("w0, w"):
+                    found.append((QMIN, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, its "
+                                  "result compared with the best so far"))
+                break
+    return found
+
+
 def resolve(binary, name):
     if name.startswith("0x"):
         return int(name, 16)
@@ -238,7 +306,9 @@ def patch(path, out, jobs, note=print):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("program")
-    ap.add_argument("-o", "--output", required=True)
+    ap.add_argument("-o", "--output")
+    ap.add_argument("--scan", action="store_true")
+    ap.add_argument("--auto", action="store_true")
     ap.add_argument("--search", action="append", default=[], metavar="FUNC=PRED:BITS")
     ap.add_argument("--min", action="append", default=[], metavar="FUNC=COST:BITS")
     a = ap.parse_args(argv)
@@ -251,8 +321,28 @@ def main(argv=None):
                 jobs.append((op, func, pred, int(bits, 0)))
             except ValueError:
                 ap.error(f"{spec}: expected FUNC=PRED:BITS")
+    if a.scan or a.auto:
+        import lief
+        b = lief.parse(a.program)
+        b = b.at(0) if hasattr(b, "at") else b
+        if b is None:
+            print(f"qarm_patch: {a.program}: neither ELF nor Mach-O", file=sys.stderr)
+            return 2
+        cands = scan(b)
+        for op, func, pred, bits, why in cands:
+            flag = "--search" if op == QSEARCH else "--min"
+            print(f"{func}: {'QSEARCH' if op == QSEARCH else 'QMIN'} on {pred}, {bits} bits ({why}): "
+                  f"{flag} {func}={pred}:{bits}")
+        if not cands:
+            print("no brute-force loops found")
+        if a.auto:
+            jobs += [(op, func, pred, bits) for op, func, pred, bits, _ in cands]
+        else:
+            return 0
     if not jobs:
-        ap.error("nothing to patch: give --search or --min")
+        ap.error("nothing to patch: give --search, --min, --scan or --auto")
+    if not a.output:
+        ap.error("-o OUT is needed to patch")
     try:
         patch(a.program, a.output, jobs, note=lambda t: print("qarm_patch: " + t, file=sys.stderr))
     except PatchError as e:
