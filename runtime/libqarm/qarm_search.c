@@ -224,20 +224,15 @@ int qarm_rt_min(const qarm_oracle *o, int *x, long *value, char *report, size_t 
     return 1;
 }
 
-/* QCOUNT: quantum counting (Brassard, Hoyer, Tapp), simulated: phase estimation of the Grover operator with t
- * precision qubits; the outcome drawn from its exact distribution (Fejer kernels around +-theta/pi) */
-int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report, size_t len)
+/* amplitude estimation (Brassard, Hoyer, Mosca, Tapp), simulated: phase estimation with t precision qubits of the
+ * operator with eigenphases +-2 theta, sin^2 theta = a, the outcome drawn from its exact distribution (Fejer kernels
+ * around +-theta/pi); the median of 5 runs, so the bound 2 pi sqrt(a(1-a))/T + pi^2/T^2 holds with probability ~0.98 */
+#define MEDIAN_OF 5
+static double amp_estimate(double a, int bits, double *bound, int *t_out, long *queries)
 {
-    char err[300];
-    if (o->out_bits) { snprintf(report, len, "QCOUNT %s: a compute oracle, not a phase oracle", o->name); return -1; }
-    long N = 1L << o->bits, M = 0;
-    unsigned char *mark = malloc((size_t)N);
-    if (evaluate(o, mark, NULL, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(mark); return -1; }
-    for (long b = 0; b < N; b++) M += mark[b];
-    free(mark);
-    int t = (o->bits + 1) / 2 + 3;
+    int t = (bits + 1) / 2 + 3;
     long T = 1L << t;
-    double phi = asin(sqrt((double)M / (double)N)) / M_PI, total = 0, *p = malloc(sizeof *p * (size_t)T);
+    double phi = asin(sqrt(a < 0 ? 0 : a > 1 ? 1 : a)) / M_PI, total = 0, *p = malloc(sizeof *p * (size_t)T);
     for (long y = 0; y < T; y++) {
         double f[2];
         for (int s = 0; s < 2; s++) {
@@ -250,16 +245,69 @@ int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report
         p[y] = 0.5 * (f[0] + f[1]);
         total += p[y];
     }
-    double u = s_uniform() * total, acc = 0;
-    long y = 0;
-    for (; y < T - 1; y++) { acc += p[y]; if (u < acc) break; }
+    double runs[MEDIAN_OF];
+    for (int r = 0; r < MEDIAN_OF; r++) {
+        double u = s_uniform() * total, acc = 0;
+        long y = 0;
+        for (; y < T - 1; y++) { acc += p[y]; if (u < acc) break; }
+        runs[r] = pow(sin(M_PI * (double)y / T), 2);
+    }
     free(p);
-    double est = N * pow(sin(M_PI * (double)y / T), 2);
-    *count = lround(est);
-    *bound = 2 * M_PI * sqrt(est * (N - est)) / T + M_PI * M_PI * N / ((double)T * T);
+    for (int i = 1; i < MEDIAN_OF; i++)                  /* the median */
+        for (int j = i; j > 0 && runs[j] < runs[j - 1]; j--) { double x = runs[j]; runs[j] = runs[j - 1]; runs[j - 1] = x; }
+    double est = runs[MEDIAN_OF / 2];
+    *bound = 2 * M_PI * sqrt(est * (1 - est)) / T + M_PI * M_PI / ((double)T * T);
+    *t_out = t;
+    *queries = MEDIAN_OF * (T - 1);
+    return est;
+}
+
+/* QCOUNT: quantum counting, the amplitude estimation of M / N */
+int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report, size_t len)
+{
+    char err[300];
+    if (o->out_bits) { snprintf(report, len, "QCOUNT %s: a compute oracle, not a phase oracle", o->name); return -1; }
+    long N = 1L << o->bits, M = 0, queries;
+    unsigned char *mark = malloc((size_t)N);
+    if (evaluate(o, mark, NULL, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(mark); return -1; }
+    for (long b = 0; b < N; b++) M += mark[b];
+    free(mark);
+    int t;
+    double b, est = amp_estimate((double)M / (double)N, o->bits, &b, &t, &queries);
+    *count = lround(est * N);
+    *bound = b * N;
     snprintf(report, len, "QCOUNT %s, %d bits: phase oracle of %d qubits and %d gates from the machine code; quantum "
-             "counting with %d precision qubits, %ld controlled Grover iterations: about %ld (error bound %.1f; "
-             "simulated)", o->name, o->bits, o->n, o->ngates, t, T - 1, *count, *bound);
+             "counting with %d precision qubits (the median of %d runs), %ld controlled Grover iterations: about %ld "
+             "(error bound %.1f; simulated)", o->name, o->bits, o->n, o->ngates, t, MEDIAN_OF, queries, *count, *bound);
+    return 1;
+}
+
+/* QAMPEST: the mean of g(x) in 0 .. 2^k - 1, as the amplitude a = E[g] / 2^k */
+int qarm_rt_ampest(const qarm_oracle *o, int k, double *mean, double *bound, char *report, size_t len)
+{
+    char err[300];
+    if (!o->out_bits) { snprintf(report, len, "QAMPEST %s: a phase oracle, not a compute oracle", o->name); return -1; }
+    if (k < 1 || k > 31) { snprintf(report, len, "QAMPEST %s: value bits %d: 1 to 31", o->name, k); return -1; }
+    long N = 1L << o->bits, queries;
+    int64_t *v = malloc(sizeof *v * (size_t)N);
+    if (evaluate(o, NULL, v, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(v); return -1; }
+    double sum = 0, top = (double)(1L << k);
+    for (long x = 0; x < N; x++) {
+        if (v[x] < 0 || v[x] >= (int64_t)(1L << k)) {
+            snprintf(report, len, "QAMPEST %s: g(%ld) = %lld, outside 0 .. 2^%d - 1", o->name, x, (long long)v[x], k);
+            free(v);
+            return -1;
+        }
+        sum += (double)v[x];
+    }
+    free(v);
+    int t;
+    double b, est = amp_estimate(sum / N / top, o->bits, &b, &t, &queries);
+    *mean = est * top;
+    *bound = b * top;
+    snprintf(report, len, "QAMPEST %s, %d bits: compute oracle of %d qubits and %d gates from the machine code; "
+             "amplitude estimation with %d precision qubits (the median of %d runs, %ld queries): mean %.4f +- %.4f "
+             "(simulated)", o->name, o->bits, o->n, o->ngates, t, MEDIAN_OF, queries, *mean, *bound);
     return 1;
 }
 

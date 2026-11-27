@@ -14,6 +14,8 @@
  *   QAVAIL    W0 = 1, W1 = QARM_F_VQE, with QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT when the oracle helper is there
  *   QMIN      X1 = cost, W2 = bits: a compute oracle of cost, Durr-Hoyer in libqarm: W0 = 1, W3 = x, W4 = cost(x)
  *   QCOUNT    X1 = f, W2 = bits: the phase oracle, quantum counting: W0 = 1, X3 = the count, D0 = its error bound
+ *   QAMPEST   X1 = g, W2 = bits, W3 = value bits k: a compute oracle, amplitude estimation: W0 = 1, D0 = the mean of
+ *             g, D1 = its error bound
  *   QPERIOD, QSIMON (compute oracles), QBV (phase oracle): X1 = f, W2 = bits: W0 = 1, W3 = r or s; W0 = 2: none
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
@@ -42,7 +44,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
-enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
+enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
        OP_QBV = 0x1A, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
 
@@ -308,6 +310,22 @@ static void qmin_count(int min)
     note("%s", report);
 }
 
+static void qampest(void)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2), k = (uint32_t)x(3);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, 1) : NULL;
+    if (!o) return;
+    char report[600];
+    double mean = 0, bound = 0;
+    if (qarm_rt_ampest(o, (int)k, &mean, &bound, report, sizeof report) == 1) {
+        set_x(0, 1);
+        set_d(0, mean);
+        set_d(1, bound);
+    }
+    note("%s", report);
+}
+
 static void qstructure(unsigned op)
 {
     uint64_t fn = x(1);
@@ -336,7 +354,7 @@ static void packet(unsigned int vcpu, void *udata)
     case OP_QAVAIL:
         set_x(0, 1);
         set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON
-                                             | QARM_F_BV : 0));
+                                             | QARM_F_BV | QARM_F_AMPEST : 0));
         break;
     case OP_QSEARCH:
         qsearch();
@@ -344,6 +362,9 @@ static void packet(unsigned int vcpu, void *udata)
     case OP_QMIN:
     case OP_QCOUNT:
         qmin_count(op == OP_QMIN);
+        break;
+    case OP_QAMPEST:
+        qampest();
         break;
     case OP_QPERIOD:
     case OP_QSIMON:

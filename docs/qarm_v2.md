@@ -54,10 +54,11 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
+| `0x17` | `QAMPEST` | `X1` = address of `g`, `W2` = bits, `W3` = value bits k | `W0 = 1`, `D0` = the mean of g(x) ∈ [0, 2ᵏ), `D1` = its error bound |
 | `0x18` | `QPERIOD` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = the least r > 0 with f(x + r) = f(x); or `W0 = 2`: none |
 | `0x19` | `QSIMON` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s ≠ 0 with f(x) = f(x ⊕ s); or `W0 = 2`: none |
 | `0x1A` | `QBV` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s with f(x) = s·x mod 2 (+ a constant) |
@@ -70,7 +71,6 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 | opcode | name | input | result | check |
 |---|---|---|---|---|
 | `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
-| `0x17` | `QAMPEST` | `g(x)` in [0, 1] | the mean of g (amplitude estimation: Monte Carlo, risk) | error bound |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
 | `0x1C` | `QRAND` | n | random bits from the quantum device | — |
 | `0x25` | `QVSAMPLE` | VQE tables | bitstrings of the prepared state | — |
@@ -122,9 +122,19 @@ in the same binary: every input in turn.
     with a constant, and uncomputation. The runtimes simulate it today.
 - **`QCOUNT`** (Brassard–Høyer–Tapp 1998) takes a predicate and estimates its number of solutions M:
   - phase estimation of the Grover operator, whose eigenphases are ±2θ with sin²θ = M/N;
-  - t = ⌈bits/2⌉ + 3 precision qubits, and 2ᵗ − 1 controlled Grover iterations;
-  - the error bound 2π√(M(N−M))/2ᵗ + π²N/4ᵗ holds with probability at least 8/π².
+  - t = ⌈bits/2⌉ + 3 precision qubits, and 2ᵗ − 1 controlled Grover iterations per run;
+  - one run's error bound, 2π√(M(N−M))/2ᵗ + π²N/4ᵗ, holds with probability at least 8/π² ≈ 0.81. The
+    runtimes return the median of 5 runs, for which it holds with probability about 0.98.
   - The runtimes draw the outcome from its exact distribution.
+- **`QAMPEST`** (amplitude estimation; Brassard, Høyer, Mosca, Tapp) takes `int g(int x)` with values in
+  [0, 2ᵏ) and estimates their mean over all x, the quantum replacement for Monte Carlo sampling.
+  - The mean a = E[g]/2ᵏ is the amplitude of a marked state, and phase estimation reads it with error
+    about π/2ᵗ.
+  - t = ⌈bits/2⌉ + 3, again the median of 5 runs. Monte Carlo needs about a(1−a)/ε² samples for the
+    same error; the report gives both numbers.
+  - `examples/qarm/pi.c` estimates π from the share of a 64 × 64 grid inside a quarter circle. Its result
+    is 3.17 ± 0.05 from 2,555 queries, where Monte Carlo would need about 6,600 samples. The grid's
+    exact value, which the plain CPU computes, is 3.1475.
 
 `examples/qarm/partition.c` is number partitioning, the classic NP-hard QUBO, as ordinary C:
 

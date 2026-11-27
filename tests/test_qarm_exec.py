@@ -147,8 +147,13 @@ def main():
             if native:
                 q = sh(native + [sexe])
                 assert all(w in q.stdout for w in want), q.stdout
+        pexe = os.path.join(d, "pi")
+        sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", "pi.c"), "-o", pexe])
+        p = sh(EXEC + [pexe])
+        est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
+        assert abs(est - 3.1475) <= err, p.stdout                 # the grid's exact value: 3.1475
         print("3c) QPERIOD (examples/qarm/shor.c: 15 = 3 x 5, 21 = 7 x 3 from C modexp's oracle), QSIMON (shift 0x2d), "
-              "QBV (string 0x35): the same answers as the plain CPU")
+              f"QBV (string 0x35): the same answers as the plain CPU; QAMPEST (pi.c): {est} +- {err} (the grid: 3.1475)")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

@@ -39,9 +39,9 @@ STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT = 0x10, 0x11, 0x15, 0x16
-OP_QPERIOD, OP_QSIMON, OP_QBV = 0x18, 0x19, 0x1A
+OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QAMPEST = 0x18, 0x19, 0x1A, 0x17
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -138,8 +138,9 @@ class Program:
         """The machine code of the function at addr: up to its size (ELF), or to the next function start."""
         size = getattr(self, "sizes", {}).get(addr)
         if not size:
+            text_end = self.text[0] + self.text[1]
             later = [a for a in self.starts if a > addr]
-            end = later[0] if later else self.text[0] + self.text[1]
+            end = min(later[0], text_end) if later else text_end     # never past the code: __cstring follows
             size = end - addr
         return bytes(mem.mem_read(addr, size))
 
@@ -326,13 +327,15 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 127)                     # W1: features: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV
+            self.set_x(1, 255)                     # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
             self.qmin(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QCOUNT:
             self.qcount(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QAMPEST:
+            self.qampest(self.x(1), self.x(2) & 0xFFFFFFFF, self.x(3) & 0xFFFFFFFF)
         elif op in (OP_QPERIOD, OP_QSIMON, OP_QBV):
             self.qstructure(op, self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE):
@@ -406,9 +409,33 @@ class Runtime:
         self.set_x(0, 1)
         self.set_x(3, est)
         self.set_d(0, bound)
-        self.note(f"QCOUNT {name}, {bits} bits: quantum counting with {t} precision qubits, {calls} controlled Grover "
-                  f"iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
+        self.note(f"QCOUNT {name}, {bits} bits: quantum counting with {t} precision qubits (the median of "
+                  f"{MEDIAN_OF} runs), {calls} controlled Grover iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
                   f"(error bound {bound:.1f}; simulated)")
+
+    def qampest(self, fn, bits, vbits):
+        """QAMPEST: X1 = g, W2 = bits, W3 = value bits k (g(x) in 0 .. 2^k - 1); D0 = the estimated mean of g over all
+        x, D1 = its error bound. Amplitude estimation (Brassard, Hoyer, Mosca, Tapp): the mean a = E[g] / 2^k as the
+        amplitude of a marked state, read by phase estimation (simulated from its exact outcome distribution)."""
+        name = self.p.functions.get(fn, f"function at {fn:#x}")
+        if not 1 <= bits <= 16 or not 1 <= vbits <= 31:
+            raise QarmError(f"QAMPEST {name}: bits = {bits}, value bits = {vbits}; 1 to 16, 1 to 31")
+        circuit = compute_oracle(self, fn, name, bits, "QAMPEST")
+        values = oracle_values(circuit, bits)
+        if values.min() < 0 or values.max() >= 1 << vbits:
+            raise QarmError(f"QAMPEST {name}: values from {values.min()} to {values.max()}, outside 0 .. 2^{vbits} - 1")
+        a = float(values.mean()) / (1 << vbits)
+        est, bound, t, calls = amplitude_estimate(a, bits)
+        scale = 1 << vbits
+        self.set_x(0, 1)
+        self.set_d(0, est * scale)
+        self.set_d(1, bound * scale)
+        mc = int(est * (1 - est) / max(bound, 1e-12) ** 2)
+        self.note(f"QAMPEST {name}, {bits} bits: amplitude estimation with {t} precision qubits (the median of "
+                  f"{MEDIAN_OF} runs, {calls} queries; "
+                  f"Monte Carlo would need about {mc} samples for the same standard error), the "
+                  f"{circuit['qubits']}-qubit oracle from {name}'s machine code: mean {est * scale:.4f} +- "
+                  f"{bound * scale:.4f} (simulated)")
 
     def qstructure(self, op, fn, bits):
         """QPERIOD, QSIMON, QBV: X1 = f, W2 = bits; W0 = 1 and W3 = the period r, the hidden shift s or the hidden
@@ -907,31 +934,6 @@ def durr_hoyer(values, bits, seed=None):
     return best, calls, searches
 
 
-def quantum_count(M, bits, seed=None):
-    """Quantum counting (Brassard, Hoyer, Tapp 1998), simulated: phase estimation of the Grover operator with t
-    precision qubits; the outcome y drawn from its exact distribution. Returns (estimate, error bound, t, calls)."""
-    N = 1 << bits
-    t = (bits + 1) // 2 + 3
-    T = 1 << t
-    theta = math.asin(math.sqrt(M / N))            # the Grover operator's eigenphases: +-2 theta
-    phi = theta / math.pi
-    def fejer(d):
-        d = (d + T / 2) % T - T / 2
-        if abs(d) < 1e-12:
-            return 1.0
-        return (math.sin(math.pi * d) / (T * math.sin(math.pi * d / T))) ** 2
-    p = [0.5 * fejer(y - T * phi) + 0.5 * fejer(y + T * phi) for y in range(T)]
-    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
-    u, acc, y = rng.random() * sum(p), 0.0, 0
-    for y in range(T):
-        acc += p[y]
-        if u < acc:
-            break
-    est = N * math.sin(math.pi * y / T) ** 2
-    bound = 2 * math.pi * math.sqrt(est * (N - est)) / T + math.pi ** 2 * N / T ** 2
-    return int(round(est)), bound, t, T - 1
-
-
 def _walsh_hadamard(v):
     """The normalized Walsh-Hadamard transform: H on every qubit."""
     import numpy as np
@@ -1016,6 +1018,44 @@ def bernstein_vazirani(sign, bits):
     N = 1 << bits
     p = _walsh_hadamard(sign / math.sqrt(N)) ** 2
     return int(np.argmax(p)), 1
+
+
+def quantum_count(M, bits, seed=None):
+    """Quantum counting (Brassard, Hoyer, Tapp 1998): amplitude estimation of M / N. Returns (estimate, error bound,
+    t, calls)."""
+    N = 1 << bits
+    a, bound, t, calls = amplitude_estimate(M / N, bits, seed)
+    return int(round(N * a)), N * bound, t, calls
+
+
+MEDIAN_OF = 5
+
+
+def amplitude_estimate(a, bits, seed=None):
+    """Amplitude estimation, simulated: phase estimation with t precision qubits of the operator whose eigenphases
+    are +-2 theta, sin^2 theta = a; the median of MEDIAN_OF runs. Returns (estimate of a, error bound, t, queries).
+    One run's bound holds with probability >= 8/pi^2; the median's with about 0.98."""
+    t = (bits + 1) // 2 + 3
+    T = 1 << t
+    phi = math.asin(math.sqrt(min(max(a, 0.0), 1.0))) / math.pi
+    def fejer(d):
+        d = (d + T / 2) % T - T / 2
+        if abs(d) < 1e-12:
+            return 1.0
+        return (math.sin(math.pi * d) / (T * math.sin(math.pi * d / T))) ** 2
+    p = [0.5 * fejer(y - T * phi) + 0.5 * fejer(y + T * phi) for y in range(T)]
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    runs = []
+    for _ in range(MEDIAN_OF):                       # the median of 5: the bound then holds with probability ~0.98
+        u, acc, y = rng.random() * sum(p), 0.0, 0
+        for y in range(T):
+            acc += p[y]
+            if u < acc:
+                break
+        runs.append(math.sin(math.pi * y / T) ** 2)
+    est = sorted(runs)[MEDIAN_OF // 2]
+    bound = 2 * math.pi * math.sqrt(est * (1 - est)) / T + math.pi ** 2 / T ** 2
+    return est, bound, t, MEDIAN_OF * (T - 1)
 
 
 def qiskit_oracle(circuit):

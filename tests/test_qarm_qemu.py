@@ -59,7 +59,7 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+        for name, src in (("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
                           ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
@@ -147,10 +147,14 @@ def main():
         print(f"7) partition: QMIN a split of difference 1 (Durr-Hoyer, imbalance()'s compute oracle); QCOUNT about "
               f"{n} +- {err} nearly balanced splits (exactly 32)")
 
-        p, q = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
+        p, p2 = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
         assert "15 = 3 x 5" in p.stdout and "21 = 7 x 3" in p.stdout and "QPERIOD on the quantum" in p.stdout, p
-        assert "shift is 0x2d (QSIMON)" in q.stdout and "string is 0x35 (QBV" in q.stdout, q
-        print("8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35")
+        assert "shift is 0x2d (QSIMON)" in p2.stdout and "string is 0x35 (QBV" in p2.stdout, p2
+        p = sh(qemu(",quiet=on") + [exe["pi"]])
+        est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
+        assert abs(est - 3.1475) <= err, p.stdout
+        print(f"8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35; "
+              f"pi: QAMPEST {est} +- {err} (the grid: 3.1475)")
     print("PASS")
 
 

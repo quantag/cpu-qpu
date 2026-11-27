@@ -33,7 +33,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | Run exported oracles on IBM hardware or its noise models | `qcpu_run.py`, `config.json` | [on a real quantum computer](#on-a-real-quantum-computer-qcpu_runpy) |
 | One arm64 binary with quantum instructions and a classical fallback | `include/qarm.h`, `qarm_exec.py` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
-| Minimum, counting, period, hidden shift and string, with C functions as oracles | `QMIN`, `QCOUNT`, `QPERIOD`, `QSIMON`, `QBV` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| Minimum, counting, mean, period, hidden shift and string, with C functions as oracles | `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QGRAD`, `QSESSION`; `tools/qarm_molecule.py` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
@@ -141,6 +141,7 @@ cell k), `--mem=1,2,3` to initialise user data cells (32-bit), `-v`, `--report P
 | `examples/qarm/h2_vqe.c` | Q-ARM VQE: the ground-state energy of H₂, −1.137306 Ha (`qarm_exec.py`, or a plain CPU) |
 | `examples/qarm/shor.c` | Q-ARM `QPERIOD`: factoring 15 and 21, the period of a C `modexp` found from its compiled code |
 | `examples/qarm/hidden.c` | Q-ARM `QSIMON` and `QBV`: the hidden shift and the hidden string of two C functions |
+| `examples/qarm/pi.c` | Q-ARM `QAMPEST`: pi by amplitude estimation, the quantum replacement for Monte Carlo, from a C function |
 | `examples/qarm/partition.c` | Q-ARM `QMIN` and `QCOUNT`: number partitioning (an NP-hard QUBO) as plain C; oracles from its compiled functions |
 | `examples/qarm/molecule_vqe.c` | Q-ARM VQE with UCCSD and L-BFGS: LiH to its exact active-space energy, −7.882176 Ha |
 

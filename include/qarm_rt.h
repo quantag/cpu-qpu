@@ -41,6 +41,7 @@ int qarm_rt_oracle_gates(const qarm_oracle *o);
 int qarm_rt_search(const qarm_oracle *o, int *x, char *report, size_t len);          /* 1 x found, 2 none, -1 */
 int qarm_rt_min(const qarm_oracle *o, int *x, long *value, char *report, size_t len);  /* 1, or -1 (a compute oracle) */
 int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report, size_t len);       /* 1, or -1 */
+int qarm_rt_ampest(const qarm_oracle *o, int k, double *mean, double *bound, char *report, size_t len);   /* 1, -1 */
 int qarm_rt_period(const qarm_oracle *o, int *r, char *report, size_t len);    /* compute oracle: 1 r, 2 none, -1 */
 int qarm_rt_simon(const qarm_oracle *o, int *s, char *report, size_t len);     /* compute oracle: 1 s, 2 none, -1 */
 int qarm_rt_bv(const qarm_oracle *o, int *s, char *report, size_t len);        /* phase oracle: 1 s, -1 */

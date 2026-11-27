@@ -19,6 +19,8 @@
  *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
  *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
  *                               (that is the search's job), so a quantum answer is right with high probability
+ *   qarm_mean(g, bits, k, &err) QAMPEST: the mean of g(x) over all x, g(x) in 0 .. 2^k - 1: amplitude estimation;
+ *                               err: its error bound (probability >= 8/pi^2), 0 when computed classically
  *   qarm_period(f, bits, &r)    QPERIOD: the least r > 0 with f(x + r) = f(x): Shor's period finding (quantum Fourier
  *                               transform, continued fractions); checked on f(0..3). 0 if none is found
  *   qarm_simon(f, bits, &s)     QSIMON: s != 0 with f(x) = f(x ^ s) for all x (Simon); checked on f(0..3). 0: none
@@ -66,7 +68,7 @@ typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; u
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
-       QARM_F_BV = 64 };
+       QARM_F_BV = 64, QARM_F_AMPEST = 128 };
 
 /* the classical paths of QMIN and QCOUNT */
 static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)
@@ -124,6 +126,13 @@ static inline int qarm__bv(int (*f)(int), int bits, int *s)
     for (int i = 0; i < bits; i++) *s |= ((f(1 << i) & 1) ^ b0) << i;
     return 1;
 }
+static inline double qarm__mean(int (*g)(int), int bits, double *err)
+{
+    double s = 0;
+    for (long v = 0; v < (1L << bits); v++) s += g((int)v);
+    if (err) *err = 0;
+    return s / (double)(1L << bits);
+}
 static inline long qarm__count(int (*f)(int), int bits, double *err)
 {
     long n = 0;
@@ -140,6 +149,7 @@ static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
 static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
 static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
 static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
 static inline int qarm_bv(int (*f)(int), int bits, int *s) { return qarm__bv(f, bits, s); }
 static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
@@ -354,6 +364,21 @@ static inline int qarm_bv(int (*f)(int), int bits, int *sv)
     return qarm__bv(f, bits, sv);
 }
 
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = g;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = k;
+    register double d0 __asm__("d0") = 0, d1 __asm__("d1") = 0;
+    __asm__ volatile(QARM_PACKET(0x02170000) : "+r"(x0), "+w"(d0), "+w"(d1) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    if (x0 == 1) {
+        if (err) *err = d1;
+        return d0;
+    }
+    return qarm__mean(g, bits, err);
+}
+
 static inline long qarm_count(int (*f)(int), int bits, double *err)
 {
     register long x0 __asm__("x0") = 0;
@@ -426,6 +451,7 @@ static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
 static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
 static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
 static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
 static inline int qarm_bv(int (*f)(int), int bits, int *s) { return qarm__bv(f, bits, s); }
 static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
