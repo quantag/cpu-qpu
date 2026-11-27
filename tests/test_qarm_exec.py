@@ -11,6 +11,8 @@
      3b. QMIN and QCOUNT: examples/qarm/partition.c (number partitioning), oracles from imbalance()'s and
      nearly_balanced()'s machine code; on the plain CPU every split is tried.
      3c. QPERIOD, QSIMON, QBV: examples/qarm/shor.c (factoring 15 and 21) and hidden.c.
+     3d. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c (a GHZ state, a Toffoli truth table), the circuit tables read
+     from the program's memory; with 4's packages, the same binary on the noise model of Fez.
   4. (with qiskit, qiskit-aer, qiskit-ibm-runtime) QSEARCH on a QPU backend from a config file:
      examples/qarm/tiny_search.c on IBM's noise model of Fez and through the "ibm" backend's local channel (the
      code path of a real device, one asynchronous job, without the login); Code Breaker's 1000-qubit oracle is
@@ -155,6 +157,19 @@ def main():
         print("3c) QPERIOD (examples/qarm/shor.c: 15 = 3 x 5, 21 = 7 x 3 from C modexp's oracle), QSIMON (shift 0x2d), "
               f"QBV (string 0x35): the same answers as the plain CPU; QAMPEST (pi.c): {est} +- {err} (the grid: 3.1475)")
 
+        gexe = os.path.join(d, "ghz")
+        sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", "ghz.c"),
+                 "-o", gexe, "-lm"])
+        p = sh(EXEC + [gexe])
+        assert re.search(r"GHZ\(5\): 00000 \d+, 11111 \d+, other 0 of 2000 shots \(on the coprocessor\)", p.stdout), p.stdout
+        assert "11->1 100%" in p.stdout and "qarm_exec.py: exact simulator" in p.stdout, p.stdout
+        assert p.stderr.count("QCIRC: 3 qubits") == 4 and "QRAND: 16 bytes" in p.stderr, p.stderr
+        if native:
+            q = sh(native + [gexe])
+            assert "simulated here" in q.stdout and "11->1 100%" in q.stdout and "device: classical" in q.stdout, q.stdout
+        print("3d) QCIRC, QRAND, QCAPS (examples/qarm/ghz.c): GHZ on 5 qubits, only 00000 and 11111; Toffoli's truth "
+              "table; the plain CPU's state vector gives the same")
+
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401
         except ImportError as e:
@@ -180,6 +195,11 @@ def main():
             assert p.returncode == 70 and re.search(r"needs \d+ qubits, fake_fez has 156: not run", p.stderr), p.stderr
             print("4) QSEARCH on a QPU backend from a config file, one job: " + "; ".join(done)
                   + "; Code Breaker's oracle refused as larger than the device")
+            p = sh(EXEC + ["--config", config(backend="preview", shots=100, options={"device": "fez"}), gexe], check=False)
+            g = re.search(r"00000 (\d+), 11111 (\d+), other (\d+)", p.stdout)
+            assert g and int(g[1]) + int(g[2]) > 1600 and "156 qubits, flags 2" in p.stdout, (p.stdout, p.stderr)
+            assert re.search(r"QCIRC: 5 qubits, 5 gates .* on preview: noise model of fake_fez", p.stderr), p.stderr
+            print(f"4b) ghz.c on the noise model of Fez: GHZ {g[1]}/{g[2]}, {g[3]} other (device errors), one job each")
     print("PASS")
 
 

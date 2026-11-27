@@ -169,4 +169,64 @@ static double qarm_sv_grad(qarm_sv *s, const qarm_hamiltonian *h, const qarm_ans
     }
     return e;
 }
+
+/* QCIRC: a qarm_gate as up to 15 operations of the VQE engine (X, H, CX, CZ, RY, RZ; angles in scale, param 0), equal
+ * up to a global phase: Y = RY(pi), Z = RZ(pi), S = RZ(pi/2), T = RZ(pi/4), SX = H RZ(pi/2) H, RX = H RZ H, SWAP =
+ * three CX, CCX the standard Clifford+T circuit. Returns the number of operations, 0 for an unknown kind. */
+static int qarm_sv_lower(const qarm_gate *g, qarm_op *out)
+{
+    const double pi = 3.14159265358979323846;
+    int n = 0;
+#define OP(k, a, b, ang) (out[n++] = (qarm_op){(uint8_t)(k), (uint8_t)(a), (uint8_t)(b), 0, 0, (ang), 0, 0})
+    switch (g->kind) {
+    case QARM_G_X: OP(QARM_X, g->q0, 0, 0); break;
+    case QARM_G_Y: OP(QARM_RY, g->q0, 0, pi); break;
+    case QARM_G_Z: OP(QARM_RZ, g->q0, 0, pi); break;
+    case QARM_G_H: OP(QARM_H, g->q0, 0, 0); break;
+    case QARM_G_S: OP(QARM_RZ, g->q0, 0, pi / 2); break;
+    case QARM_G_SDG: OP(QARM_RZ, g->q0, 0, -pi / 2); break;
+    case QARM_G_T: OP(QARM_RZ, g->q0, 0, pi / 4); break;
+    case QARM_G_TDG: OP(QARM_RZ, g->q0, 0, -pi / 4); break;
+    case QARM_G_SX: OP(QARM_H, g->q0, 0, 0); OP(QARM_RZ, g->q0, 0, pi / 2); OP(QARM_H, g->q0, 0, 0); break;
+    case QARM_G_RX: OP(QARM_H, g->q0, 0, 0); OP(QARM_RZ, g->q0, 0, g->angle); OP(QARM_H, g->q0, 0, 0); break;
+    case QARM_G_RY: OP(QARM_RY, g->q0, 0, g->angle); break;
+    case QARM_G_RZ: OP(QARM_RZ, g->q0, 0, g->angle); break;
+    case QARM_G_CX: OP(QARM_CX, g->q0, g->q1, 0); break;
+    case QARM_G_CZ: OP(QARM_CZ, g->q0, g->q1, 0); break;
+    case QARM_G_SWAP: OP(QARM_CX, g->q0, g->q1, 0); OP(QARM_CX, g->q1, g->q0, 0); OP(QARM_CX, g->q0, g->q1, 0); break;
+    case QARM_G_CCX: {
+        int a = g->q0, b = g->q1, c = g->q2;
+        OP(QARM_H, c, 0, 0); OP(QARM_CX, b, c, 0); OP(QARM_RZ, c, 0, -pi / 4); OP(QARM_CX, a, c, 0);
+        OP(QARM_RZ, c, 0, pi / 4); OP(QARM_CX, b, c, 0); OP(QARM_RZ, c, 0, -pi / 4); OP(QARM_CX, a, c, 0);
+        OP(QARM_RZ, b, 0, pi / 4); OP(QARM_RZ, c, 0, pi / 4); OP(QARM_H, c, 0, 0); OP(QARM_CX, a, b, 0);
+        OP(QARM_RZ, a, 0, pi / 4); OP(QARM_RZ, b, 0, -pi / 4); OP(QARM_CX, a, b, 0);
+        break;
+    }
+    }
+#undef OP
+    return n;
+}
+
+/* a gate's qubits inside 0 .. n - 1 and different from each other */
+static int qarm_sv_gate_ok(const qarm_gate *g, uint32_t n)
+{
+    int k = g->kind, two = k == QARM_G_CX || k == QARM_G_CZ || k == QARM_G_SWAP, three = k == QARM_G_CCX;
+    if (k < 1 || k > QARM_G_LAST || g->q0 >= n) return 0;
+    if ((two || three) && (g->q1 >= n || g->q1 == g->q0)) return 0;
+    if (three && (g->q2 >= n || g->q2 == g->q0 || g->q2 == g->q1)) return 0;
+    return 1;
+}
+
+/* the circuit on |0..0>: (re, im) */
+static void qarm_sv_circuit(qarm_sv *s, const qarm_circuit *c)
+{
+    static const double one = 1;
+    qarm_op ops[16];
+    for (long b = 0; b < (1L << s->n); b++) s->re[b] = s->im[b] = 0;
+    s->re[0] = 1;
+    for (uint32_t i = 0; i < c->gates; i++) {
+        int k = qarm_sv_lower(&c->g[i], ops);
+        for (int j = 0; j < k; j++) qarm_sv_apply(s, s->re, s->im, &ops[j], qarm_sv_angle(&ops[j], &one));
+    }
+}
 #endif
