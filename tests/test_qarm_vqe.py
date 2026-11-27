@@ -10,12 +10,38 @@
   3. Errors: inconsistent tables, too many qubits for the exact simulator: QVLOAD refused, the reason on stderr.
   4. (qiskit, qiskit-aer, qiskit-ibm-runtime) h2_vqe on IBM's noise model of Fez, with readout correction, within
      0.1 Ha; through the "ibm" backend's local channel: a session and one job per batch.
+  5. QVSAMPLE: examples/qarm/maxcut_qaoa.c (QAOA, the Wagner graph) finds the largest cut, 10, on the plain CPU and
+     under qarm_exec.py; a 2-qubit state RY(pi/2) then CX gives only 00 and 11, half each. With 4's packages, the
+     same on the noise model of Fez (mostly 00 and 11).
 Run: python3 -m tests.test_qarm_vqe   (needs an arm64 C compiler: the host's on arm64, else aarch64-linux-gnu-gcc)"""
 import json, os, re, subprocess, sys, tempfile, textwrap
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
 
 H2 = os.path.join(ROOT, "examples", "qarm", "h2_vqe.c")
 EXACT = -1.1373060357534
+
+MAXCUT = os.path.join(ROOT, "examples", "qarm", "maxcut_qaoa.c")
+VSAMPLE = r"""
+#include <stdio.h>
+#include "qarm.h"
+static const qarm_pauli t[] = {{0, 3, 1.0}};
+static const qarm_hamiltonian h = {2, 1, 0, t};
+static const qarm_op ops[] = {{QARM_RY, 0, 0, 0, 0, 1.0, 0, 0}, {QARM_CX, 0, 1, 0, 0, 0, 0, 0}};
+static const qarm_ansatz a = {2, 1, 2, 0, 0, ops};
+int main(void)
+{
+    static uint64_t s[2000];
+    int c[4] = {0};
+    double theta[1] = {1.5707963267948966};
+    qarm_vqe v;
+    if (qarm_vqe_load(&h, &a, &v) < 0) return 2;
+    int w = qarm_vsample(&v, theta, 2000, s);
+    for (int i = 0; i < 2000; i++) c[s[i] & 3]++;
+    printf("%d %d %d %d %d\n", w, c[0], c[1], c[2], c[3]);
+    qarm_vqe_free(&v);
+    return 0;
+}
+"""
 
 ALL_OPS = r"""
 #include <stdio.h>
@@ -121,6 +147,23 @@ def main():
         print("3) errors: an operation on a qubit beyond the Hamiltonian, 30 qubits on the exact simulator: QVLOAD "
               "refused with the reason")
 
+        mexe, vexe = os.path.join(d, "maxcut"), os.path.join(d, "vsample")
+        build(cc, MAXCUT, mexe)
+        src = os.path.join(d, "vsample.c")
+        open(src, "w").write(VSAMPLE)
+        build(cc, src, vexe)
+        p = sh(EXEC + ["-q", mexe])
+        assert "best cut 10" in p.stdout and "largest cut is 10" in p.stdout and "coprocessor's measurements" in p.stdout, p.stdout
+        expected = float(re.search(r"the expected cut ([\d.]+)", p.stdout).group(1))
+        w, *c = (int(v) for v in sh(EXEC + ["-q", vexe]).stdout.split())
+        assert w == 1 and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, c
+        if native is not None:
+            q = sh(native + [mexe])
+            assert "best cut 10" in q.stdout and "sampled here" in q.stdout and "this CPU" in q.stdout, q.stdout
+            assert sh(native + [vexe]).stdout.split()[0] == "0"
+        print(f"5) QVSAMPLE: maxcut_qaoa (QAOA, 3 layers, 8 qubits): the expected cut {expected}, the largest cut 10 "
+              f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}, 01 and 10 never")
+
         if how.startswith("; Aer skipped"):
             print("4) skipped: Qiskit is not installed")
         else:
@@ -140,6 +183,10 @@ def main():
             e2 = float(re.search(r"\) = (-?\d+\.\d+) Ha", q.stdout).group(1))
             print(f"4) h2_vqe on the noise model of Fez: E = {e:.4f} Ha ({(e - EXACT) * 1000:+.0f} mHa), readout "
                   f"corrected; ibm, local channel (fake_torino): a session, {len(jobs)} jobs, E = {e2:.4f} Ha")
+            p = sh(EXEC + ["-q", "--config", os.path.join(d, "preview.json"), vexe])
+            w, *c = (int(v) for v in p.stdout.split())
+            assert w == 1 and c[0] + c[3] > 1800 and min(c[0], c[3]) > 800, c
+            print(f"5b) QVSAMPLE on the noise model of Fez: 00 {c[0]}, 11 {c[3]}, 01/10 {c[1] + c[2]} (device errors)")
     print("PASS")
 
 

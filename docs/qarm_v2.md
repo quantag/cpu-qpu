@@ -54,7 +54,7 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
@@ -75,7 +75,6 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 |---|---|---|---|---|
 | `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
-| `0x25` | `QVSAMPLE` | VQE tables | bitstrings of the prepared state | — |
 | `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ by Trotter steps | exact for small cases |
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
@@ -311,12 +310,29 @@ held in two tables in the program's memory.
 | `0x22` | `QEXPECTN` | `X3` = handle, `X1` = k parameter vectors, `W2` = k, `X4` = k doubles | `W0` = 1, the k energies at `X4` |
 | `0x23` | `QGRAD` | `X3` = handle, `X1` = θ, `X4` = one double per parameter | `W0` = 1, `D0` = E(θ), the gradient at `X4` |
 | `0x24` | `QSESSION` | `W1` = 1 open, 0 close | `W0` = 1 |
+| `0x25` | `QVSAMPLE` | `X3` = handle, `X1` = θ, `W2` = shots, `X4` = shots `uint64_t` | `W0` = 1: the outcomes of \|ψ(θ)⟩ in the Z basis at `X4` (bit q = qubit q); 2: refused |
 | `0x26` | `QVFREE` | `X3` = handle | `W0` = 1 |
 
 On a plain CPU every packet leaves `W0` = 0, and `include/qarm.h` takes the classical path. That path is
 `include/qarm_sv.h`, an exact state vector in C, up to `QARM_VQE_MAX_QUBITS` qubits (default 12; link
-with `-lm`). libqarm's exact backend uses the same code. Opcode `0x25` (`QVSAMPLE`, the final state's
-bitstrings) is reserved for a next step.
+with `-lm`). libqarm's exact backend uses the same code.
+
+**`QVSAMPLE`** measures the prepared state itself, not an energy. It gives the answer of a QAOA or VQE run
+as bitstrings. On a measured backend the ansatz circuit is transpiled once, measured in the Z basis, and
+sent as one job.
+
+`examples/qarm/maxcut_qaoa.c` is QAOA for MaxCut on the Wagner graph (8 vertices, 12 edges, largest
+cut 10).
+- The cost and the QAOA layers are ordinary `qarm_hamiltonian` and `qarm_ansatz` tables: ZZ terms, and
+  Pauli rotations that share γ and β.
+- L-BFGS optimizes ⟨C⟩ with `QGRAD`. `QVSAMPLE` then draws 1000 cuts, and the program keeps the best
+  one, counting its edges in C:
+
+```
+$ python3 qarm_exec.py -q maxcut_qaoa
+QAOA, 3 layers, on the quantum coprocessor: <C> = -7.6515, the expected cut 7.651
+QVSAMPLE (the coprocessor's measurements): best cut 10 (11010010), in 38.1% of 1000 shots; the largest cut is 10
+```
 
 **`QGRAD`** returns the energy and its gradient, computed two ways:
 - **Exact backends:** adjoint differentiation, one forward and one backward pass over the state vector,
@@ -678,7 +694,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 ## 10. Next
 
 - More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
-  `QVSAMPLE` (bitstrings of a VQE state), `QCOLLISION`.
+  `QCOLLISION`.
 - A versioned, vendor-neutral specification of the instruction set, with a conformance suite that any
   runtime can be checked against.
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
@@ -686,7 +702,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
-- VQE: `QVSAMPLE`; IBM's error mitigation; larger molecules (N₂ active
+- VQE: IBM's error mitigation; larger molecules (N₂ active
   spaces, 16–20 qubits) with a multithreaded state vector.
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.

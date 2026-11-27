@@ -381,6 +381,30 @@ class Measured:
                 var[i] += max(float((p * vals * vals).sum()) - mean * mean, 0.0) / shots
         return list(e), list(np.sqrt(var)), job_id, round(time.time() - t0, 1)
 
+    def sample(self, angles, shots):
+        """(outcomes, job id, seconds): the ansatz at one angle vector, measured in the Z basis (QVSAMPLE)."""
+        import random
+        import numpy as np
+        from qiskit import transpile
+        from qiskit_ibm_runtime import SamplerV2
+        if not hasattr(self, "zisa"):
+            a, _ = self.p.circuits()
+            qc = a.copy()
+            qc.measure_all()
+            level = int(self.cfg["ibm"].get("optimization_level", 1))
+            self.zisa = transpile(qc, self.dev, optimization_level=level, seed_transpiler=1)
+        nrot = len(self.p.rotations())
+        pub = (self.zisa, np.array([angles], dtype=float)) if nrot else (self.zisa,)
+        t0 = time.time()
+        job = SamplerV2(mode=self.session or self.dev).run([pub], shots=int(shots))
+        job_id = job.job_id() if hasattr(job, "job_id") else None
+        r = job.result()[0]
+        bits = getattr(r.data, self.zisa.cregs[0].name)
+        counts = bits.get_counts(loc=0) if nrot else bits.get_counts()
+        out = [int(k, 2) for k, c in counts.items() for _ in range(c)]
+        random.Random(0).shuffle(out)
+        return out[:int(shots)], job_id, round(time.time() - t0, 1)
+
     def probabilities(self, result, circuit, loc=None):
         """The measured distribution over the 2^n outcomes (bit q = qubit q)."""
         import numpy as np

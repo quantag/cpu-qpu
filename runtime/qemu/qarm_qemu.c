@@ -21,7 +21,7 @@
  *             libqarm (state vector, or a real device on ibm): W0 = 1, or 2: refused
  *   QRAND     X1 = a buffer, W2 = bytes: W0 = 1 (ibm's measurements) or 3 (pseudo-random, libqarm's generator)
  *   QCAPS     X1 = a qarm_capabilities: libqarm's backend, with this plugin's feature bits
- *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
+ *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QVSAMPLE, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
  *             libqarm (qarm_search.c): W0 = 1 and W3 = x, or W0 = 2 for none. If no oracle can be built, W0 stays 0
@@ -50,7 +50,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
        OP_QBV = 0x1A, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
-       OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
+       OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
 static GMutex lock;
@@ -205,6 +205,23 @@ static int qgrad(void)
 
 /* runs argv; its stdout and stderr in *out, *err. posix_spawn, not fork: fork's atfork handlers take QEMU's RCU lock,
  * which waits for this vCPU thread, so a fork from a vCPU callback deadlocks */
+static int qvsample(void)
+{
+    problem *p = find(x(3));
+    int shots = (int)(uint32_t)x(2);
+    if (!p) return 2;
+    if (shots < 1 || shots > (1 << 22)) { note("QVSAMPLE: %d shots", shots); return 2; }
+    double *th = g_new0(double, p->a.params + 1);
+    uint64_t *s = g_new(uint64_t, (size_t)shots);
+    int status = 2;
+    if (!rd(x(1), th, sizeof(double) * p->a.params)) note("QVSAMPLE: the parameters are not readable");
+    else if (qarm_rt_vsample(p->rt, th, shots, s) > 0)
+        status = wr(x(4), s, sizeof *s * (size_t)shots) ? 1 : (note("QVSAMPLE: the samples are not writable"), 2);
+    g_free(th);
+    g_free(s);
+    return status;
+}
+
 static int run(char *const argv[], gchar **out, gchar **err)
 {
     extern char **environ;
@@ -347,7 +364,7 @@ static void qstructure(unsigned op)
 
 static uint32_t features(void)
 {
-    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS
+    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE
            | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON | QARM_F_BV
                             | QARM_F_AMPEST : 0);
 }
@@ -444,6 +461,9 @@ static void packet(unsigned int vcpu, void *udata)
     }
     case OP_QGRAD:
         set_x(0, qgrad());
+        break;
+    case OP_QVSAMPLE:
+        set_x(0, qvsample());
         break;
     case OP_QSESSION:
         qarm_rt_session((uint32_t)x(1) != 0);

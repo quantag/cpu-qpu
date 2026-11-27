@@ -47,6 +47,9 @@
  *   qarm_expect_n(&v, thetas, k, e)    QEXPECTN: k energies for k parameter vectors, one job on a QPU
  *   qarm_grad(&v, theta, grad)         QGRAD: the energy, and its gradient in grad (one value per parameter); exact
  *                                      by adjoint differentiation, or by the parameter-shift rule on a QPU (one job)
+ *   qarm_vsample(&v, theta, shots, s)  QVSAMPLE: shots bitstrings of |psi(theta)> measured in the Z basis (bit q =
+ *                                      qubit q): the answer of a QAOA or VQE run. 1: on the coprocessor, 0:
+ *                                      sampled here, -1: refused
  *   qarm_session(1) / qarm_session(0)  QSESSION: reserve a QPU for the optimizer loop, release it
  *   qarm_vqe_free(&v)                  QVFREE
  *
@@ -75,7 +78,8 @@ typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; u
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
-       QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024 };
+       QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024,
+       QARM_F_VSAMPLE = 2048 };
 
 /* QCIRC's circuits: gates in order on qubits that start at 0; every qubit measured at the end */
 enum { QARM_G_X = 1, QARM_G_Y, QARM_G_Z, QARM_G_H, QARM_G_S, QARM_G_SDG, QARM_G_T, QARM_G_TDG, QARM_G_SX, QARM_G_RX,
@@ -209,6 +213,11 @@ static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples)
 {
     return qarm_rt_circuit(c, shots, samples);
 }
+static inline int qarm_vsample(qarm_vqe *v, const double *theta, int shots, uint64_t *samples)
+{
+    if (!v->handle) return -1;
+    return qarm_rt_vsample((qarm_rt *)v->handle, theta, shots, samples) > 0 ? v->quantum : -1;
+}
 static inline int qarm_rand(void *buf, int n) { return qarm_rt_rand(buf, n); }
 static inline int qarm_caps(qarm_capabilities *caps) { return qarm_rt_caps(caps); }
 static inline void qarm_vqe_free(qarm_vqe *v)
@@ -243,7 +252,7 @@ static double qarm__grad(const qarm_hamiltonian *h, const qarm_ansatz *a, const 
     return qarm_sv_grad(&s, h, a, theta, grad);
 }
 
-/* QCIRC's, QRAND's and QCAPS's classical paths */
+/* QCIRC's, QRAND's, QCAPS's and QVSAMPLE's classical paths */
 static uint64_t qarm__sample_rng = 0x2545F4914F6CDD1DULL;
 static double qarm__uniform(void)
 {
@@ -252,6 +261,25 @@ static double qarm__uniform(void)
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return (double)((z ^ (z >> 31)) >> 11) / 9007199254740992.0;
 }
+static void qarm__draw(qarm_sv *s, int shots, uint64_t *samples)    /* shots outcomes of the state in s */
+{
+    long N = 1L << s->n;
+    for (long b = 0; b < N; b++) s->tr[b] = (b ? s->tr[b - 1] : 0) + s->re[b] * s->re[b] + s->im[b] * s->im[b];
+    for (int k = 0; k < shots; k++) {
+        double u = qarm__uniform() * s->tr[N - 1];
+        long lo = 0, hi = N - 1;
+        while (lo < hi) { long mid = (lo + hi) / 2; if (u < s->tr[mid]) hi = mid; else lo = mid + 1; }
+        samples[k] = (uint64_t)lo;
+    }
+}
+static int qarm__vsample(const qarm_ansatz *a, const double *theta, int shots, uint64_t *samples)
+{
+    if (shots < 0 || a->qubits < 1 || a->qubits > QARM_VQE_MAX_QUBITS) return -1;
+    qarm_sv s = qarm__sv((int)a->qubits);
+    qarm_sv_prepare(&s, a, theta);
+    qarm__draw(&s, shots, samples);
+    return 0;
+}
 static int qarm__run(const qarm_circuit *c, int shots, uint64_t *samples)
 {
     if (c->qubits < 1 || c->qubits > QARM_VQE_MAX_QUBITS || shots < 0) return -1;
@@ -259,14 +287,7 @@ static int qarm__run(const qarm_circuit *c, int shots, uint64_t *samples)
         if (!qarm_sv_gate_ok(&c->g[i], c->qubits)) return -1;
     qarm_sv s = qarm__sv((int)c->qubits);
     qarm_sv_circuit(&s, c);
-    long N = 1L << c->qubits;
-    for (long b = 0; b < N; b++) s.tr[b] = (b ? s.tr[b - 1] : 0) + s.re[b] * s.re[b] + s.im[b] * s.im[b];
-    for (int k = 0; k < shots; k++) {
-        double u = qarm__uniform() * s.tr[N - 1];
-        long lo = 0, hi = N - 1;
-        while (lo < hi) { long mid = (lo + hi) / 2; if (u < s.tr[mid]) hi = mid; else lo = mid + 1; }
-        samples[k] = (uint64_t)lo;
-    }
+    qarm__draw(&s, shots, samples);
     return 0;
 }
 static int qarm__rand(void *buf, int n)
@@ -497,6 +518,21 @@ static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
     return qarm__grad(v->h, v->a, theta, grad);
 }
 
+static inline int qarm_vsample(qarm_vqe *v, const double *theta, int shots, uint64_t *samples)
+{
+    if (v->quantum) {
+        register long x0 __asm__("x0") = 0;                 /* 1: sampled, 2: refused */
+        register const double *x1 __asm__("x1") = theta;
+        register long x2 __asm__("x2") = shots;
+        register long x3 __asm__("x3") = v->handle;
+        register uint64_t *x4 __asm__("x4") = samples;
+        __asm__ volatile(QARM_PACKET(0x02250000) : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+        if (x0 == 1) return 1;
+        if (x0 == 2) return -1;
+    }
+    return qarm__vsample(v->a, theta, shots, samples);
+}
+
 static inline int qarm_session(int open)
 {
     register long x0 __asm__("x0") = 0;
@@ -536,6 +572,10 @@ static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 }
 static inline int qarm_session(int open) { (void)open; return 0; }
 static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples) { return qarm__run(c, shots, samples); }
+static inline int qarm_vsample(qarm_vqe *v, const double *theta, int shots, uint64_t *samples)
+{
+    return qarm__vsample(v->a, theta, shots, samples);
+}
 static inline int qarm_rand(void *buf, int n) { return qarm__rand(buf, n); }
 static inline int qarm_caps(qarm_capabilities *caps) { return qarm__caps(caps); }
 static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
