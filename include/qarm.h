@@ -25,7 +25,16 @@
  *   qarm_session(1) / qarm_session(0)  QSESSION: reserve a QPU for the optimizer loop, release it
  *   qarm_vqe_free(&v)                  QVFREE
  *
- * Other compilers and processors get the classical path only. */
+ *   qarm_expect_n_async(&v, thetas, k) a batch that may still be on the QPU: a qarm_job
+ *   qarm_job_ready(job)                1 done, 0 not yet, -1 failed; never waits
+ *   qarm_job_wait(job, e, err)         the k energies (err may be NULL); frees the job; 1, or -1
+ *
+ * Three builds of the same source:
+ *   plain (any compiler, any CPU)      the classical path only
+ *   arm64 with GCC or clang            Q-ARM packets: the classical path on a CPU, the quantum one under qarm_exec.py
+ *   -DQARM_RUNTIME, linked with libqarm (runtime/libqarm): native, any CPU; VQE on the backend of config.json
+ *                                      (exact, simulator, or a real IBM device over REST). qarm_search is classical
+ *                                      there: its oracle needs qoracle, which is Python. */
 #ifndef QARM_H_INCLUDED
 #define QARM_H_INCLUDED
 #include <stdint.h>
@@ -39,7 +48,50 @@ typedef struct { uint32_t qubits, terms; double constant; const qarm_pauli *t; }
 enum { QARM_X = 1, QARM_H, QARM_CX, QARM_CZ, QARM_RY, QARM_RZ, QARM_PAULI_ROT };
 typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
-typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; long handle; int quantum; } qarm_vqe;
+typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
+
+#if defined(QARM_RUNTIME)
+#include <math.h>
+#include "qarm_rt.h"
+
+static inline int qarm_available(void) { return 0; }
+static inline int qarm_search(int (*f)(int), int bits, int *x)
+{
+    for (long v = 0; v < (1L << bits); v++)
+        if (f((int)v)) { *x = (int)v; return 1; }
+    return 0;
+}
+static inline int qarm_vqe_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_vqe *v)
+{
+    qarm_rt *r = 0;
+    int w = qarm_rt_load(h, a, &r);
+    v->h = h; v->a = a; v->handle = (intptr_t)r; v->quantum = w > 0;
+    return w;
+}
+static inline double qarm_expect(qarm_vqe *v, const double *theta, double *err)
+{
+    double e = NAN, s = -1;
+    if (qarm_rt_expect_n((qarm_rt *)v->handle, theta, 1, 0, &e, &s) < 0) { e = NAN; s = -1; }
+    if (err) *err = s;
+    return e;
+}
+static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double *e)
+{
+    return qarm_rt_expect_n((qarm_rt *)v->handle, thetas, k, 0, e, 0);
+}
+static inline qarm_job *qarm_expect_n_async(qarm_vqe *v, const double *thetas, int k)
+{
+    return qarm_rt_submit((qarm_rt *)v->handle, thetas, k, 0);
+}
+static inline int qarm_job_ready(qarm_job *j) { return qarm_rt_poll(j); }
+static inline int qarm_job_wait(qarm_job *j, double *e, double *err) { return qarm_rt_wait(j, e, err); }
+static inline int qarm_session(int open) { return qarm_rt_session(open); }
+static inline void qarm_vqe_free(qarm_vqe *v)
+{
+    qarm_rt_free((qarm_rt *)v->handle);
+    v->handle = 0; v->quantum = 0;
+}
+#else
 
 #ifndef QARM_VQE_MAX_QUBITS
 #define QARM_VQE_MAX_QUBITS 12
@@ -262,4 +314,30 @@ static inline int qarm_search(int (*f)(int), int bits, int *x)
     return 0;
 }
 #endif
+
+/* without the native runtime a batch is computed at once: the job is only its result */
+#include <stdlib.h>
+struct qarm_job { int k, ok; double *e; };
+typedef struct qarm_job qarm_job;
+static inline qarm_job *qarm_expect_n_async(qarm_vqe *v, const double *thetas, int k)
+{
+    qarm_job *j = (qarm_job *)malloc(sizeof *j);
+    j->k = k;
+    j->e = (double *)malloc(sizeof(double) * (size_t)(k > 0 ? k : 1));
+    j->ok = qarm_expect_n(v, thetas, k, j->e) >= 0;
+    return j;
+}
+static inline int qarm_job_ready(qarm_job *j) { return j && j->ok ? 1 : -1; }
+static inline int qarm_job_wait(qarm_job *j, double *e, double *err)
+{
+    int ok = j->ok;
+    for (int i = 0; i < j->k; i++) {
+        e[i] = j->e[i];
+        if (err) err[i] = 0;
+    }
+    free(j->e);
+    free(j);
+    return ok ? 1 : -1;
+}
+#endif /* QARM_RUNTIME */
 #endif

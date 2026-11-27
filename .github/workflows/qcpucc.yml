@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, qarm-native]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -22,7 +22,7 @@ jobs:
       - name: Tools (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q clang llvm cmake
+          sudo apt-get update -q && sudo apt-get install -y -q clang llvm cmake libcurl4-openssl-dev
           if [ "$(uname -m)" = x86_64 ]; then sudo apt-get install -y -q gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user; fi
       - name: Python packages
         run: python -m pip install unicorn lief capstone numpy "qoracle @ git+https://github.com/quantag/qoracle.git"
@@ -43,6 +43,13 @@ jobs:
         run: python -m tests.test_qarm_exec
       - name: test_qarm_vqe (Q-ARM v2 VQE; Qiskit parts in the job below)
         run: python -m tests.test_qarm_vqe
+      - name: test_libqarm (the native runtime; its ibm backend against a mock of IBM's API in the job below)
+        run: python -m tests.test_libqarm
+      - name: libqarm with CMake
+        shell: bash
+        run: |
+          cmake -S runtime/libqarm -B build/libqarm
+          cmake --build build/libqarm --config Release
   export:
     # the exported circuits in Qiskit and in CUDA-Q itself
     runs-on: ubuntu-latest
@@ -52,7 +59,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Tools
-        run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang llvm gcc-aarch64-linux-gnu libc6-dev-arm64-cross libcurl4-openssl-dev
       - name: Python packages
         run: python -m pip install unicorn lief capstone numpy qiskit qiskit-qasm3-import qiskit-aer qiskit-ibm-runtime cudaq "qoracle @ git+https://github.com/quantag/qoracle.git"
       - name: test_qcpu_export
@@ -63,3 +70,5 @@ jobs:
         run: python -m tests.test_qarm_exec
       - name: test_qarm_vqe on QPU backends
         run: python -m tests.test_qarm_vqe
+      - name: test_libqarm with the mock of IBM's REST API
+        run: python -m tests.test_libqarm
