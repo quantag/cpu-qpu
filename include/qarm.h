@@ -15,6 +15,13 @@
  *                               with f's oracle built from f's own machine code; on a plain CPU, every x in turn.
  *                               Returns 1 and stores x, or 0 if there is none. f returns 0 or 1, calls no other
  *                               function and writes no memory; bits <= 16. Every answer is checked by calling f.
+ *   qarm_min(cost, bits, &x, &v)  QMIN: an x with the least cost(x) (signed), and v = cost(x): Durr-Hoyer, Grover
+ *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
+ *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
+ *                               (that is the search's job), so a quantum answer is right with high probability
+ *   qarm_count(f, bits, &err)   QCOUNT: the number of x with f(x) = 1: quantum counting; err: its error bound, which
+ *                               holds with probability >= 8/pi^2 (0 when
+ *                               counted classically)
  *
  * VQE (section 6 of docs/qarm_v2.md): the program's optimizer runs on the CPU; the coprocessor prepares the
  * ansatz state and measures the energy. On a plain CPU each call computes the energy exactly from the state
@@ -53,7 +60,27 @@ enum { QARM_X = 1, QARM_H, QARM_CX, QARM_CZ, QARM_RY, QARM_RZ, QARM_PAULI_ROT };
 typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
-enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2 };
+enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8 };
+
+/* the classical paths of QMIN and QCOUNT */
+static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)
+{
+    int bx = 0, bv = cost(0);
+    for (long v = 1; v < (1L << bits); v++) {
+        int c = cost((int)v);
+        if (c < bv) { bv = c; bx = (int)v; }
+    }
+    *x = bx;
+    if (value) *value = bv;
+    return 1;
+}
+static inline long qarm__count(int (*f)(int), int bits, double *err)
+{
+    long n = 0;
+    for (long v = 0; v < (1L << bits); v++) n += f((int)v) == 1;
+    if (err) *err = 0;
+    return n;
+}
 
 #if defined(QARM_RUNTIME)
 #include <math.h>
@@ -61,6 +88,8 @@ enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2 };
 
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)
@@ -222,6 +251,37 @@ static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double
     return 0;
 }
 
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = cost;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = 0;
+    __asm__ volatile(QARM_PACKET(0x02150000) : "+r"(x0), "+r"(x3), "+r"(x4) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1 && cost((int)x3) == (int)x4) {             /* the answer's cost checked by cost itself */
+        *x = (int)x3;
+        if (value) *value = (int)x4;
+        return 1;
+    }
+    return qarm__min(cost, bits, x, value);
+}
+
+static inline long qarm_count(int (*f)(int), int bits, double *err)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = f;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    register double d0 __asm__("d0") = 0;
+    __asm__ volatile(QARM_PACKET(0x02160000) : "+r"(x0), "+r"(x3), "+w"(d0) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1) {
+        if (err) *err = d0;
+        return x3;
+    }
+    return qarm__count(f, bits, err);
+}
+
 static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 {
     if (v->quantum) {
@@ -277,6 +337,8 @@ static inline int qarm_session(int open) { (void)open; return 0; }
 static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)

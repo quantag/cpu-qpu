@@ -54,8 +54,32 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
+| `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
+| `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
+| `0x20`–`0x26` | VQE | section 6 | |
+
+**The instruction set, planned.** Each algorithm family is one instruction. Its input is an ordinary C
+function or table. Each has a classical path in `qarm.h`, a check of the answer where one exists, and a
+`QAVAIL` feature bit.
+
+| opcode | name | input | result | check |
+|---|---|---|---|---|
+| `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
+| `0x17` | `QAMPEST` | `g(x)` in [0, 1] | the mean of g (amplitude estimation: Monte Carlo, risk) | error bound |
+| `0x18` | `QPERIOD` | `f(x)` | r with f(x + r) = f(x) (Shor's core: factoring, discrete logarithms) | f(x + r) = f(x) |
+| `0x19` | `QSIMON` | `f(x)` | s with f(x) = f(x ⊕ s) | f(x ⊕ s) = f(x) |
+| `0x1A` | `QBV` | `f(x) = s·x` | s (Bernstein–Vazirani) | f on the unit vectors |
+| `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
+| `0x1C` | `QRAND` | n | random bits from the quantum device | — |
+| `0x25` | `QVSAMPLE` | VQE tables | bitstrings of the prepared state | — |
+| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ by Trotter steps | exact for small cases |
+| `0x30` | `QCIRC` | a gate table | samples of any circuit given as data | — |
+| `0x31` | `QCAPS` | a buffer | the device: qubits, error rates, backend | — |
+
+QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
+instructions.
 
 The C functions in `include/qarm.h` set `W0 = 0` before the packet. A plain CPU leaves it at 0, which
 means "not executed", and the function takes the classical path. Version 1 packets (gates on a
@@ -80,6 +104,41 @@ reading constant tables. It must not call other functions or write memory, so it
 inlined (`static inline __attribute__((always_inline))`), and the build must not use vector (NEON)
 instructions: build with `-O1`. At `-O2` both GCC and clang vectorize such loops. The runtime names the
 first instruction it cannot translate.
+
+### `QMIN` and `QCOUNT`
+
+Both build their oracle from the program's own functions, as `QSEARCH` does. Both have a classical path
+in the same binary: every input in turn.
+
+- **`QMIN`** (Dürr–Høyer 1996) takes `int cost(int x)` and returns an x with the least cost.
+  - qoracle builds a **compute oracle** |x⟩|0⟩ → |x⟩|cost(x)⟩ from `cost`'s machine code. Its result
+    register is 32 bits and signed; when the top bits are always 0, they are dropped and the value is
+    unsigned.
+  - From a random x, Grover searches (BBHT) look for an x cheaper than the best so far. This stops when
+    a search fails, or after 22.5·√N + 1.4·log₂²N oracle calls.
+  - `qarm.h` checks the answer's cost by calling `cost`. That it is the least cannot be checked cheaply;
+    that is the search's job. The answer is right with high probability.
+  - On a QPU each search's oracle is "cost(x) < t", for a threshold t: the compute oracle, a comparator
+    with a constant, and uncomputation. The runtimes simulate it today.
+- **`QCOUNT`** (Brassard–Høyer–Tapp 1998) takes a predicate and estimates its number of solutions M:
+  - phase estimation of the Grover operator, whose eigenphases are ±2θ with sin²θ = M/N;
+  - t = ⌈bits/2⌉ + 3 precision qubits, and 2ᵗ − 1 controlled Grover iterations;
+  - the error bound 2π√(M(N−M))/2ᵗ + π²N/4ᵗ holds with probability at least 8/π².
+  - The runtimes draw the outcome from its exact distribution.
+
+`examples/qarm/partition.c` is number partitioning, the classic NP-hard QUBO, as ordinary C:
+
+```
+$ python3 qarm_exec.py partition
+[qarm: QMIN imbalance, 8 bits: Durr-Hoyer with a 997-qubit, 4589-gate compute oracle (31 result bits) from imbalance's machine code: x = 195, imbalance(x) = 1, ...]
+best split: {13 7 3 8} vs {9 4 11 6}: difference 1
+[qarm: QCOUNT nearly_balanced, 8 bits: quantum counting with 7 precision qubits, 127 controlled Grover iterations, ...]
+splits within 3 of balance: about 33 (+- 4.4; QCOUNT)
+```
+
+The plain CPU tries all 256 splits: difference 1, and 32 nearly balanced splits. Under QEMU the plugin
+asks the helper for a compute oracle (`tools/qarm_oracle.py --kind compute`), and libqarm runs
+Dürr–Høyer and the counting (`qarm_rt_min`, `qarm_rt_count`).
 
 ## 4. The runtime: `qarm_exec.py`
 

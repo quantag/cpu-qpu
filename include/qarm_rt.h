@@ -39,6 +39,8 @@ const char *qarm_rt_oracle_name(const qarm_oracle *o);
 int qarm_rt_oracle_qubits(const qarm_oracle *o);
 int qarm_rt_oracle_gates(const qarm_oracle *o);
 int qarm_rt_search(const qarm_oracle *o, int *x, char *report, size_t len);          /* 1 x found, 2 none, -1 */
+int qarm_rt_min(const qarm_oracle *o, int *x, long *value, char *report, size_t len);  /* 1, or -1 (a compute oracle) */
+int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report, size_t len);       /* 1, or -1 */
 
 #ifdef __cplusplus
 }

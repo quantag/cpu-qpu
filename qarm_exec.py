@@ -38,9 +38,9 @@ HEAP, HEAP_SIZE = 0x6f0000000, 0x400000
 STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled by this runtime
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
-OP_QAVAIL, OP_QSEARCH = 0x10, 0x11
+OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT = 0x10, 0x11, 0x15, 0x16
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -325,9 +325,13 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 3)                       # W1: features, QSEARCH | VQE
+            self.set_x(1, 15)                      # W1: features, QSEARCH | VQE | QMIN | QCOUNT
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QMIN:
+            self.qmin(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QCOUNT:
+            self.qcount(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
         mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
@@ -366,6 +370,42 @@ class Runtime:
             self.note(f"QSEARCH {name}, {bits} bits: Grover's search with a {circuit['qubits']}-qubit, "
                       f"{circuit['gates']}-gate oracle from {name}'s machine code: x = {x} after {calls} oracle "
                       f"calls in {rounds} rounds, checked by running {name}")
+
+    def qmin(self, fn, bits):
+        """QMIN: X1 = cost, W2 = bits; W0 = 1, W3 = an x with the least cost(x), W4 = cost(x) (signed). Durr-Hoyer:
+        Grover searches for an x cheaper than the best so far, with cost's compute oracle from its machine code."""
+        name = self.p.functions.get(fn, f"function at {fn:#x}")
+        if not 1 <= bits <= 16:
+            raise QarmError(f"QMIN {name}: bits = {bits}; 1 to 16")
+        circuit = compute_oracle(self, fn, name, bits)
+        values = oracle_values(circuit, bits)
+        x, calls, searches = durr_hoyer(values, bits)
+        v = self.call(fn, x)
+        v = v - (1 << 32) if v >= 1 << 31 else v
+        if v != values[x]:
+            raise QarmError(f"QMIN {name}: the oracle gives {values[x]} for x = {x}, {name} gives {v}")
+        self.set_x(0, 1)
+        self.set_x(3, x)
+        self.set_x(4, v & 0xFFFFFFFF)
+        self.note(f"QMIN {name}, {bits} bits: Durr-Hoyer with a {circuit['qubits']}-qubit, {circuit['gates']}-gate "
+                  f"compute oracle ({circuit['out_bits']} result bits) from {name}'s machine code: x = {x}, "
+                  f"{name}(x) = {v}, {calls} oracle calls in {searches} Grover searches (simulated)")
+
+    def qcount(self, fn, bits):
+        """QCOUNT: X1 = f, W2 = bits; W0 = 1, X3 = the estimated number of x with f(x) = 1, D0 = its error bound.
+        Quantum counting: phase estimation of the Grover operator (simulated from its exact outcome distribution)."""
+        name = self.p.functions.get(fn, f"function at {fn:#x}")
+        if not 1 <= bits <= 16:
+            raise QarmError(f"QCOUNT {name}: bits = {bits}; 1 to 16")
+        circuit = phase_oracle(self, fn, name, bits)
+        sign = oracle_signs(circuit, bits)
+        est, bound, t, calls = quantum_count(int((sign < 0).sum()), bits)
+        self.set_x(0, 1)
+        self.set_x(3, est)
+        self.set_d(0, bound)
+        self.note(f"QCOUNT {name}, {bits} bits: quantum counting with {t} precision qubits, {calls} controlled Grover "
+                  f"iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
+                  f"(error bound {bound:.1f}; simulated)")
 
     def qsearch_qpu(self, fn, name, bits, circuit):
         """QSEARCH on config.json's backend: one job, then the answers checked by running f."""
@@ -708,10 +748,14 @@ def oracle_signs(circuit, bits):
 def grover(circuit, bits, check, seed=None):
     """Grover's search for an unknown number of solutions (Boyer, Brassard, Hoyer, Tapp 1998), simulated exactly on
     the argument register; each measured x is checked. Returns (x or None, oracle calls, rounds)."""
+    return grover_signs(oracle_signs(circuit, bits), bits, check, seed)
+
+
+def grover_signs(sign, bits, check, seed=None, rng=None):
+    """BBHT on a sign vector (-1 for the marked x)."""
     import numpy as np
     N = 1 << bits
-    sign = oracle_signs(circuit, bits)
-    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    rng = rng or random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
     m, root, calls, rounds = 1.0, math.sqrt(N), 0, 0
     while calls <= 4.5 * root + 4:
         rounds += 1
@@ -728,6 +772,110 @@ def grover(circuit, bits, check, seed=None):
             return x, calls, rounds
         m = min(m * 6 / 5, root)
     return None, calls, rounds
+
+
+def compute_oracle(rt, fn, name, bits):
+    """qoracle's compute oracle of a cost function: |x>|0> -> |x>|cost(x)>, from its machine code."""
+    try:
+        import qoracle
+        from qoracle import frontend
+    except ImportError:
+        raise QarmError("QMIN needs qoracle: python3 -m pip install git+https://github.com/quantag/qoracle")
+    lo, size = rt.p.code_segment
+    page = lo & ~0xFFF
+    section = bytes(rt.mu.mem_read(page, ((lo + size + 0xFFF) & ~0xFFF) - page))
+    data = [(a & ~0xFFF, bytes(rt.mu.mem_read(a & ~0xFFF, ((a + s + 0xFFF) & ~0xFFF) - (a & ~0xFFF))), seg)
+            for a, s, _, seg in rt.p.segments if not (a <= lo < a + s)]
+    image = frontend.Image(code=rt.p.function_bytes(fn, rt.mu), entry=fn, section=section, section_addr=page,
+                           data=data)
+    load = frontend.load
+    frontend.load = lambda obj, function: image
+    try:
+        o = qoracle.build(name, name, [qoracle.Arg(name="x", bits=bits)], out_bits=32)
+    except qoracle.OracleError as e:
+        raise QarmError(f"{name}: qoracle: {e}")
+    finally:
+        frontend.load = load
+    c = o.circuit
+    regs = dict((n, (f, k)) for n, f, k in c.regs)
+    return {"gates": len([g for g in c.gates if g[0] != "gphase"]), "qubits": c.nqubits, "list": c.gates,
+            "n": c.nqubits, "first": regs["x"][0], "out_first": regs["out"][0], "out_bits": regs["out"][1]}
+
+
+def oracle_values(circuit, bits):
+    """cost(x) for every x: the compute oracle's gates on all inputs at once (bit planes); work qubits checked.
+    A 32-bit result is signed; with constant top bits dropped (always 0) it is unsigned."""
+    import numpy as np
+    N = 1 << bits
+    xs = np.arange(N, dtype=np.int64)
+    q = [np.zeros(N, dtype=bool) for _ in range(circuit["n"])]
+    for b in range(bits):
+        q[circuit["first"] + b] = ((xs >> b) & 1).astype(bool)
+    for g in circuit["list"]:
+        if g[0] == "x":
+            q[g[1]] = ~q[g[1]]
+        elif g[0] == "cx":
+            q[g[2]] = q[g[2]] ^ q[g[1]]
+        elif g[0] == "ccx":
+            q[g[3]] = q[g[3]] ^ (q[g[1]] & q[g[2]])
+    lo, w = circuit["out_first"], circuit["out_bits"]
+    for i in range(circuit["n"]):
+        if lo <= i < lo + w:
+            continue
+        inp = circuit["first"] <= i < circuit["first"] + bits
+        want = ((xs >> (i - circuit["first"])) & 1).astype(bool) if inp else np.zeros(N, dtype=bool)
+        if (q[i] != want).any():
+            raise QarmError("the compute oracle does not return its work qubits to 0")
+    v = np.zeros(N, dtype=np.int64)
+    for b in range(w):
+        v |= q[lo + b].astype(np.int64) << b
+    if w == 32:
+        v = np.where(v >= 1 << 31, v - (1 << 32), v)
+    return v
+
+
+def durr_hoyer(values, bits, seed=None):
+    """The least value's index (Durr, Hoyer 1996): from a random x, Grover searches (BBHT) for an x with a smaller
+    value, until none is found within the budget 22.5 sqrt(N) + 1.4 log2(N)^2. Returns (x, oracle calls, searches)."""
+    import numpy as np
+    N = 1 << bits
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    best = int(rng.random() * N)
+    calls, searches, budget = 0, 0, 22.5 * math.sqrt(N) + 1.4 * bits * bits
+    while calls < budget:
+        sign = np.where(values < values[best], -1, 1)
+        searches += 1
+        x, c, _ = grover_signs(sign, bits, lambda v: values[v] < values[best], rng=rng)
+        calls += c + 1
+        if x is None:
+            break
+        best = x
+    return best, calls, searches
+
+
+def quantum_count(M, bits, seed=None):
+    """Quantum counting (Brassard, Hoyer, Tapp 1998), simulated: phase estimation of the Grover operator with t
+    precision qubits; the outcome y drawn from its exact distribution. Returns (estimate, error bound, t, calls)."""
+    N = 1 << bits
+    t = (bits + 1) // 2 + 3
+    T = 1 << t
+    theta = math.asin(math.sqrt(M / N))            # the Grover operator's eigenphases: +-2 theta
+    phi = theta / math.pi
+    def fejer(d):
+        d = (d + T / 2) % T - T / 2
+        if abs(d) < 1e-12:
+            return 1.0
+        return (math.sin(math.pi * d) / (T * math.sin(math.pi * d / T))) ** 2
+    p = [0.5 * fejer(y - T * phi) + 0.5 * fejer(y + T * phi) for y in range(T)]
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    u, acc, y = rng.random() * sum(p), 0.0, 0
+    for y in range(T):
+        acc += p[y]
+        if u < acc:
+            break
+    est = N * math.sin(math.pi * y / T) ** 2
+    bound = 2 * math.pi * math.sqrt(est * (N - est)) / T + math.pi ** 2 * N / T ** 2
+    return int(round(est)), bound, t, T - 1
 
 
 def qiskit_oracle(circuit):
