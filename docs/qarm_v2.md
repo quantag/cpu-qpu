@@ -697,6 +697,48 @@ or build the program natively against libqarm (section 7).
 
 CI builds QEMU 10.2.4 once and caches it.
 
+### Binaries built without qarm.h: `tools/qarm_patch.py`
+
+A program does not need to be written for Q-ARM. Many programs already contain a brute-force search: a
+loop that tries every candidate until a predicate accepts one, or keeps the cheapest. `tools/qarm_patch.py`
+rewrites such a binary, ELF for AArch64, after it was built:
+
+```
+$ aarch64-linux-gnu-gcc -O1 examples/qarm/legacy_search.c -o legacy_search        # no qarm.h in it
+$ python3 tools/qarm_patch.py legacy_search --search find_key=valid_key:12 \
+                                            --min cheapest_route=route_cost:12 -o legacy_search.qarm
+qarm_patch: find_key (0x17c4): QSEARCH on valid_key (0x1798), 12 bits; the instruction at 0x17c4 (stp x29, x30, [sp, #-0x20]!) moved to the trampoline at 0x22000
+qarm_patch: cheapest_route (0x1818): QMIN on route_cost (0x1800), 12 bits; ...
+$ qemu-aarch64 -plugin libqarm-qemu.so legacy_search.qarm
+[qarm-qemu: QSEARCH valid_key, 12 bits: oracle of 92 qubits and 345 gates from the machine code; Grover (BBHT) found x = 90 with 161 oracle calls in 23 rounds (simulated: ...)]
+[qarm-qemu: QMIN route_cost, 12 bits: compute oracle of 193 qubits and 758 gates (32 result bits) from the machine code; Durr-Hoyer found x = 1381, value 0, with 626 oracle calls in 8 Grover searches (simulated)]
+key: 90 (valid)
+cheapest route: 1381 (cost 0)
+```
+
+`--search FUNC=PRED:BITS` states that `FUNC` returns some x < 2^BITS with `PRED(x) = 1`.
+`--min FUNC=COST:BITS` states that it returns an x with the least `COST(x)`. The statement is the
+user's; the tool cannot prove it.
+
+The patch adds an executable segment with one trampoline per function. `FUNC`'s first instruction
+becomes a `B` to the trampoline, which:
+1. saves the arguments;
+2. emits the `QSEARCH` or `QMIN` packet on `PRED`;
+3. checks the runtime's answer by calling `PRED`, the program's own code;
+4. returns the answer.
+
+When the packet is not executed (a plain CPU), declined, finds nothing, or the check fails, the
+trampoline restores the arguments. It then runs the moved instruction and branches back into `FUNC`'s
+own loop. The patched binary behaves as before on every AArch64 CPU.
+
+The patch is careful about the prologue:
+- A `BTI` or `PACIASP` landing pad stays in place. With `PACIASP` the trampoline authenticates the
+  return address before it returns.
+- Every branch is direct, so BTI-guarded pages need no new landing pads.
+- A PC-relative first instruction is refused.
+
+`qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
+
 ## 9. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:

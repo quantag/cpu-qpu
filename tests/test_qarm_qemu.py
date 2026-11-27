@@ -23,6 +23,8 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
      evolution): the same table as under qarm_exec.py.
  11. The conformance program (docs/qarm_isa.md): 13 of 13 under the plugin; without the oracle helper the
      oracle instructions are not claimed (skipped) and the rest pass.
+ 12. tools/qarm_patch.py: examples/qarm/legacy_search.c, built without qarm.h and patched, runs QSEARCH and QMIN
+     under the plugin (the trampoline's packets in a segment the tool added); without the plugin, the original loops.
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
@@ -190,6 +192,22 @@ def main():
         skips = re.findall(r"SKIP (\w+): \w+ not claimed", p.stdout)
         assert p.returncode == 0 and sorted(skips) == sorted(["QSEARCH", "QMIN", "QCOUNT", "QAMPEST", "QPERIOD", "QSIMON",
                                                              "QBV"]), p.stdout
+        lexe, lout = os.path.join(d, "legacy"), os.path.join(d, "legacy.qarm")
+        sh(cc + ["-O1", os.path.join(EX, "legacy_search.c"), "-o", lexe])
+        sh([sys.executable, os.path.join(ROOT, "tools", "qarm_patch.py"), lexe, "--search", "find_key=valid_key:12",
+            "--min", "cheapest_route=route_cost:12", "-o", lout])
+        want = "key: 90 (valid)\ncheapest route: 1381 (cost 0)\n"
+        p, r = sh(qemu() + [lout]), sh([q] + sysroot + [lout])
+        assert p.stdout == want and r.stdout == want, (p.stdout, r.stdout)
+        assert "QSEARCH valid_key, 12 bits" in p.stderr and "QMIN route_cost, 12 bits" in p.stderr, p.stderr
+        sh(cc + ["-O1", "-mbranch-protection=standard", os.path.join(EX, "legacy_search.c"), "-o", lexe])
+        sh([sys.executable, os.path.join(ROOT, "tools", "qarm_patch.py"), lexe, "--search", "find_key=valid_key:12",
+            "--min", "cheapest_route=route_cost:12", "-o", lout])
+        p = sh([q, "-cpu", "max"] + sysroot + ["-plugin", plugin + ",quiet=on", lout])     # PAC and BTI enforced
+        assert p.stdout == want, p.stdout
+        print("12) qarm_patch: legacy_search (no qarm.h) patched: QSEARCH and QMIN under the plugin; without it the "
+              "original loops; the same output; built with -mbranch-protection=standard (PACIASP kept, AUTIASP before the "
+              "trampoline's RET), the same under -cpu max")
         print("11) conformance: 13 of 13 under the plugin; without the oracle helper the 7 oracle instructions are "
               "not claimed, the other 6 tests pass")
     print("PASS")

@@ -68,7 +68,7 @@ class Program:
         b = lief.parse(path)
         if b is None:
             raise QarmError(f"{path}: not an executable lief can read")
-        self.path, self.segments, self.imports, self.rebases = path, [], [], []
+        self.path, self.segments, self.imports, self.rebases, self.code_ranges = path, [], [], [], []
         self.functions = {}                                  # address -> name
         if isinstance(b, lief.MachO.Binary):
             self._macho(b, lief)
@@ -103,6 +103,7 @@ class Program:
         self.starts = sorted(starts)
         code = b.get_section("__text")
         self.text = (code.virtual_address, code.size)                  # the code: function ends, packets
+        self.code_ranges.append(self.text)
         self.code_segment = (text.virtual_address, text.virtual_size)  # __TEXT: also constant data
 
     def _elf(self, b, lief):
@@ -114,6 +115,8 @@ class Program:
         for s in b.segments:
             if s.type == lief.ELF.Segment.TYPE.LOAD:
                 self.segments.append((self.base + s.virtual_address, s.virtual_size, bytes(s.content), "LOAD"))
+                if s.has(lief.ELF.Segment.FLAGS.X):                # packets may be in any executable segment
+                    self.code_ranges.append((self.base + s.virtual_address, s.physical_size))
         mains = [s for s in b.symbols if s.name == "main" and s.value]
         if not mains:
             raise QarmError(f"{self.path}: no symbol main (do not strip the program)")
@@ -261,7 +264,12 @@ class Runtime:
         return a
 
     def find_packets(self):
-        lo, size = self.p.text
+        found = []
+        for lo, size in self.p.code_ranges or [self.p.text]:
+            found += self._packets_in(lo, size)
+        return sorted(set(found))
+
+    def _packets_in(self, lo, size):
         code = bytes(self.mu.mem_read(lo, size))
         found = []
         for off in range(0, len(code) - 31, 4):
@@ -757,6 +765,11 @@ def _memset(rt):
     rt.ret(d)
 
 
+def _bzero(rt):
+    rt.mu.mem_write(rt.x(0), bytes(rt.x(1)))
+    rt.ret(0)
+
+
 def _memcpy(rt):
     d, s, n = rt.x(0), rt.x(1), rt.x(2)
     rt.mu.mem_write(d, bytes(rt.mu.mem_read(s, n)))
@@ -826,7 +839,7 @@ MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp"
 LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
         "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
-        "__memset_chk": _memset, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
+        "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
         "fputs": _fputs, "fwrite": _fwrite, "fflush": _fflush}
 STDOUT_FILE, STDERR_FILE = 0x5100, 0x5200      # what the program sees as FILE *stdout, *stderr
 DATA_IMPORTS = {"__stack_chk_guard": 0x2F8A5C3E91D04B76, "stdout": STDOUT_FILE, "stderr": STDERR_FILE,

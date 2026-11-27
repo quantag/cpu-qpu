@@ -297,6 +297,10 @@ Some algorithms need no new instruction:
 
 They are part of `include/qarm.h`, not of the instruction set.
 
+A program also need not include the library. A binary rewriter can emit the packets for it, as
+`tools/qarm_patch.py` does for brute-force search functions in finished ELF binaries. The rewriter then
+takes on the library's obligations: the check and the classical path.
+
 ### 7.3–7.6 Reserved
 
 | opcode | name | for |

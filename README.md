@@ -36,6 +36,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | Minimum, counting, mean, period, hidden shift and string, with C functions as oracles | `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Any circuit as a C table, quantum random bytes, the device's capabilities | `QCIRC`, `QRAND`, `QCAPS` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Hamiltonian time evolution (Trotter tables, many times in one job) | `qarm_evolve_n` on `QVLOAD`, `QEXPECTN` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| Quantum search and minimum in a binary built **without** qarm.h: the brute-force function redirected | `tools/qarm_patch.py --search FUNC=PRED:BITS --min FUNC=COST:BITS` | [qarm_patch](docs/qarm_v2.md#binaries-built-without-qarmh-toolsqarm_patchpy) |
 | An open specification of the instruction set, and a conformance program for runtimes | [`docs/qarm_isa.md`](docs/qarm_isa.md), `tests/conformance` | [the spec](docs/qarm_isa.md) |
 | VQE: a molecule's ground-state energy, the optimizer in C; QAOA and its answer's bitstrings | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QGRAD`, `QVSAMPLE`, `QSESSION`; `tools/qarm_molecule.py` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
@@ -146,6 +147,7 @@ cell k), `--mem=1,2,3` to initialise user data cells (32-bit), `-v`, `--report P
 | `examples/qarm/hidden.c` | Q-ARM `QSIMON` and `QBV`: the hidden shift and the hidden string of two C functions |
 | `examples/qarm/maxcut_qaoa.c` | Q-ARM QAOA for MaxCut: cost and layers as VQE tables, L-BFGS with `QGRAD`, then `QVSAMPLE` draws the cuts (the largest, 10, in about 37% of shots) |
 | `examples/qarm/spin_chain.c` | Q-ARM time evolution: a quench of the Ising chain (8 spins), Trotter tables on `QVLOAD` and `QEXPECTN`, 13 times in one batch, on the exact curve to 3.4·10⁻⁴ |
+| `examples/qarm/legacy_search.c` | an ordinary program, no Q-ARM in it: `tools/qarm_patch.py` makes its brute-force key search and cheapest-route loop run as QSEARCH and QMIN |
 | `examples/qarm/ghz.c` | Q-ARM `QCIRC`, `QRAND`, `QCAPS`: a GHZ state and a Toffoli truth table given as gate tables, random bytes, the device |
 | `examples/qarm/pi.c` | Q-ARM `QAMPEST`: pi by amplitude estimation, the quantum replacement for Monte Carlo, from a C function |
 | `examples/qarm/partition.c` | Q-ARM `QMIN` and `QCOUNT`: number partitioning (an NP-hard QUBO) as plain C; oracles from its compiled functions |
