@@ -2,7 +2,7 @@
 
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
-extension, and no claim of a speedup today (section 10).
+extension, and no claim of a speedup today (section 11).
 
 ## 1. The idea
 
@@ -337,7 +337,64 @@ errors. It is no proof that IBM's service accepts the same requests: that takes 
 | `ibm` via the mock, Fez's errors, H₂ | −1.1330 Ha (+4.3 mHa), 5 jobs in a session |
 | the async program on the mock | polls the job while it is queued and running |
 
-## 8. What is checked
+## 8. Q-ARM under QEMU
+
+The third way to run a Q-ARM program, after `qarm_exec.py` (section 4) and a libqarm build (section 7):
+`runtime/qemu` is a plugin for QEMU's user-mode emulator. It runs **the ordinary arm64 build**, the same
+bytes that run on a plain ARM CPU and under `qarm_exec.py`, with Linux's real C library and libqarm as the
+coprocessor:
+
+```
+$ aarch64-linux-gnu-gcc -O1 -iquote include examples/qarm/h2_vqe.c -o h2_vqe -lm
+$ cmake -S runtime/qemu -B build/qemu -DQEMU_PLUGIN_INCLUDE=$HOME/qemu/include && cmake --build build/qemu
+$ qemu-aarch64 -L /usr/aarch64-linux-gnu -plugin build/qemu/libqarm-qemu.so ./h2_vqe
+$ qemu-aarch64 -plugin build/qemu/libqarm-qemu.so,config=config.json ./h2_vqe     # a real IBM device
+```
+
+`-L` points QEMU at the arm64 libraries on an x86-64 host; on an arm64 Linux host it is not needed.
+The plugin's options are `config=FILE` (as `QARM_CONFIG`), `backend=exact|simulator|ibm` (as
+`QARM_BACKEND`) and `quiet=on`.
+
+**How it works.** QEMU translates the program into host code a block at a time and tells the plugin
+about each block.
+- The plugin instruments every `B .+32`, the first word of a packet.
+- When one executes and the next word is the `QARM` magic, the plugin reads X1–X4 with
+  `qemu_plugin_read_register` and the Hamiltonian and ansatz tables with `qemu_plugin_read_memory_vaddr`.
+- It calls libqarm, then writes W0, X3, D0/D1 (`v0`/`v1`, or `z0`/`z1` on a CPU with SVE) and the output
+  arrays back.
+- The branch then skips the packet, as it does on a plain CPU.
+
+An ordinary `B .+32` without the magic is left alone. Writing registers needs QEMU 10.1 or newer, whose
+plugin API has `qemu_plugin_write_register`.
+
+**What it adds over `qarm_exec.py`:**
+- **The real C library.** `examples/qarm/vqe_from_file.c` reads its Hamiltonian with `fopen`, `fgets` and
+  `sscanf`, and uses `malloc`, `qsort` and `snprintf`. It runs under QEMU; `qarm_exec.py`, with its small
+  C library, stops at `fopen`.
+- **Speed.** QEMU compiles the guest code instead of hooking it from Python: `h2_vqe` takes 0.04 s against
+  0.47 s, and the gap grows with the program's own work.
+
+**`QSEARCH`** is not in the plugin yet: its oracle is built from the function's machine code by qoracle,
+which is Python. The plugin leaves the packet unexecuted, so `qarm_search` takes its classical path. For
+that reason `QAVAIL` now also returns the runtime's features in `W1`, read by `qarm_features()`:
+`QARM_F_SEARCH` (1) and `QARM_F_VQE` (2). `qarm_exec.py` returns 3 and the plugin returns 2, so a program
+can say which path it took. `tiny_search` prints `classical search` under the plugin, and `Q-ARM QSEARCH`
+under `qarm_exec.py`.
+
+**Limits.** QEMU's user mode runs Linux programs on a Linux host. On a Mac, use a Linux VM or container,
+or build the program natively against libqarm (section 7).
+
+`tests/test_qarm_qemu.py` covers:
+- `h2_vqe` gives the same output as under `qarm_exec.py`, on `-cpu cortex-a57` and on `-cpu max` (SVE);
+- every ansatz operation agrees to 1e-9;
+- `vqe_from_file` runs under QEMU, while `qarm_exec.py` refuses it;
+- `QAVAIL`'s features, and `backend=simulator`;
+- without the plugin, the classical path;
+- with Qiskit and libcurl, the `ibm` backend through the mock of IBM's API.
+
+CI builds QEMU 10.2.4 once and caches it.
+
+## 9. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:
 
@@ -361,12 +418,14 @@ errors. It is no proof that IBM's service accepts the same requests: that takes 
 `tests/test_libqarm.py`, with the host's own compiler (Linux, macOS, Windows without libcurl): the cases
 in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcurl.
 
-## 9. Next
+## 10. Next
 
 - More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
   `QPERIOD` (period finding).
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
-- libqarm: `QSEARCH` from a build-time oracle file; a first run on a real IBM device, recorded here;
+- `QSEARCH` from a build-time oracle file, for libqarm and the QEMU plugin alike;
+- the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
+- libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
 - VQE: `QGRAD` and `QVSAMPLE`; IBM's error mitigation; a build-time tool that writes the tables of
   a molecule as a C header (PySCF, Jordan–Wigner or parity mapping).
@@ -374,7 +433,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
   becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.
 
-## 10. What this is and is not
+## 11. What this is and is not
 
 It does not make programs faster today: the classical part runs as fast as before, but a quantum
 instruction is simulated, and on hardware Grover's search pays off only for large searches. What it

@@ -35,6 +35,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QSESSION` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
+| The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
 
 ## Quick start
 
@@ -846,6 +847,21 @@ $ QARM_CONFIG=config.json ./h2_vqe          # config.json's IBM device
 so the CPU keeps working while a job is queued. The `ibm` backend is tested against a local mock of
 IBM's API that rejects any non-ISA circuit; it has not run on a real device yet
 ([`docs/qarm_v2.md`](docs/qarm_v2.md#7-the-native-runtime-libqarm)).
+
+### Under QEMU: the same arm64 binary, with the real C library
+
+`runtime/qemu` is a plugin for `qemu-aarch64` (QEMU 10.1 or newer). It runs the ordinary arm64 build of a
+Q-ARM program, the same bytes as on a plain ARM CPU, and executes its Q-ARM packets with libqarm:
+
+```
+$ cmake -S runtime/qemu -B build/qemu -DQEMU_PLUGIN_INCLUDE=$HOME/qemu/include && cmake --build build/qemu
+$ qemu-aarch64 -L /usr/aarch64-linux-gnu -plugin build/qemu/libqarm-qemu.so ./h2_vqe
+$ qemu-aarch64 -plugin build/qemu/libqarm-qemu.so,config=config.json ./h2_vqe     # a real IBM device
+```
+
+Unlike `qarm_exec.py`, it runs programs that use the real C library: files, `malloc`, `qsort`
+(`examples/qarm/vqe_from_file.c`). It is also about 12x faster on `h2_vqe`. `QSEARCH` takes its classical
+path there for now ([`docs/qarm_v2.md`](docs/qarm_v2.md#8-q-arm-under-qemu)).
 No speedup today; the point is the model: one binary, the quantum path where a coprocessor exists,
 the classical path elsewhere, both computing the same function.
 
@@ -1195,6 +1211,7 @@ python3 -m tests.test_qcpu_search                # qcpu_search(): Grover's searc
 python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on a CPU and under qarm_exec.py (and on QPU backends)
 python3 -m tests.test_qarm_vqe                   # Q-ARM v2 VQE: H2 on a CPU, the runtime, Aer, IBM noise models
 python3 -m tests.test_libqarm                    # libqarm, native: exact, simulator, ibm against a mock of IBM's API
+QARM_QEMU=~/qemu/bin/qemu-aarch64 python3 -m tests.test_qarm_qemu   # Q-ARM in QEMU 10.1+ (the plugin of runtime/qemu)
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)
