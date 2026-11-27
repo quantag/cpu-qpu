@@ -10,7 +10,7 @@
   3. Errors: a predicate that calls another function (exit 70, the reason); a missing library function.
      3b. QMIN and QCOUNT: examples/qarm/partition.c (number partitioning), oracles from imbalance()'s and
      nearly_balanced()'s machine code; on the plain CPU every split is tried.
-     3c. QPERIOD, QSIMON, QBV: examples/qarm/shor.c (factoring 15 and 21) and hidden.c.
+     3c. QPERIOD, QSIMON, QBV, QCOLLISION: examples/qarm/shor.c (factoring 15 and 21), hidden.c, collision.c.
      3d. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c (a GHZ state, a Toffoli truth table), the circuit tables read
      from the program's memory; with 4's packages, the same binary on the noise model of Fez.
   5. The conformance program (tests/conformance/qarm_conformance.c, docs/qarm_isa.md): every test passes under
@@ -142,12 +142,13 @@ def main():
         print(f"3b) QMIN and QCOUNT (examples/qarm/partition.c): a split of difference 1; about {n} +- {err} nearly "
               "balanced splits (32 counted on the CPU)")
 
-        for ex, want in (("shor", ["15 = 3 x 5", "21 = 7 x 3"]), ("hidden", ["shift is 0x2d", "string is 0x35"])):
+        for ex, want in (("shor", ["15 = 3 x 5", "21 = 7 x 3"]), ("hidden", ["shift is 0x2d", "string is 0x35"]),
+                         ("collision", ["tag(0x"])):
             sexe = os.path.join(d, ex)
             sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", ex + ".c"),
                      "-o", sexe])
             p = sh(EXEC + [sexe])
-            assert all(w in p.stdout for w in want) and "(simulated)" in p.stderr, (p.stdout, p.stderr)
+            assert all(w in p.stdout for w in want) and "simulated)" in p.stderr, (p.stdout, p.stderr)
             if native:
                 q = sh(native + [sexe])
                 assert all(w in q.stdout for w in want), q.stdout
@@ -157,7 +158,7 @@ def main():
         est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
         assert abs(est - 3.1475) <= err, p.stdout                 # the grid's exact value: 3.1475
         print("3c) QPERIOD (examples/qarm/shor.c: 15 = 3 x 5, 21 = 7 x 3 from C modexp's oracle), QSIMON (shift 0x2d), "
-              f"QBV (string 0x35): the same answers as the plain CPU; QAMPEST (pi.c): {est} +- {err} (the grid: 3.1475)")
+              f"QBV (string 0x35), QCOLLISION (collision.c: two messages with one 10-bit tag): the same answers as the plain CPU; QAMPEST (pi.c): {est} +- {err} (the grid: 3.1475)")
 
         gexe = os.path.join(d, "ghz")
         sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", "ghz.c"),
@@ -176,12 +177,12 @@ def main():
         sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"),
                  os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c"), "-o", cexe, "-lm"])
         p = sh(EXEC + ["-q", cexe], check=False)
-        assert p.returncode == 0 and "conformance: 14 passed, 0 failed, 0 skipped (features 0x1fff)" in p.stdout, \
+        assert p.returncode == 0 and "conformance: 15 passed, 0 failed, 0 skipped (features 0x3fff)" in p.stdout, \
             (p.stdout, p.stderr)
         if native:
             q = sh(native + [cexe])
             assert "SKIP QAVAIL: no runtime" in q.stdout, q.stdout
-        print("5) conformance (tests/conformance/qarm_conformance.c): 14 of 14 under qarm_exec.py, features 0x1fff"
+        print("5) conformance (tests/conformance/qarm_conformance.c): 15 of 15 under qarm_exec.py, features 0x3fff"
               + ("; the plain CPU: no runtime" if native else ""))
 
         try:

@@ -84,6 +84,7 @@ __attribute__((noinline)) static int low2(int x) { return x & 3; }
 __attribute__((noinline)) static int mod3(int x) { return x % 3; }
 __attribute__((noinline)) static int one_to_one(int x) { return x ^ 9; }
 __attribute__((noinline)) static int shift6(int x) { int y = x ^ 6; return x < y ? x : y; }
+__attribute__((noinline)) static int half(int x) { return x >> 1; }        /* collisions: 2k and 2k + 1 */
 __attribute__((noinline)) static int dot_b(int x) { return ((x ^ x >> 1 ^ x >> 3) & 1) ^ 1; }   /* 0xB . x, plus 1 */
 
 static int have(uint32_t bit, const char *name)
@@ -104,7 +105,7 @@ static int t_qavail(void)
     PRESERVED();
     features = (uint32_t)r.x[1];
     REQUIRE(features != 0, "W1 = 0: no features");
-    REQUIRE((features >> 13) == 0, "W1 = %#x: bits above QARM_F_ASYNC are reserved", features);
+    REQUIRE((features >> 14) == 0, "W1 = %#x: bits above QARM_F_COLLISION are reserved", features);
     return 1;
 }
 
@@ -224,6 +225,23 @@ static int t_structure(uint32_t bit, const char *name, unsigned opw_sel)
         }
     }
     REQUIRE(0, "no answer in 3 tries");
+}
+
+static int t_qcollision(void)
+{
+    if (!have(QARM_F_COLLISION, "QCOLLISION")) return -1;
+    for (int tries = 0; tries < 3; tries++) {
+        SEARCH_LIKE(0x021b0000, half, 5);
+        REQUIRE(r.x[0] == 1 || r.x[0] == 2, "W0 = %llu", (unsigned long long)r.x[0]);
+        if (r.x[0] == 1) {
+            unsigned a = (unsigned)r.x[3], b = (unsigned)r.x[4];
+            REQUIRE(a != b && a < 32 && b < 32 && half((int)a) == half((int)b), "W3 = %u, W4 = %u: not a collision", a, b);
+            SEARCH_LIKE(0x021b0000, one_to_one, 4);
+            REQUIRE(r.x[0] == 2, "a one-to-one f: W0 = %llu, must be 2", (unsigned long long)r.x[0]);
+            return 1;
+        }
+    }
+    REQUIRE(0, "no collision in 3 tries");
 }
 
 static const qarm_gate bell_g[] = {{QARM_G_H, 0, 0, 0, 0, 0}, {QARM_G_CX, 0, 1, 0, 0, 0}, {QARM_G_X, 2, 0, 0, 0, 0},
@@ -419,6 +437,7 @@ int main(void)
     result("QPERIOD", t_structure(QARM_F_PERIOD, "QPERIOD", 0x18));
     result("QSIMON", t_structure(QARM_F_SIMON, "QSIMON", 0x19));
     result("QBV", t_structure(QARM_F_BV, "QBV", 0x1a));
+    result("QCOLLISION", t_qcollision());
     result("QCIRC", t_qcirc());
     result("QRAND", t_qrand());
     result("VQE (QVLOAD QEXPECT QEXPECTN QGRAD QVSAMPLE QSESSION QVFREE)", t_vqe());

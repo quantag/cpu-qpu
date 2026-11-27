@@ -57,7 +57,7 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE`, 4096 `QSUBMIT`/`QPOLL`/`QWAIT` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE`, 4096 `QSUBMIT`/`QPOLL`/`QWAIT`, 8192 `QCOLLISION` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
@@ -65,6 +65,7 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x18` | `QPERIOD` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = the least r > 0 with f(x + r) = f(x); or `W0 = 2`: none |
 | `0x19` | `QSIMON` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s ≠ 0 with f(x) = f(x ⊕ s); or `W0 = 2`: none |
 | `0x1A` | `QBV` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s with f(x) = s·x mod 2 (+ a constant) |
+| `0x1B` | `QCOLLISION` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = x, `W4` = y with x ≠ y and f(x) = f(y); or `W0 = 2`: none |
 | `0x12`–`0x14` | `QSUBMIT`, `QPOLL`, `QWAIT` | `X1` = `qarm_request` (an instruction and its registers) | the instruction, asynchronously: `qarm_expect_n_async` under QEMU leaves the IBM job running while the program works (docs/qarm_isa.md 6.5) |
 | `0x1C` | `QRAND` | `X1` = buffer, `W2` = n bytes | `W0 = 1`: measurements on quantum hardware; `W0 = 3`: a simulator's (pseudo-random) |
 | `0x30` | `QCIRC` | `X1` = `qarm_circuit`, `W2` = shots, `X3` = `uint64_t` samples | `W0 = 1`: samples written; `W0 = 2`: refused |
@@ -77,7 +78,6 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 
 | opcode | name | input | result | check |
 |---|---|---|---|---|
-| `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
 | `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ natively in the runtime (qDRIFT, higher-order formulas); today a library function, section 6 | exact for small cases |
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
@@ -169,6 +169,19 @@ answer is checked in the guest by `qarm.h`, and each has a classical path.
     their null space.
   - The result is `W0 = 2` when f is one-to-one.
 - **`QBV`** finds s with f(x) = s·x mod 2, with one query: H, the phase oracle, then H.
+
+- **`QCOLLISION`** finds x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp).
+  - f is evaluated classically on a random set K of N^1/3 inputs.
+  - Grover's search then looks for an x outside K whose f(x) is in f(K). For a two-to-one f, that takes
+    O(N^1/3) oracle calls in all, where a classical birthday search needs O(√N).
+  - `qarm.h` checks x ≠ y and f(x) = f(y) by calling f. Its classical path sorts f's values.
+
+`examples/qarm/collision.c` finds two 14-bit messages with the same 10-bit tag, a truncated FNV-1a hash
+written in C, in about 26 oracle calls (413-qubit oracle).
+
+The tag has only 10 bits, so a classical birthday search would also find a pair, after about 40 tags. The
+example shows the instruction, not a speedup. The advantage needs functions whose collisions are rare,
+such as two-to-one functions.
 
 `examples/qarm/shor.c` factors 15 and 21. The period of x ↦ aˣ mod N is found from the oracle of an
 ordinary C `modexp`: 6,750 qubits for 15, and 16,626 qubits for 21 (9 bits). The factors then follow
@@ -735,6 +748,22 @@ The patch is careful about the prologue:
 - Every branch is direct, so BTI-guarded pages need no new landing pads.
 - A PC-relative first instruction is refused.
 
+`--scan` looks for such loops in the machine code and prints the options to patch them. It looks for a
+counter from 0 to 2^BITS that is passed to a leaf function, whose result either leaves the loop (a search)
+or is compared with the best so far (a minimum). `--auto` patches what it finds:
+
+```
+$ python3 tools/qarm_patch.py legacy_search --scan
+cheapest_route: QMIN on route_cost, 12 bits (a counter to 4096 passed to route_cost, its result compared with the best so far): --min cheapest_route=route_cost:12
+find_key: QSEARCH on valid_key, 12 bits (a counter to 4096 passed to valid_key, the loop left when it returns nonzero (cbnz)): --search find_key=valid_key:12
+```
+
+The scan is a heuristic. What the function promises is still for the user to confirm: for example, that
+it may return any key that matches, not only the first one.
+
+On macOS the tool patches Mach-O. It adds a `__QARM` segment and re-signs the output ad hoc
+(`codesign -s -`).
+
 `qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
 
 ## 9. What is checked
@@ -765,8 +794,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 ## 10. Next
 
-- More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
-  `QCOLLISION`.
+- More instructions on the same model: a native `QEVOLVE` (higher-order product formulas, qDRIFT).
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;

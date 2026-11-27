@@ -16,13 +16,14 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
   7. examples/qarm/partition.c: QMIN finds a split of difference 1, QCOUNT counts the nearly balanced splits (32)
      within its error bound, both from the guest's own functions.
-  8. QPERIOD, QSIMON, QBV: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets.
+  8. QPERIOD, QSIMON, QBV, QCOLLISION: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets,
+     collision.c two messages with one tag.
   9. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c, its gate tables read from guest memory; with 5, on the ibm mock
      (the device's samples, QRAND measured, QCAPS: hardware).
  10. QVSAMPLE: examples/qarm/maxcut_qaoa.c, the same output as under qarm_exec.py's exact simulator up to the
      samples: the largest cut, 10; RY CX: only 00 and 11 (and on the ibm mock with 5). spin_chain.c (time
      evolution): the same table as under qarm_exec.py.
- 11. The conformance program (docs/qarm_isa.md): 14 of 14 under the plugin; without the oracle helper the
+ 11. The conformance program (docs/qarm_isa.md): 15 of 15 under the plugin; without the oracle helper the
      oracle instructions are not claimed (skipped) and the rest pass.
  12. tools/qarm_patch.py: examples/qarm/legacy_search.c, built without qarm.h and patched, runs QSEARCH and QMIN
      under the plugin (the trampoline's packets in a segment the tool added); without the plugin, the original loops.
@@ -73,7 +74,7 @@ def main():
         csrc = os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c")
         vsrc = os.path.join(d, "vsample.c")
         open(vsrc, "w").write(VSAMPLE)
-        for name, src in (("spin", os.path.join(EX, "spin_chain.c")), ("conformance", csrc), ("maxcut", os.path.join(EX, "maxcut_qaoa.c")), ("vsample", vsrc), ("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+        for name, src in (("spin", os.path.join(EX, "spin_chain.c")), ("collision", os.path.join(EX, "collision.c")), ("conformance", csrc), ("maxcut", os.path.join(EX, "maxcut_qaoa.c")), ("vsample", vsrc), ("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
                           ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
@@ -171,6 +172,8 @@ def main():
         print(f"7) partition: QMIN a split of difference 1 (Durr-Hoyer, imbalance()'s compute oracle); QCOUNT about "
               f"{n} +- {err} nearly balanced splits (exactly 32)")
 
+        p3 = sh(qemu() + [exe["collision"]])
+        assert "(QCOLLISION on the quantum coprocessor)" in p3.stdout and "Brassard-Hoyer-Tapp found" in p3.stderr, p3
         p, p2 = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
         assert "15 = 3 x 5" in p.stdout and "21 = 7 x 3" in p.stdout and "QPERIOD on the quantum" in p.stdout, p
         assert "shift is 0x2d (QSIMON)" in p2.stdout and "string is 0x35 (QBV" in p2.stdout, p2
@@ -180,7 +183,7 @@ def main():
         est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
         assert abs(est - 3.1475) <= err, p.stdout
         print(f"8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35; "
-              f"pi: QAMPEST {est} +- {err} (the grid: 3.1475)")
+              f"pi: QAMPEST {est} +- {err} (the grid: 3.1475); collision: QCOLLISION")
         p = sh(qemu() + [exe["ghz"]])
         assert re.search(r"GHZ\(5\): 00000 \d+, 11111 \d+, other 0 of 2000 shots \(on the coprocessor\)", p.stdout), p.stdout
         assert "11->1 100%" in p.stdout and "device: qemu libqarm: exact" in p.stdout, p.stdout
@@ -196,11 +199,11 @@ def main():
         print("10) QVSAMPLE: maxcut_qaoa under QEMU, the same QAOA energy as under qarm_exec.py, the largest cut 10 "
               f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}; spin_chain: the same M(t) as under qarm_exec.py")
         p = sh(qemu(",quiet=on") + [exe["conformance"]], check=False)
-        assert p.returncode == 0 and "14 passed, 0 failed, 0 skipped (features 0x1fff)" in p.stdout, p.stdout
+        assert p.returncode == 0 and "15 passed, 0 failed, 0 skipped (features 0x3fff)" in p.stdout, p.stdout
         p = sh(qemu(",quiet=on,helper=/nonexistent") + [exe["conformance"]], check=False)
         skips = re.findall(r"SKIP (\w+): \w+ not claimed", p.stdout)
         assert p.returncode == 0 and sorted(skips) == sorted(["QSEARCH", "QMIN", "QCOUNT", "QAMPEST", "QPERIOD", "QSIMON",
-                                                             "QBV"]), p.stdout
+                                                             "QBV", "QCOLLISION"]), p.stdout
         lexe, lout = os.path.join(d, "legacy"), os.path.join(d, "legacy.qarm")
         sh(cc + ["-O1", os.path.join(EX, "legacy_search.c"), "-o", lexe])
         sh([sys.executable, os.path.join(ROOT, "tools", "qarm_patch.py"), lexe, "--search", "find_key=valid_key:12",
@@ -217,7 +220,7 @@ def main():
         print("12) qarm_patch: legacy_search (no qarm.h) patched: QSEARCH and QMIN under the plugin; without it the "
               "original loops; the same output; built with -mbranch-protection=standard (PACIASP kept, AUTIASP before the "
               "trampoline's RET), the same under -cpu max")
-        print("11) conformance: 14 of 14 under the plugin; without the oracle helper the 7 oracle instructions are "
+        print("11) conformance: 15 of 15 under the plugin; without the oracle helper the 8 oracle instructions are "
               "not claimed, the other 7 tests pass")
     print("PASS")
 

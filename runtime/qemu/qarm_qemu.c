@@ -16,6 +16,8 @@
  *   QCOUNT    X1 = f, W2 = bits: the phase oracle, quantum counting: W0 = 1, X3 = the count, D0 = its error bound
  *   QAMPEST   X1 = g, W2 = bits, W3 = value bits k: a compute oracle, amplitude estimation: W0 = 1, D0 = the mean of
  *             g, D1 = its error bound
+ *   QCOLLISION X1 = f, W2 = bits: a compute oracle, Brassard-Hoyer-Tapp in libqarm: W0 = 1, W3 = x, W4 = y with
+ *             f(x) = f(y), or W0 = 2: none found
  *   QPERIOD, QSIMON (compute oracles), QBV (phase oracle): X1 = f, W2 = bits: W0 = 1, W3 = r or s; W0 = 2: none
  *   QCIRC     X1 = a qarm_circuit, W2 = shots, X3 = the samples: the gate table read from guest memory and run by
  *             libqarm (state vector, or a real device on ibm): W0 = 1, or 2: refused
@@ -51,7 +53,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
-       OP_QBV = 0x1A, OP_QSUBMIT = 0x12, OP_QPOLL = 0x13, OP_QWAIT = 0x14, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
+       OP_QBV = 0x1A, OP_QCOLLISION = 0x1B, OP_QSUBMIT = 0x12, OP_QPOLL = 0x13, OP_QWAIT = 0x14, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
@@ -338,6 +340,19 @@ static void qmin_count(int min)
     note("%s", report);
 }
 
+static void qcollision(void)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, 1) : NULL;
+    if (!o) return;
+    char report[600];
+    int a = 0, b = 0, s = qarm_rt_collision(o, &a, &b, report, sizeof report);
+    if (s == 1) { set_x(0, 1); set_x(3, (uint64_t)(uint32_t)a); set_x(4, (uint64_t)(uint32_t)b); }
+    else if (s == 2) set_x(0, 2);
+    note("%s", report);
+}
+
 static void qampest(void)
 {
     uint64_t fn = x(1);
@@ -373,7 +388,7 @@ static uint32_t features(void)
 {
     return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC
            | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON | QARM_F_BV
-                            | QARM_F_AMPEST : 0);
+                            | QARM_F_AMPEST | QARM_F_COLLISION : 0);
 }
 
 #define MAX_SHOTS (1 << 22)
@@ -533,6 +548,9 @@ static void dispatch(unsigned op, uint64_t pc)
         break;
     case OP_QAMPEST:
         qampest();
+        break;
+    case OP_QCOLLISION:
+        qcollision();
         break;
     case OP_QPERIOD:
     case OP_QSIMON:
