@@ -8,6 +8,10 @@
 #include <stdint.h>
 #include "qarm.h"
 #include "qarm_internal.h"
+#include "qarm_sv.h"
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,17 +28,26 @@ struct qarm_rt {
     uint64_t init;
     double identity;
     qarm_op *ops;
+    qarm_pauli *terms;
+    qarm_hamiltonian h;                  /* copies of the program's tables */
+    qarm_ansatz a;
+    double *buf;                         /* exact, simulator: the state vector (qarm_sv.h) */
+    qarm_sv sv;
     group *groups;
     qibm *ibm;
     char where[200];
     struct qarm_rt *next;
 };
 
+/* a job: k energies, each of a parameter vector with at most one rotation's angle shifted (for QGRAD) */
 struct qarm_job {
     qarm_rt *r;
     int k, shots, state, ncirc;          /* state: 1 done, 0 on the QPU, -1 failed */
-    double *e, *err, t0;
+    double *thetas, *e, *err, t0;
+    int *ent_theta, *ent_op;             /* per energy: its parameter vector; the shifted operation, or -1 */
+    double *ent_delta;
     int *final;                          /* per circuit: the chain position measured into each bit */
+    const char *what;
     char id[128];
 };
 
@@ -148,14 +161,14 @@ static const char *check(const qarm_hamiltonian *h, const qarm_ansatz *a, char *
 }
 
 /* the ansatz at theta, then the basis change of group g; every qubit measured */
-static void circuit(const qarm_rt *r, const double *theta, const group *g, qcirc *c)
+static void circuit(const qarm_rt *r, const double *theta, int shift_op, double delta, const group *g, qcirc *c)
 {
     c->qubits = r->n;
     for (int q = 0; q < r->n; q++)
         if (r->init >> q & 1) qc_add(c, G_X, q, 0, 0);
     for (int i = 0; i < r->nops; i++) {
         const qarm_op *o = &r->ops[i];
-        double a = o->kind >= QARM_RY ? o->scale * theta[o->param] : 0;
+        double a = (o->kind >= QARM_RY ? o->scale * theta[o->param] : 0) + (i == shift_op ? delta : 0);
         switch (o->kind) {
         case QARM_X: qc_add(c, G_X, o->q0, 0, 0); break;
         case QARM_H: qc_add(c, G_H, o->q0, 0, 0); break;
@@ -237,7 +250,17 @@ int qarm_rt_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_rt **out)
     r->ops = malloc(sizeof *r->ops * (a->ops ? a->ops : 1));
     memcpy(r->ops, a->op, sizeof *r->ops * a->ops);
     build_groups(r, h);
+    r->terms = malloc(sizeof *r->terms * (h->terms ? h->terms : 1));
+    memcpy(r->terms, h->t, sizeof *r->terms * h->terms);
+    r->h = (qarm_hamiltonian){h->qubits, h->terms, h->constant, r->terms};
+    r->a = (qarm_ansatz){a->qubits, a->params, a->ops, 0, a->init, r->ops};
     r->backend = cfg.backend;
+    if (r->backend != B_IBM) {
+        long N = 1L << r->n;
+        r->buf = malloc(sizeof *r->buf * 6 * (size_t)N);
+        if (!r->buf) { qarm_note("QVLOAD refused: no memory for %d qubits", r->n); qarm_rt_free(r); return -1; }
+        r->sv = (qarm_sv){r->n, r->buf, r->buf + N, r->buf + 2 * N, r->buf + 3 * N, r->buf + 4 * N, r->buf + 5 * N};
+    }
     int twoq = 0, two_ansatz = 0;
     for (int i = 0; i < r->nops; i++) two_ansatz += r->ops[i].kind == QARM_CX || r->ops[i].kind == QARM_CZ;
     if (r->backend == B_IBM) {
@@ -248,7 +271,7 @@ int qarm_rt_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_rt **out)
         for (int i = 0; i < r->ngroups; i++) {
             qcirc c = {0};
             int *final = malloc(sizeof *final * (size_t)r->n), t;
-            circuit(r, zero, &r->groups[i], &c);
+            circuit(r, zero, -1, 0, &r->groups[i], &c);
             free(qibm_qasm(r->ibm, &c, final, &t));
             if (t > twoq) twoq = t;
             free(final);
@@ -281,6 +304,8 @@ void qarm_rt_free(qarm_rt *r)
     for (int i = 0; i < r->ngroups; i++) free(r->groups[i].t);
     free(r->groups);
     free(r->ops);
+    free(r->terms);
+    free(r->buf);
     free(r);
 }
 
@@ -300,55 +325,83 @@ int qarm_rt_session(int open)
 }
 
 /* ---------------------------------------------------------------- jobs */
-static void finish_local(qarm_job *j, const double *thetas)
+static void prepare(qarm_rt *r, const double *theta, int shift_op, double delta)
+{
+    qarm_sv *sv = &r->sv;
+    for (long b = 0; b < (1L << r->n); b++) sv->re[b] = sv->im[b] = 0;
+    sv->re[r->init] = 1;
+    for (int o = 0; o < r->nops; o++)
+        qarm_sv_apply(sv, sv->re, sv->im, &r->ops[o], qarm_sv_angle(&r->ops[o], theta) + (o == shift_op ? delta : 0));
+}
+
+static void finish_local(qarm_job *j)
 {
     qarm_rt *r = j->r;
     long N = 1L << r->n;
+    qarm_sv *sv = &r->sv;
     double *p = malloc(sizeof *p * (size_t)N), *q = malloc(sizeof *q * (size_t)N);
-    char err[200];
     for (int i = 0; i < j->k; i++) {
+        prepare(r, j->thetas + (long)j->ent_theta[i] * r->params, j->ent_op[i], j->ent_delta[i]);
+        if (r->backend == B_EXACT) { j->e[i] = qarm_sv_energy(sv, &r->h); j->err[i] = 0; continue; }
         double e = r->identity, var = 0;
-        for (int g = 0; g < r->ngroups; g++) {
-            qcirc c = {0};
-            circuit(r, thetas + (long)i * r->params, &r->groups[g], &c);
-            if (qsv_probabilities(&c, p, err, sizeof err) < 0) { qarm_note("%s", err); j->state = -1; qc_free(&c); goto done; }
-            qc_free(&c);
-            const double *dist = p;
-            if (r->backend == B_SIMULATOR) {                 /* shots sampled from p */
-                for (long b = 0; b < N; b++) q[b] = 0;
-                for (int s = 0; s < j->shots; s++) {
-                    double u = uniform(), acc = 0;
-                    long b = 0;
-                    for (; b < N - 1; b++) { acc += p[b]; if (u < acc) break; }
-                    q[b] += 1.0 / j->shots;
-                }
-                dist = q;
+        for (int g = 0; g < r->ngroups; g++) {            /* simulator: each basis measured on a copy */
+            memcpy(sv->lr, sv->re, sizeof *p * (size_t)N);
+            memcpy(sv->li, sv->im, sizeof *p * (size_t)N);
+            for (int qb = 0; qb < r->n; qb++) {
+                int xb = r->groups[g].x >> qb & 1, zb = r->groups[g].z >> qb & 1;
+                qarm_op h = {QARM_H, (uint8_t)qb, 0, 0, 0, 0, 0, 0}, sdg = {QARM_RZ, (uint8_t)qb, 0, 0, 0, 0, 0, 0};
+                if (xb && zb) qarm_sv_apply(sv, sv->lr, sv->li, &sdg, -M_PI / 2);   /* S^dagger, up to a phase */
+                if (xb) qarm_sv_apply(sv, sv->lr, sv->li, &h, 0);
+            }
+            for (long b = 0; b < N; b++) p[b] = sv->lr[b] * sv->lr[b] + sv->li[b] * sv->li[b];
+            for (long b = 0; b < N; b++) q[b] = 0;
+            for (int s = 0; s < j->shots; s++) {
+                double u = uniform(), acc = 0;
+                long b = 0;
+                for (; b < N - 1; b++) { acc += p[b]; if (u < acc) break; }
+                q[b] += 1.0 / j->shots;
             }
             double m, v;
-            moments(r, &r->groups[g], dist, &m, &v);
+            moments(r, &r->groups[g], q, &m, &v);
             e += m;
             var += v / j->shots;
         }
         j->e[i] = e;
-        j->err[i] = r->backend == B_SIMULATOR ? sqrt(var) : 0;
+        j->err[i] = sqrt(var);
     }
     j->state = 1;
-done:
     free(p);
     free(q);
 }
 
-qarm_job *qarm_rt_submit(qarm_rt *r, const double *thetas, int k, int shots)
+static void job_free(qarm_job *j)
 {
-    if (!r || k < 1) { qarm_note("QEXPECTN: %s", r ? "k < 1" : "no problem loaded"); return NULL; }
+    if (!j) return;
+    free(j->thetas); free(j->e); free(j->err); free(j->ent_theta); free(j->ent_op); free(j->ent_delta); free(j->final);
+    free(j);
+}
+
+/* k energies: of parameter vector ent_theta[i] (of ntheta in thetas), with operation ent_op[i] shifted by ent_delta[i] */
+static qarm_job *submit(qarm_rt *r, const double *thetas, int ntheta, int k, const int *ent_theta, const int *ent_op,
+                        const double *ent_delta, int shots, const char *what)
+{
     qarm_job *j = calloc(1, sizeof *j);
     j->r = r;
     j->k = k;
+    j->what = what;
     j->shots = shots > 0 ? shots : cfg.shots;
+    j->thetas = malloc(sizeof *j->thetas * (size_t)(ntheta * r->params + 1));
+    memcpy(j->thetas, thetas, sizeof *j->thetas * (size_t)(ntheta * r->params));
     j->e = calloc((size_t)k, sizeof *j->e);
     j->err = calloc((size_t)k, sizeof *j->err);
+    j->ent_theta = malloc(sizeof(int) * (size_t)k);
+    j->ent_op = malloc(sizeof(int) * (size_t)k);
+    j->ent_delta = malloc(sizeof(double) * (size_t)k);
+    memcpy(j->ent_theta, ent_theta, sizeof(int) * (size_t)k);
+    memcpy(j->ent_op, ent_op, sizeof(int) * (size_t)k);
+    memcpy(j->ent_delta, ent_delta, sizeof(double) * (size_t)k);
     j->t0 = qarm_now();
-    if (r->backend != B_IBM) { finish_local(j, thetas); return j; }
+    if (r->backend != B_IBM) { finish_local(j); return j; }
 
     int cal = r->mitigate ? 2 : 0;
     j->ncirc = k * r->ngroups + cal;
@@ -358,7 +411,7 @@ qarm_job *qarm_rt_submit(qarm_rt *r, const double *thetas, int k, int shots)
     for (int i = 0; i < k; i++)
         for (int g = 0; g < r->ngroups; g++, ci++) {
             qcirc c = {0};
-            circuit(r, thetas + (long)i * r->params, &r->groups[g], &c);
+            circuit(r, j->thetas + (long)ent_theta[i] * r->params, ent_op[i], ent_delta[i], &r->groups[g], &c);
             qasm[ci] = qibm_qasm(r->ibm, &c, j->final + (long)ci * r->n, &t);
             qc_free(&c);
         }
@@ -374,9 +427,20 @@ qarm_job *qarm_rt_submit(qarm_rt *r, const double *thetas, int k, int shots)
     int ok = qibm_submit(r->ibm, qasm, j->ncirc, j->shots, j->id, sizeof j->id, err, sizeof err);
     for (int i = 0; i < j->ncirc; i++) free(qasm[i]);
     free(qasm);
-    if (!ok) { qarm_note("QEXPECTN: the job was not accepted: %s", err); free(j->final); free(j->e); free(j->err); free(j); return NULL; }
-    qarm_note("QEXPECTN: job %s sent to %s (%d parameter vectors x %d measurement bases%s); asynchronous", j->id,
+    if (!ok) { qarm_note("%s: the job was not accepted: %s", what, err); job_free(j); return NULL; }
+    qarm_note("%s: job %s sent to %s (%d energies x %d measurement bases%s); asynchronous", what, j->id,
               qibm_device(r->ibm), k, r->ngroups, cal ? " + 2 readout calibrations" : "");
+    return j;
+}
+
+qarm_job *qarm_rt_submit(qarm_rt *r, const double *thetas, int k, int shots)
+{
+    if (!r || k < 1) { qarm_note("QEXPECTN: %s", r ? "k < 1" : "no problem loaded"); return NULL; }
+    int *et = malloc(sizeof(int) * (size_t)k), *eo = malloc(sizeof(int) * (size_t)k);
+    double *ed = calloc((size_t)k, sizeof *ed);
+    for (int i = 0; i < k; i++) { et[i] = i; eo[i] = -1; }
+    qarm_job *j = submit(r, thetas, k, k, et, eo, ed, shots, "QEXPECTN");
+    free(et); free(eo); free(ed);
     return j;
 }
 
@@ -387,7 +451,7 @@ static int collect(qarm_job *j)
     char err[400];
     uint64_t **samples = calloc((size_t)j->ncirc, sizeof *samples);
     int shots = qibm_results(r->ibm, j->id, j->ncirc, samples, err, sizeof err);
-    if (shots <= 0) { qarm_note("QEXPECTN: job %s: %s", j->id, shots == 0 ? "no shots" : err); goto fail; }
+    if (shots <= 0) { qarm_note("%s: job %s: %s", j->what, j->id, shots == 0 ? "no shots" : err); goto fail; }
     int n = r->n, cal = r->mitigate ? 2 : 0;
     long N = 1L << n;
     double inv[MAX_QUBITS][4];                                /* per chain position */
@@ -447,19 +511,31 @@ int qarm_rt_poll(qarm_job *j)
     if (j->state) return j->state;
     char err[400];
     int s = qibm_status(j->r->ibm, j->id, err, sizeof err);
-    if (s < 0) { qarm_note("QEXPECTN: job %s: %s", j->id, err); j->state = -1; return -1; }
+    if (s < 0) { qarm_note("%s: job %s: %s", j->what, j->id, err); j->state = -1; return -1; }
     if (s == 0) return 0;
     return collect(j);
+}
+
+static int wait_job(qarm_job *j)
+{
+    int s, waited = 0;
+    while ((s = qarm_rt_poll(j)) == 0) {
+        if (!waited++) qarm_note("%s: waiting for job %s on %s (it may be queued)", j->what, j->id, qibm_device(j->r->ibm));
+        qarm_sleep(cfg.poll);
+    }
+    return s;
+}
+
+static void how(const qarm_job *j, char *buf, size_t len)
+{
+    if (j->r->backend == B_IBM) snprintf(buf, len, "job %s, %.1f s", j->id, qarm_now() - j->t0);
+    else snprintf(buf, len, "%s", j->r->where);
 }
 
 int qarm_rt_wait(qarm_job *j, double *e, double *err)
 {
     if (!j) return -1;
-    int s, waited = 0;
-    while ((s = qarm_rt_poll(j)) == 0) {
-        if (!waited++) qarm_note("QEXPECTN: waiting for job %s on %s (it may be queued)", j->id, qibm_device(j->r->ibm));
-        qarm_sleep(cfg.poll);
-    }
+    int s = wait_job(j);
     if (s > 0) {
         int m = 0;
         for (int i = 0; i < j->k; i++) {
@@ -467,20 +543,16 @@ int qarm_rt_wait(qarm_job *j, double *e, double *err)
             if (err) err[i] = j->err[i];
             if (j->e[i] < j->e[m]) m = i;
         }
-        char how[200];
-        if (j->r->backend == B_IBM) snprintf(how, sizeof how, "job %s, %.1f s", j->id, qarm_now() - j->t0);
-        else snprintf(how, sizeof how, "%s", j->r->where);
+        char h[200];
+        how(j, h, sizeof h);
         if (j->k == 1 && j->err[0] > 0)
-            qarm_note("QEXPECT: E = %.6f +- %.6f Ha (%s)", j->e[0], j->err[0], how);
+            qarm_note("QEXPECT: E = %.6f +- %.6f Ha (%s)", j->e[0], j->err[0], h);
         else if (j->k == 1)
-            qarm_note("QEXPECT: E = %.6f Ha (%s)", j->e[0], how);
+            qarm_note("QEXPECT: E = %.6f Ha (%s)", j->e[0], h);
         else
-            qarm_note("QEXPECTN: %d energies (%s); lowest %.6f Ha", j->k, how, j->e[m]);
+            qarm_note("QEXPECTN: %d energies (%s); lowest %.6f Ha", j->k, h, j->e[m]);
     }
-    free(j->final);
-    free(j->e);
-    free(j->err);
-    free(j);
+    job_free(j);
     return s > 0 ? 1 : -1;
 }
 
@@ -490,4 +562,47 @@ int qarm_rt_expect_n(qarm_rt *r, const double *thetas, int k, int shots, double 
     int s = qarm_rt_wait(qarm_rt_submit(r, thetas, k, shots), e, err ? err : tmp);
     free(tmp);
     return s;
+}
+
+/* QGRAD: exact by adjoint differentiation; measured by the parameter-shift rule, every shifted energy in one job:
+ * dE/d(angle) = E(angle + pi/4) - E(angle - pi/4) for a Pauli rotation, (E(+pi/2) - E(-pi/2)) / 2 for RY and RZ */
+int qarm_rt_grad(qarm_rt *r, const double *theta, int shots, double *e, double *grad)
+{
+    if (!r) { qarm_note("QGRAD: no problem loaded"); return -1; }
+    if (r->backend == B_EXACT) {
+        *e = qarm_sv_grad(&r->sv, &r->h, &r->a, theta, grad);
+        double gn = 0;
+        for (int p = 0; p < r->params; p++) gn += grad[p] * grad[p];
+        qarm_note("QGRAD: E = %.9f Ha, |gradient| = %.3g (exact, adjoint)", *e, sqrt(gn));
+        return 1;
+    }
+    int k = 1;
+    for (int o = 0; o < r->nops; o++) k += 2 * qarm_sv_rot(r->ops[o].kind);
+    int *et = calloc((size_t)k, sizeof(int)), *eo = malloc(sizeof(int) * (size_t)k);
+    double *ed = calloc((size_t)k, sizeof *ed);
+    eo[0] = -1;
+    for (int o = 0, i = 1; o < r->nops; o++)
+        if (qarm_sv_rot(r->ops[o].kind)) {
+            double d = r->ops[o].kind == QARM_PAULI_ROT ? M_PI / 4 : M_PI / 2;
+            eo[i] = o; ed[i++] = d;
+            eo[i] = o; ed[i++] = -d;
+        }
+    qarm_job *j = submit(r, theta, 1, k, et, eo, ed, shots, "QGRAD");
+    int s = j ? wait_job(j) : -1;
+    if (s > 0) {
+        *e = j->e[0];
+        for (int p = 0; p < r->params; p++) grad[p] = 0;
+        for (int o = 0, i = 1; o < r->nops; o++)
+            if (qarm_sv_rot(r->ops[o].kind)) {
+                double f = r->ops[o].kind == QARM_PAULI_ROT ? 1 : 0.5;
+                grad[r->ops[o].param] += r->ops[o].scale * f * (j->e[i] - j->e[i + 1]);
+                i += 2;
+            }
+        char h[200];
+        how(j, h, sizeof h);
+        qarm_note("QGRAD: E = %.6f Ha, %d shifted energies, parameter-shift rule (%s)", *e, k - 1, h);
+    }
+    job_free(j);
+    free(et); free(eo); free(ed);
+    return s > 0 ? 1 : -1;
 }

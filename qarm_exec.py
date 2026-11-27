@@ -39,8 +39,8 @@ STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH = 0x10, 0x11
-OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x24, 0x26
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE)
+OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -326,7 +326,7 @@ class Runtime:
             self.set_x(1, 3)                       # W1: features, QSEARCH | VQE
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
-        elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE):
+        elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
         mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
 
@@ -431,6 +431,9 @@ class Runtime:
                 if entry is None:
                     raise qarm_vqe.VqeError(f"no problem loaded with handle {self.x(3)}")
                 problem, measured = entry
+                if op == OP_QGRAD:
+                    self.qgrad(problem, measured)
+                    return
                 k = 1 if op == OP_QEXPECT else self.x(2) & 0xFFFFFFFF
                 if not 1 <= k <= 4096:
                     raise qarm_vqe.VqeError(f"QEXPECTN: k = {k}; 1 to 4096")
@@ -439,7 +442,7 @@ class Runtime:
                 if measured is None:
                     es, errs, how = problem.exact(thetas), [0.0] * k, "exact"
                 else:
-                    es, errs, job, sec = measured.energies(thetas, shots)
+                    es, errs, job, sec = measured.energies([problem.angles(t) for t in thetas], shots)
                     how = f"job {job}, {sec} s"
                 name = "QEXPECT" if op == OP_QEXPECT else "QEXPECTN"
                 if op == OP_QEXPECT:
@@ -459,6 +462,30 @@ class Runtime:
                 raise QarmError(f"VQE: {e}")
         except UcError as e:
             raise QarmError(f"VQE: a table or an array is not readable or writable: {e}")
+
+    def qgrad(self, problem, measured):
+        """QGRAD: X1 = theta, X4 = the gradient (one double per parameter); D0 = the energy. Exact: adjoint
+        differentiation. Measured: the parameter-shift rule, every shifted energy in one job."""
+        theta = self.doubles(self.x(1), problem.params)
+        if measured is None:
+            e, g = problem.grad(theta)
+            how = "exact, adjoint"
+        else:
+            rot = problem.rotations()
+            settings, coef = [problem.angles(theta)], []
+            for r, i in enumerate(rot):
+                d = math.pi / 4 if problem.ops[i][0] == "pauli_rot" else math.pi / 2
+                settings += [problem.angles(theta, r, d), problem.angles(theta, r, -d)]
+                coef.append((problem.ops[i][3], problem.ops[i][4] * (1.0 if d == math.pi / 4 else 0.5)))
+            es, errs, job, sec = measured.energies(settings, 0)
+            e, g = es[0], [0.0] * problem.params
+            for r, (p, f) in enumerate(coef):
+                g[p] += f * (es[1 + 2 * r] - es[2 + 2 * r])
+            how = f"parameter-shift rule, {len(settings) - 1} shifted energies, job {job}, {sec} s"
+        self.mu.mem_write(self.x(4), struct.pack(f"<{problem.params}d", *g))
+        self.set_d(0, e)
+        self.set_x(0, 1)
+        self.note(f"QGRAD: E = {e:.9f} Ha, |gradient| = {math.sqrt(sum(v * v for v in g)):.3g} ({how})")
 
     def note(self, text):
         if not self.quiet:
@@ -545,7 +572,23 @@ def _stack_chk_fail(rt):
     raise QarmError("stack smashing detected")
 
 
-LIBC = {"printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
+def _math(fn):
+    """A libm function of one double: the argument in D0, the result in D0."""
+    def call(rt):
+        v = struct.unpack("<d", struct.pack("<Q", rt.mu.reg_read(rt.A.UC_ARM64_REG_D0)))[0]
+        try:
+            r = fn(v)
+        except (ValueError, OverflowError):
+            r = float("nan")
+        rt.set_d(0, r)
+        rt.ret(None)
+    return call
+
+
+MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp", "log", "sqrt", "atan", "fabs")}
+
+
+LIBC = {**MATH, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
         "__memset_chk": _memset, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
         "fputs": _fputs, "fwrite": _fwrite, "fflush": _fflush}

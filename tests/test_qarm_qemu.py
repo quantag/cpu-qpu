@@ -10,6 +10,7 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   3. QAVAIL's features: tiny_search takes its classical path under the plugin (QSEARCH is not in it yet) and says so.
   4. The simulator backend (plugin option backend=simulator); without the plugin, the classical path.
   5. (libcurl, qiskit, qiskit-aer) the ibm backend against tests/ibm_mock.py: 3 qubits within 5 standard errors.
+  6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
@@ -53,13 +54,13 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
+        for name, src in (("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
             if src is None:
                 src = os.path.join(d, "all_ops.c")
                 open(src, "w").write(ALL_OPS)
             exe[name] = os.path.join(d, name)
-            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), src, "-o", exe[name], "-lm"])
+            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), "-iquote", EX, src, "-o", exe[name], "-lm"])
 
         ref = sh(EXEC + ["-q", exe["h2"]]).stdout
         for cpu in ("cortex-a57", "max"):
@@ -119,6 +120,9 @@ def main():
             mock.close()
             print(f"5) ibm via the mock of IBM's REST API: 3 qubits, {len(jobs)} jobs, within {worst / m[5]:.1f} "
                   "standard errors")
+        p, r = sh(qemu(",quiet=on") + [exe["lih"]]), sh(EXEC + ["-q", exe["lih"]])
+        assert p.stdout == r.stdout and "VQE - exact:   0.000000 mHa" in p.stdout, (p.stdout, r.stdout)
+        print("6) molecule_vqe, LiH (10 qubits, L-BFGS with QGRAD): the same output under QEMU and qarm_exec.py")
     print("PASS")
 
 
