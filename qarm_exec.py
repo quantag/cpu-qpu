@@ -27,6 +27,7 @@ for it (the job id is reported at once) and checks the measured answers by runni
 Noise costs answers that fail the check, never a wrong W3. A report of each quantum instruction goes to
 stderr (-q: none)."""
 import argparse
+import json
 import math
 import os
 import random
@@ -427,7 +428,7 @@ class Runtime:
             self.set_x(0, 0)
             raise QarmError(f"QSEARCH {name}: bits = {bits}; 1 to 16")
         circuit = phase_oracle(self, fn, name, bits)
-        if self.qpu is not None:
+        if self.qpu is not None and self.qpu["backend"] != "cudaq":   # cudaq: the oracle searches stay exact
             return self.qsearch_qpu(fn, name, bits, circuit)
         x, calls, rounds = grover(circuit, bits, lambda v: self.call(fn, v) == 1)
         if x is None:
@@ -580,6 +581,8 @@ class Runtime:
             b = self.qpu["backend"]
             name = f"qarm_exec.py: {b}" + (f" {self.qpu['ibm'].get('backend')}" if b == "ibm" else "")
             qubits, flags = (156 if b in ("ibm", "preview") else 30), (1 if b == "ibm" else 0) | 2 | (4 if b == "ibm" else 0)
+            if b == "cudaq":
+                name, flags = f"qarm_exec.py: CUDA-Q {self.qpu.get('cudaq', {}).get('target') or 'default target'}", 0
         self.mu.mem_write(addr, struct.pack("<IIII48s", 1, FEATURES, qubits, flags, name.encode()[:47]))
         self.set_x(0, 1)
 
@@ -667,7 +670,10 @@ class Runtime:
             if op == OP_QVLOAD:
                 read = lambda a, n: bytes(self.mu.mem_read(a, n))
                 problem = qarm_vqe.Problem(read, self.x(1), self.x(2))
-                if self.qpu is not None:
+                if self.qpu is not None and self.qpu["backend"] == "cudaq":
+                    measured = qarm_vqe.Cudaq(problem, self.qpu, self.note)
+                    where = f"on CUDA-Q ({measured.where})"
+                elif self.qpu is not None:
                     measured = qarm_vqe.Measured(problem, self.qpu, self.note)
                     where = (f"on {measured.where.split(';')[0]}: {len(measured.isa)} measurement bases"
                              + (", readout correction" if measured.mitigate else "") + ", up to "
@@ -1333,8 +1339,36 @@ def circuit_samples(n, gates, shots, seed=None):
     return [int(v) for v in rng.choice(N, size=shots, p=p / p.sum())]
 
 
+def circuit_on_cudaq(n, gates, shots, cfg):
+    """A gate list as a CUDA-Q kernel (make_kernel), sampled on cfg's CUDA-Q target. Returns (outcomes, where)."""
+    import cudaq
+    target = cfg.get("cudaq", {}).get("target")
+    if target and cudaq.get_target().name != target:
+        cudaq.set_target(target)
+    k = cudaq.make_kernel()
+    q = k.qalloc(n)
+    for name, qs, ang in gates:
+        if name in ("rx", "ry", "rz"):
+            getattr(k, name)(ang, q[qs[0]])
+        elif name == "ccx":
+            k.cx([q[qs[0]], q[qs[1]]], q[qs[2]])
+        elif name in ("cx", "cz", "swap"):
+            getattr(k, name)(q[qs[0]], q[qs[1]])
+        elif name == "sx":                                # sqrt(X) = e^{i pi/4} RX(pi/2)
+            k.rx(math.pi / 2, q[qs[0]])
+        else:
+            getattr(k, name)(q[qs[0]])
+    k.mz(q)
+    counts = cudaq.sample(k, shots_count=int(shots))
+    outcomes = [sum(int(b) << i for i, b in enumerate(key)) for key, c in counts.items() for _ in range(c)]
+    random.Random(0).shuffle(outcomes)
+    return outcomes[:shots], f"CUDA-Q ({cudaq.get_target().name})"
+
+
 def circuit_on_backend(n, gates, shots, cfg, note=lambda t: None):
     """A gate list on a backend of qcpu_run.py (Sampler; one job). Returns (outcomes, where)."""
+    if cfg["backend"] == "cudaq":
+        return circuit_on_cudaq(n, gates, shots, cfg)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import qcpu_run
     from qiskit import QuantumCircuit
@@ -1426,17 +1460,23 @@ def main(argv=None):
     ap.add_argument("--qpu", action="store_true", help="QSEARCH on the backend of config.json instead of the exact "
                     "simulator")
     ap.add_argument("--config", help="the configuration (default: config.json in this repository); implies --qpu")
-    ap.add_argument("--backend", help="simulator, aer, preview or ibm, over config.json's; implies --qpu")
+    ap.add_argument("--backend", help="simulator, aer, preview, ibm or cudaq, over config.json's; implies --qpu")
+    ap.add_argument("--cudaq-target", help="with --backend cudaq: the CUDA-Q target (qpp-cpu, nvidia, ...)")
     a = ap.parse_args(argv)
     try:
         qpu = None
         if a.qpu or a.config or a.backend:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import qcpu_run
-            try:
-                qpu = qcpu_run.load_config(a.config, a.backend)
-            except qcpu_run.Error as e:
-                raise QarmError(f"--qpu: {e}")
+            user = json.load(open(a.config)) if a.config and os.path.exists(a.config) else {}
+            if (a.backend or user.get("backend")) == "cudaq":       # CUDA-Q: VQE, QCIRC, QRAND; oracles stay exact
+                qpu = {"backend": "cudaq", "shots": int(user.get("shots", 0)),
+                       "cudaq": {"target": a.cudaq_target or user.get("options", {}).get("target")}}
+            else:
+                try:
+                    qpu = qcpu_run.load_config(a.config, a.backend)
+                except qcpu_run.Error as e:
+                    raise QarmError(f"--qpu: {e}")
         rt = Runtime(Program(a.program), [a.program] + a.args, a.quiet, qpu)
         code = rt.run()
     except QarmError as e:

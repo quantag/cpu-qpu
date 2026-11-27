@@ -16,6 +16,8 @@
   6. Time evolution (qarm_evolve_n: Trotter tables on QVLOAD and QEXPECTN): examples/qarm/spin_chain.c, the Ising
      chain quench, 8 spins: the same table on the plain CPU and under qarm_exec.py; 32 steps within 2e-3 of the
      exact curve (numpy's eigendecomposition of H).
+  7. (cudaq) --backend cudaq: h2_vqe's ground state to 1e-6, maxcut_qaoa's largest cut from QVSAMPLE, spin_chain's
+     M(t) as on the exact simulator, ghz.c's QCIRC: the same binaries with CUDA-Q as the coprocessor.
 Run: python3 -m tests.test_qarm_vqe   (needs an arm64 C compiler: the host's on arm64, else aarch64-linux-gnu-gcc)"""
 import json, os, re, subprocess, sys, tempfile, textwrap
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
@@ -205,6 +207,24 @@ def main():
             assert all(abs(x - y) < 1e-3 for a, b in zip(q, rows) for x, y in zip(a, b)), (q, rows)
         print(f"6) time evolution (spin_chain.c, Ising quench, 8 spins): 32 Trotter steps within {worst:.1e} of the "
               f"exact M(t), 4 steps within {coarse:.3f}; one QEXPECTN batch for 13 times")
+
+        try:
+            import cudaq  # noqa: F401
+        except ImportError:
+            print("7) skipped: cudaq is not installed")
+        else:
+            cq = EXEC + ["-q", "--backend", "cudaq"]
+            e = float(re.search(r"\) = (-?\d+\.\d+) Ha", sh(cq + [exe]).stdout).group(1))
+            assert abs(e - EXACT) < 1e-6, e
+            p = sh(cq + [mexe])
+            assert "best cut 10" in p.stdout, p.stdout
+            assert table(sh(cq + [sexe]).stdout) == rows
+            gexe = os.path.join(d, "ghz")
+            build(cc, os.path.join(ROOT, "examples", "qarm", "ghz.c"), gexe)
+            p = sh(cq + [gexe])
+            assert "other 0 of 2000" in p.stdout and "11->1 100%" in p.stdout and "CUDA-Q" in p.stdout, p.stdout
+            print(f"7) CUDA-Q as the coprocessor (--backend cudaq): h2_vqe E = {e:.6f} Ha; maxcut_qaoa's largest cut; "
+                  "spin_chain's M(t) as on the exact simulator; ghz.c through QCIRC")
 
         if how.startswith("; Aer skipped"):
             print("4) skipped: Qiskit is not installed")
