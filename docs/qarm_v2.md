@@ -766,6 +766,17 @@ On macOS the tool patches Mach-O. It adds a `__QARM` segment and re-signs the ou
 
 `qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
 
+### CUDA-Q as the coprocessor
+
+`qarm_exec.py --backend cudaq [--cudaq-target nvidia]` (or `"backend": "cudaq"` and `"options":
+{"target": …}` in the config) runs the VQE, circuit and randomness instructions on NVIDIA CUDA-Q:
+- the ansatz table becomes a parameterized kernel (`make_kernel`, `exp_pauli` for Pauli rotations);
+- the Hamiltonian becomes a spin operator;
+- `QEXPECT`/`QEXPECTN` call `observe`, and `QVSAMPLE`/`QCIRC`/`QRAND` call `sample`. `QGRAD` uses
+  parameter shifts.
+
+The oracle instructions keep Q-ARM's own simulation. `docs/qarm_vs_cudaq.md` compares the two systems.
+
 ## 9. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:

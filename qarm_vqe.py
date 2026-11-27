@@ -282,6 +282,89 @@ def _parity(v):
     return p
 
 
+class Cudaq:
+    """A problem on CUDA-Q (QVLOAD with backend cudaq): the ansatz as a parameterized kernel (make_kernel; Pauli
+    rotations as exp_pauli), the Hamiltonian as a spin operator; energies by cudaq.observe, exact on the state
+    vector targets, or from shots_count samples when the program asks for shots. The same interface as Measured."""
+
+    def __init__(self, problem, cfg, note):
+        import cudaq
+        from cudaq import spin
+        self.p, self.cfg, self.note, self.session = problem, cfg, note, None
+        target = cfg.get("cudaq", {}).get("target")
+        try:
+            if target and cudaq.get_target().name != target:
+                cudaq.set_target(target)
+        except Exception as e:
+            raise VqeError(f"CUDA-Q target {target}: {e}")
+        self.where = cudaq.get_target().name
+        n = problem.n
+        kernel, angles = cudaq.make_kernel(list)
+        q = kernel.qalloc(n)
+        for b in range(n):
+            if problem.init >> b & 1:
+                kernel.x(q[b])
+        r = 0
+        for k, q0, q1, p, scale, x, z in problem.ops:
+            if k in ("x", "h"):
+                getattr(kernel, k)(q[q0])
+            elif k in TWO_QUBIT:
+                getattr(kernel, k)(q[q0], q[q1])
+            elif k in ("ry", "rz"):
+                getattr(kernel, k)(angles[r], q[q0])
+                r += 1
+            else:                                     # exp(-i a P): CUDA-Q's exp_pauli(t, P) is exp(+i t P)
+                word = "".join("IXZY"[(x >> b & 1) | (z >> b & 1) << 1] for b in range(n))
+                kernel.exp_pauli(-1.0 * angles[r], q, word)
+                r += 1
+        self.kernel = kernel
+        h = problem.identity() * spin.i(0)
+        for x, z, c in problem.terms:
+            if not (x | z):
+                continue                              # in identity() already
+            term = 1.0 * spin.i(0)
+            for b in range(n):
+                xb, zb = x >> b & 1, z >> b & 1
+                if xb or zb:
+                    term = term * (spin.y(b) if xb and zb else spin.x(b) if xb else spin.z(b))
+            h = h + c * term
+        self.h = h
+        self.mitigate, self.isa, self.two_qubit = False, [], 0
+        self.zkernel = None
+
+    def open_session(self):
+        return "nothing to reserve"
+
+    def close_session(self):
+        pass
+
+    def energies(self, angles, shots):
+        import cudaq
+        t0 = time.time()
+        es, errs = [], []
+        for a in angles:
+            a = [float(v) for v in a]
+            if shots:
+                r = cudaq.observe(self.kernel, self.h, a, shots_count=int(shots))
+                es.append(r.expectation())
+                errs.append(0.0)                      # CUDA-Q gives no standard error here
+            else:
+                es.append(cudaq.observe(self.kernel, self.h, a).expectation())
+                errs.append(0.0)
+        return es, errs, None, round(time.time() - t0, 1)
+
+    def sample(self, angles, shots):
+        import cudaq
+        if self.zkernel is None:
+            self.zkernel = self.kernel                # sample() measures every qubit when the kernel has no mz
+        t0 = time.time()
+        counts = cudaq.sample(self.zkernel, [float(v) for v in angles], shots_count=int(shots))
+        out = [sum(int(c) << i for i, c in enumerate(key)) for key, m in counts.items() for _ in range(m)]
+        import random
+        random.Random(0).shuffle(out)
+        return out[:int(shots)], None, round(time.time() - t0, 1)
+
+
 class Measured:
     """A problem on a backend of qcpu_run.py: transpiled once (QVLOAD), then one Sampler job per batch."""
 
