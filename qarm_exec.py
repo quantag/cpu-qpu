@@ -56,8 +56,9 @@ def _c_name(name):
 class Program:
     """The executable's segments at their own addresses, its imports, its functions and their names."""
 
-    def __init__(self, path):
+    def __init__(self, path, base=None):
         import lief
+        self.want_base = base                                # ELF PIE: where it is loaded (default 0x10000000)
         b = lief.parse(path)
         if b is None:
             raise QarmError(f"{path}: not an executable lief can read")
@@ -102,7 +103,8 @@ class Program:
         if b.header.machine_type != lief.ELF.ARCH.AARCH64:
             raise QarmError(f"{self.path}: not an AArch64 program")
         self.kind = "linux"
-        self.base = 0x10000000 if b.header.file_type == lief.ELF.Header.FILE_TYPE.DYN else 0
+        pie = b.header.file_type == lief.ELF.Header.FILE_TYPE.DYN
+        self.base = (0x10000000 if self.want_base is None else self.want_base) if pie else 0
         for s in b.segments:
             if s.type == lief.ELF.Segment.TYPE.LOAD:
                 self.segments.append((self.base + s.virtual_address, s.virtual_size, bytes(s.content), "LOAD"))

@@ -13,6 +13,7 @@
  * Reports go to stderr ("[qarm: ...]"; QARM_QUIET=1: none). This header is included by qarm.h; include that. */
 #ifndef QARM_RT_H
 #define QARM_RT_H
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,6 +30,15 @@ int qarm_rt_grad(qarm_rt *r, const double *theta, int shots, double *e, double *
 int qarm_rt_session(int open);
 void qarm_rt_free(qarm_rt *r);
 const char *qarm_rt_where(const qarm_rt *r);                                       /* "ibm: ibm_aachen", ... */
+
+/* QSEARCH: a phase oracle as tools/qarm_oracle.py writes it; Grover simulated on the search register's amplitudes */
+typedef struct qarm_oracle qarm_oracle;
+qarm_oracle *qarm_rt_oracle_parse(const char *text, char *err, size_t errlen);
+void qarm_rt_oracle_free(qarm_oracle *o);
+const char *qarm_rt_oracle_name(const qarm_oracle *o);
+int qarm_rt_oracle_qubits(const qarm_oracle *o);
+int qarm_rt_oracle_gates(const qarm_oracle *o);
+int qarm_rt_search(const qarm_oracle *o, int *x, char *report, size_t len);          /* 1 x found, 2 none, -1 */
 
 #ifdef __cplusplus
 }

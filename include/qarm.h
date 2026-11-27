@@ -10,11 +10,11 @@
  *
  *   qarm_available()            1 under the Q-ARM runtime, 0 on a plain CPU (QAVAIL)
  *   qarm_features()             what that runtime executes: QARM_F_SEARCH | QARM_F_VQE (QAVAIL's W1); 0 on a plain
- *                               CPU. Under the QEMU plugin QSEARCH takes the classical path, so it reports QARM_F_VQE
+ *                               CPU. The QEMU plugin reports QARM_F_SEARCH when its oracle helper is there
  *   qarm_search(f, bits, &x)    an x in 0 .. 2^bits - 1 with f(x) == 1: Grover's search on the coprocessor (QSEARCH),
  *                               with f's oracle built from f's own machine code; on a plain CPU, every x in turn.
  *                               Returns 1 and stores x, or 0 if there is none. f returns 0 or 1, calls no other
- *                               function and writes no memory; bits <= 16.
+ *                               function and writes no memory; bits <= 16. Every answer is checked by calling f.
  *
  * VQE (section 6 of docs/qarm_v2.md): the program's optimizer runs on the CPU; the coprocessor prepares the
  * ansatz state and measures the energy. On a plain CPU each call computes the energy exactly from the state
@@ -38,7 +38,7 @@
  *   arm64 with GCC or clang            Q-ARM packets: the classical path on a CPU, the quantum one under qarm_exec.py
  *   -DQARM_RUNTIME, linked with libqarm (runtime/libqarm): native, any CPU; VQE on the backend of config.json
  *                                      (exact, simulator, or a real IBM device over REST). qarm_search is classical
- *                                      there: its oracle needs qoracle, which is Python. */
+ *                                      there; under the QEMU plugin it is quantum (docs/qarm_v2.md, section 8). */
 #ifndef QARM_H_INCLUDED
 #define QARM_H_INCLUDED
 #include <stdint.h>
@@ -171,9 +171,9 @@ static inline int qarm_search(int (*f)(int), int bits, int *x)
     register long x2 __asm__("x2") = bits;
     register long x3 __asm__("x3") = 0;
     __asm__ volatile(QARM_PACKET(0x02110000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
-    if (x0 == 1) { *x = (int)x3; return 1; }
+    if (x0 == 1 && f((int)x3) == 1) { *x = (int)x3; return 1; }   /* every answer checked by f itself */
     if (x0 == 2) return 0;
-    for (long v = 0; v < (1L << bits); v++)                 /* the classical path */
+    for (long v = 0; v < (1L << bits); v++)                 /* the classical path, also after a wrong answer */
         if (f((int)v)) { *x = (int)v; return 1; }
     return 0;
 }

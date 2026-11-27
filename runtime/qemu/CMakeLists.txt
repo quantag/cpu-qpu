@@ -27,3 +27,5 @@ add_library(qarm-qemu MODULE qarm_qemu.c)
 set_target_properties(qarm-qemu PROPERTIES PREFIX "lib" C_STANDARD 11)
 target_include_directories(qarm-qemu PRIVATE ${QEMU_PLUGIN_DIR} ${GLIB_INCLUDE_DIRS})
 target_link_libraries(qarm-qemu PRIVATE qarm)       # glib's symbols come from QEMU itself
+get_filename_component(QARM_TOOLS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../tools ABSOLUTE)
+target_compile_definitions(qarm-qemu PRIVATE QARM_TOOLS_DIR="${QARM_TOOLS_DIR}")

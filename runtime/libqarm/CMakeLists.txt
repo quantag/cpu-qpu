@@ -8,7 +8,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(libqarm C)
 
-add_library(qarm STATIC qarm_rt.c qarm_sim.c qarm_json.c qarm_ibm.c)
+add_library(qarm STATIC qarm_rt.c qarm_sim.c qarm_json.c qarm_ibm.c qarm_search.c)
 # only qarm.h, qarm_rt.h and qarm_sv.h: include/ also holds the minimal stdio.h of the QPU programs, which must not shadow libc's
 foreach(h qarm.h qarm_rt.h qarm_sv.h)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/../../include/${h} ${CMAKE_CURRENT_BINARY_DIR}/include/${h} COPYONLY)

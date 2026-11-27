@@ -462,12 +462,33 @@ plugin API has `qemu_plugin_write_register`.
 - **Speed.** QEMU compiles the guest code instead of hooking it from Python: `h2_vqe` takes 0.04 s against
   0.47 s, and the gap grows with the program's own work.
 
-**`QSEARCH`** is not in the plugin yet: its oracle is built from the function's machine code by qoracle,
-which is Python. The plugin leaves the packet unexecuted, so `qarm_search` takes its classical path. For
-that reason `QAVAIL` now also returns the runtime's features in `W1`, read by `qarm_features()`:
-`QARM_F_SEARCH` (1) and `QARM_F_VQE` (2). `qarm_exec.py` returns 3 and the plugin returns 2, so a program
-can say which path it took. `tiny_search` prints `classical search` under the plugin, and `Q-ARM QSEARCH`
-under `qarm_exec.py`.
+**`QSEARCH` under QEMU** works from the guest program's own machine code. When a `QSEARCH` packet runs:
+1. The plugin reads the first 32 bytes of the predicate `f` from guest memory. It runs
+   `tools/qarm_oracle.py` with the program's path (`qemu_plugin_path_to_binary`), `f`'s address and those
+   bytes.
+2. The helper finds the load base: the one at which a function of the file has exactly these bytes. It
+   lays the file's segments out there and has qoracle build the phase oracle from `f`'s machine code, as
+   `qarm_exec.py` does. It prints the gates (x, cx, ccx, z).
+3. libqarm (`qarm_search.c`) runs every basis input through the reversible gates to get the oracle's
+   sign, checking that each work qubit returns to 0. It then simulates Grover's search (BBHT, for an
+   unknown number of answers) on the 2^bits amplitudes of the search register alone. So a 1120-qubit
+   oracle costs no more than its 2^bits inputs.
+4. `qarm.h` checks every answer by calling `f` in the guest. A wrong answer leads to the classical search.
+
+Oracles are cached per function. The helper is spawned with `posix_spawn`: a `fork` from a vCPU callback
+deadlocks on QEMU's RCU lock.
+- `tiny_search` finds `x = 3` from a 9-qubit, 21-gate oracle.
+- Code Breaker finds BYRG from `consistent()`'s 1120-qubit, 4543-gate oracle, in 0.75 s. That matches
+  `qarm_exec.py`, which also takes 0.75 s.
+
+`QAVAIL` returns the runtime's features in `W1`, read by `qarm_features()`: `QARM_F_SEARCH` (1) and
+`QARM_F_VQE` (2). The plugin reports `QSEARCH` only when the helper is there (option `helper=PATH`,
+default the repository's `tools/qarm_oracle.py`; option `python=` for the interpreter). Without the helper,
+`tiny_search` prints `classical search`.
+
+The helper is Python: qoracle builds the oracle once per predicate, and the program itself stays native.
+The search is simulated. Sending it to an IBM device from libqarm needs Toffoli decomposition and a
+multi-controlled diffusion in its transpiler; `qarm_exec.py --qpu` does that today.
 
 **Limits.** QEMU's user mode runs Linux programs on a Linux host. On a Mac, use a Linux VM or container,
 or build the program natively against libqarm (section 7).
@@ -511,7 +532,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 - More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
   `QPERIOD` (period finding).
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
-- `QSEARCH` from a build-time oracle file, for libqarm and the QEMU plugin alike;
+- `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
