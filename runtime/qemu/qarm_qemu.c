@@ -21,6 +21,8 @@
  *             libqarm (state vector, or a real device on ibm): W0 = 1, or 2: refused
  *   QRAND     X1 = a buffer, W2 = bytes: W0 = 1 (ibm's measurements) or 3 (pseudo-random, libqarm's generator)
  *   QCAPS     X1 = a qarm_capabilities: libqarm's backend, with this plugin's feature bits
+ *   QSUBMIT, QPOLL, QWAIT   X1 = a qarm_request. QEXPECTN is submitted to libqarm and runs while the guest does
+ *             (a QPU job on ibm); every other instruction runs at QSUBMIT, on the request's registers
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QVSAMPLE, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
@@ -49,7 +51,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
-       OP_QBV = 0x1A, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
+       OP_QBV = 0x1A, OP_QSUBMIT = 0x12, OP_QPOLL = 0x13, OP_QWAIT = 0x14, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
@@ -84,8 +86,11 @@ static void note(const char *fmt, ...)
 }
 
 /* ---------------------------------------------------------------- the guest's registers and memory */
+static struct { int on; uint64_t x[6]; double d[2]; } vr;      /* QSUBMIT: the request's registers X0-X5, D0, D1 */
+
 static uint64_t x(int n)
 {
+    if (vr.on && n < 6) return vr.x[n];
     g_autoptr(GByteArray) b = g_byte_array_new();
     uint64_t v = 0;
     if (qemu_plugin_read_register(reg_x[n], b) >= 8) memcpy(&v, b->data, 8);
@@ -94,6 +99,7 @@ static uint64_t x(int n)
 
 static void set_x(int n, uint64_t v)
 {
+    if (vr.on && n < 6) { vr.x[n] = v; return; }
     g_autoptr(GByteArray) b = g_byte_array_new();
     g_byte_array_append(b, (const guint8 *)&v, 8);
     qemu_plugin_write_register(reg_x[n], b);
@@ -101,6 +107,7 @@ static void set_x(int n, uint64_t v)
 
 static void set_d(int n, double d)     /* the low 8 bytes of v<n> (z<n> with SVE); the rest cleared, as FMOV d<n> does */
 {
+    if (vr.on) { vr.d[n] = d; return; }
     g_autoptr(GByteArray) b = g_byte_array_new();
     int size = qemu_plugin_read_register(reg_v[n], b);
     if (size < 8) return;
@@ -364,7 +371,7 @@ static void qstructure(unsigned op)
 
 static uint32_t features(void)
 {
-    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE
+    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC
            | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON | QARM_F_BV
                             | QARM_F_AMPEST : 0);
 }
@@ -412,6 +419,80 @@ static int qcaps(void)
     return wr(x(1), &c, sizeof c) ? 1 : 0;
 }
 
+static void dispatch(unsigned op, uint64_t pc);
+
+/* ---------------------------------------------------------------- QSUBMIT, QPOLL, QWAIT */
+typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ticket; } request;
+typedef struct { qarm_job *job; uint64_t out; int k; } pending;
+static GHashTable *requests;            /* request address -> pending *: QEXPECTN jobs still on libqarm's QPU */
+
+static void finish(uint64_t addr, pending *p)
+{
+    request q;
+    double *e = g_new0(double, p->k);
+    int ok = qarm_rt_wait(p->job, e, NULL) > 0 && wr(p->out, e, sizeof *e * (size_t)p->k);
+    if (rd(addr, &q, sizeof q)) {
+        q.x[0] = ok ? 1 : 2;
+        q.state = 1;
+        wr(addr, &q, sizeof q);
+    }
+    g_free(e);
+    g_hash_table_remove(requests, GSIZE_TO_POINTER(addr));
+}
+
+static void qsubmit(uint64_t addr)
+{
+    request q;
+    _Static_assert(sizeof(request) == 80, "qarm_request is 80 bytes");
+    if (!rd(addr, &q, sizeof q)) { note("QSUBMIT: the request is not readable"); set_x(0, 2); return; }
+    if (q.opcode == OP_QSUBMIT || q.opcode == OP_QPOLL || q.opcode == OP_QWAIT) {
+        note("QSUBMIT: opcode %#x cannot be submitted", q.opcode);
+        set_x(0, 2);
+        return;
+    }
+    if (q.opcode == OP_QEXPECTN) {                       /* libqarm submits the job; the guest runs on */
+        problem *p = find(q.x[3]);
+        uint64_t k = (uint32_t)q.x[2], P = p ? p->a.params : 0;
+        if (p && k >= 1 && k <= 4096) {
+            double *th = g_new0(double, k * P + 1);
+            qarm_job *j = rd(q.x[1], th, sizeof(double) * k * P) ? qarm_rt_submit(p->rt, th, (int)k, 0) : NULL;
+            g_free(th);
+            if (j) {
+                pending *pd = g_new0(pending, 1);
+                *pd = (pending){j, q.x[4], (int)k};
+                g_hash_table_insert(requests, GSIZE_TO_POINTER(addr), pd);
+                q.state = 0;
+                q.ticket = addr;
+                wr(addr, &q, sizeof q);
+                if (qarm_rt_poll(j) != 0) finish(addr, pd);     /* exact and simulator: done at once */
+                set_x(0, 1);
+                return;
+            }
+        }
+    }
+    vr.on = 1;                                           /* any other instruction: now, on the request's registers */
+    memcpy(vr.x, q.x, sizeof vr.x);
+    memcpy(vr.d, q.d, sizeof vr.d);
+    vr.x[0] = 0;
+    dispatch(q.opcode, 0);
+    vr.on = 0;
+    memcpy(q.x, vr.x, sizeof q.x);
+    memcpy(q.d, vr.d, sizeof q.d);
+    q.state = 1;
+    q.ticket = addr;
+    wr(addr, &q, sizeof q);
+    set_x(0, 1);
+}
+
+static void qpoll(uint64_t addr, int wait)
+{
+    pending *p = g_hash_table_lookup(requests, GSIZE_TO_POINTER(addr));
+    if (p && (wait || qarm_rt_poll(p->job) != 0)) finish(addr, p);
+    request q;
+    set_x(0, rd(addr, &q, sizeof q) ? 1 : 2);
+    if (!wait) set_x(1, q.state);
+}
+
 static void packet(unsigned int vcpu, void *udata)
 {
     (void)vcpu;
@@ -421,6 +502,14 @@ static void packet(unsigned int vcpu, void *udata)
     unsigned version = w[1] >> 24, op = w[1] >> 16 & 0xFF;
     if (version != 2) return;
     g_mutex_lock(&lock);
+    if (op == OP_QSUBMIT) qsubmit(x(1));
+    else if (op == OP_QPOLL || op == OP_QWAIT) qpoll(x(1), op == OP_QWAIT);
+    else dispatch(op, pc);
+    g_mutex_unlock(&lock);
+}
+
+static void dispatch(unsigned op, uint64_t pc)
+{
     switch (op) {
     case OP_QAVAIL:
         set_x(0, 1);
@@ -481,7 +570,6 @@ static void packet(unsigned int vcpu, void *udata)
     default:
         note("unknown Q-ARM opcode %#x at %#llx: not executed", op, (unsigned long long)pc);
     }
-    g_mutex_unlock(&lock);
 }
 
 /* ---------------------------------------------------------------- QEMU's callbacks */
@@ -549,6 +637,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_
     if (!python) python = g_strdup("python3");
     have_search = g_file_test(helper, G_FILE_TEST_EXISTS);
     oracles = g_hash_table_new(g_direct_hash, g_direct_equal);
+    requests = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
     problems = g_ptr_array_new_with_free_func(problem_free);
     qemu_plugin_register_vcpu_init_cb(id, vcpu_init);
     qemu_plugin_register_vcpu_tb_trans_cb(id, tb_trans);

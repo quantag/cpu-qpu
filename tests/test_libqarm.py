@@ -11,7 +11,8 @@
      build; circuits with a qubit out of range or a CX on one qubit refused. With 5: ghz.c on the ibm mock, its
      samples a device's, QRAND's bytes measured, QCAPS flags hardware.
   8. QVSAMPLE: examples/qarm/maxcut_qaoa.c finds the largest cut natively; RY CX sampled on exact (0: here),
-     simulator and, with 5, the ibm mock (1: the coprocessor): only 00 and 11.
+     simulator and, with 5, the ibm mock (1: the coprocessor): only 00 and 11. Time evolution:
+     examples/qarm/spin_chain.c natively, as the plain build, 32 steps within 2e-3 of the exact curve.
   6. QSEARCH's engine (qarm_search.c) on hand-written oracles: x == 3 in 2 bits; x & 5 == 5 in 4 bits (four answers);
      a predicate with no answer; an oracle that leaves a work qubit set (refused).
   5. (libcurl, qiskit, qiskit-aer) backend ibm against tests/ibm_mock.py, a local stand-in for IBM's REST API that
@@ -20,7 +21,7 @@
      refusal of sessions; the async program polling while the job is queued.
 Run: python3 -m tests.test_libqarm"""
 import json, os, re, shutil, subprocess, sys, tempfile
-from tests.test_qarm_vqe import ALL_OPS, EXACT, MAXCUT, VSAMPLE
+from tests.test_qarm_vqe import ALL_OPS, EXACT, MAXCUT, VSAMPLE, SPIN, table, ising_exact
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INC = os.path.join(ROOT, "include")
@@ -179,7 +180,7 @@ def main():
         env = {"QARM_CONFIG": os.path.join(d, "none.json")}             # no config: the exact backend
         exe = {}
         for name, src in (("h2", H2), ("all", None), ("async", None), ("ghz", GHZ), ("badcirc", None),
-                          ("maxcut", MAXCUT), ("vsample", None)):
+                          ("maxcut", MAXCUT), ("vsample", None), ("spin", SPIN)):
             if src is None:
                 src = os.path.join(d, name + ".c")
                 open(src, "w").write({"all": ALL_OPS, "async": ASYNC, "badcirc": BADCIRC, "vsample": VSAMPLE}[name])
@@ -242,7 +243,12 @@ def main():
         for cfgfile, want in ((env["QARM_CONFIG"], 0), (sim, 1)):
             w, *c = (int(v) for v in sh([exe["vsample", True]], {"QARM_CONFIG": cfgfile}).stdout.split())
             assert w == want and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, (w, c)
-        print("8) QVSAMPLE: maxcut_qaoa natively finds the largest cut, 10; RY CX on exact and simulator: only 00 and 11")
+        a8, b8 = table(sh([exe["spin", False]]).stdout), table(sh([exe["spin", True]], env).stdout)
+        exact = ising_exact(times=[r[0] for r in b8])
+        assert len(b8) == 13 and all(abs(x - y) < 1e-6 for r, q in zip(a8, b8) for x, y in zip(r, q)), (a8, b8)
+        assert max(abs(r[2] - e) for r, e in zip(b8, exact)) < 2e-3
+        print("8) QVSAMPLE: maxcut_qaoa natively finds the largest cut, 10; RY CX on exact and simulator: only 00 and 11;"
+              " spin_chain natively: the plain build's M(t), 32 steps on the exact curve")
 
         src = os.path.join(d, "search.c")
         open(src, "w").write(SEARCH)

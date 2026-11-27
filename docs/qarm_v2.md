@@ -1,5 +1,8 @@
 # Q-ARM v2: quantum instructions with a classical fallback, in one ARM binary
 
+> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.0),
+> with a conformance program in `tests/conformance`. This document is the reference implementation's.
+
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
 extension, and no claim of a speedup today (section 11).
@@ -54,7 +57,7 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE`, 4096 `QSUBMIT`/`QPOLL`/`QWAIT` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
@@ -62,6 +65,7 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x18` | `QPERIOD` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = the least r > 0 with f(x + r) = f(x); or `W0 = 2`: none |
 | `0x19` | `QSIMON` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s ≠ 0 with f(x) = f(x ⊕ s); or `W0 = 2`: none |
 | `0x1A` | `QBV` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s with f(x) = s·x mod 2 (+ a constant) |
+| `0x12`–`0x14` | `QSUBMIT`, `QPOLL`, `QWAIT` | `X1` = `qarm_request` (an instruction and its registers) | the instruction, asynchronously: `qarm_expect_n_async` under QEMU leaves the IBM job running while the program works (docs/qarm_isa.md 6.5) |
 | `0x1C` | `QRAND` | `X1` = buffer, `W2` = n bytes | `W0 = 1`: measurements on quantum hardware; `W0 = 3`: a simulator's (pseudo-random) |
 | `0x30` | `QCIRC` | `X1` = `qarm_circuit`, `W2` = shots, `X3` = `uint64_t` samples | `W0 = 1`: samples written; `W0 = 2`: refused |
 | `0x31` | `QCAPS` | `X1` = `qarm_capabilities` | `W0 = 1`: version, features, qubits, flags (1 hardware, 2 measured, 4 async), backend name |
@@ -73,9 +77,8 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 
 | opcode | name | input | result | check |
 |---|---|---|---|---|
-| `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
-| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ by Trotter steps | exact for small cases |
+| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ natively in the runtime (qDRIFT, higher-order formulas); today a library function, section 6 | exact for small cases |
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
 instructions.
@@ -280,19 +283,17 @@ refuses an oracle larger than the device, with the numbers (`needs 1120 qubits, 
 run`, exit code 70), before anything is submitted. In practice the limit today is depth, not width:
 `is_three` already has 155 two-qubit gates after transpiling to Fez, where one CZ would do.
 
-**Async instructions (design, not implemented).** A program that should keep working while the QPU
-runs needs the asynchrony in the instruction set rather than hidden in the runtime:
+**Async instructions.** A program that should keep working while the QPU runs needs the asynchrony in
+the instruction set, rather than hidden in the runtime.
+- `QSUBMIT` takes any instruction as a `qarm_request`: the opcode, and its input registers.
+- `QPOLL` reports whether the request is done. `QWAIT` waits for it.
+- When the request is done, it holds the output registers, and the memory outputs are written
+  (`docs/qarm_isa.md`, section 6.5).
 
-| opcode | name | in | out |
-|---|---|---|---|
-| `0x12` | `QSUBMIT` | `X1` = f, `W2` = bits | `W0` = 1 and `X3` = ticket, or `W0` = 0 (no coprocessor) |
-| `0x13` | `QPOLL` | `X3` = ticket | `W0` = 1 done, 3 still queued or running |
-| `0x14` | `QWAIT` | `X3` = ticket | as `QSEARCH`: `W0` = 1 and `W3` = x, or `W0` = 2 |
-
-On the simulator, `QSUBMIT` would compute the answer at once and `QPOLL` would always report done. On a
-plain CPU, `W0` = 0 sends the program down the classical path, as now. A ticket is the backend's job id held
-by the runtime, so a program could submit several searches and collect them later. That is how CUDA-Q's
-`cudaq::sample_async` and Qiskit's `job.result()` already work.
+Under QEMU with libqarm on `ibm`, `QEXPECTN` stays on the QPU while the program runs. Every other
+instruction, and every instruction under `qarm_exec.py`, completes at `QSUBMIT`. On a plain CPU `W0 = 0`,
+and `qarm.h` computes the batch itself. This is how CUDA-Q's `cudaq::sample_async` and Qiskit's
+`job.result()` work, but at the instruction level.
 
 ## 6. VQE
 
@@ -344,6 +345,35 @@ QVSAMPLE (the coprocessor's measurements): best cut 10 (11010010), in 38.1% of 1
     queue per gradient.
   - The gradient is then summed per parameter, weighted by each rotation's `scale`.
 
+### Time evolution: `qarm_evolve_n`
+
+Hamiltonian simulation needs no new instruction. `qarm_trotter` writes exp(−iHt) as an ansatz table of
+second-order (symmetric) Trotter steps. Each Pauli term of H becomes a `QARM_PAULI_ROT`, and adjacent
+equal terms are merged.
+
+The rotation angles are scale × θ₀ with θ₀ = t / steps. So one table serves every time t, and k times are
+k parameter vectors of one `QEXPECTN` batch: one job on a QPU.
+
+```c
+/* <O(t)> for k times from the basis state init; ops: room for about 2 * steps * terms operations */
+int qarm_evolve_n(const qarm_hamiltonian *h, const qarm_hamiltonian *o, uint64_t init, const double *t, int k,
+                  int steps, qarm_op *ops, uint32_t cap, double *out);
+```
+
+`examples/qarm/spin_chain.c` quenches the transverse-field Ising chain at its critical point: 8 spins,
+H = −Σ ZᵢZᵢ₊₁ − Σ Xᵢ, all spins up at t = 0. It prints the magnetization for 13 times, with 4 Trotter steps
+and with 32.
+
+| backend | M(0) | M(1.0) | the error at 32 steps |
+|---|---|---|---|
+| plain CPU, `qarm_exec.py`, libqarm, QEMU (exact) | 1.0000 | 0.2388 | ≤ 3.4·10⁻⁴ from exp(−iHt) |
+| noise model of Fez, 4 steps (53 two-qubit rotations) | 0.8177 | 0.1784 | — |
+| noise model of Fez, 32 steps (834 two-qubit gates) | 0.2647 | 0.0437 | — |
+
+The last row is the hardware's limit. At t = 0 the angles are zero, but the transpiled circuit is still
+834 CZ deep, and decoherence takes most of the signal. Fewer, longer steps are the better trade on
+today's devices.
+
 ### Tables (include/qarm.h)
 
 ```c
@@ -385,7 +415,7 @@ $ ./h2_vqe                                    # a plain CPU
 E(-2.918398) = -1.137306 Ha; exact ground state -1.137306 Ha, difference 0.0 mHa
 $ python3 qarm_exec.py h2_vqe                 # the same, from the runtime's exact simulator
 $ python3 qarm_exec.py --backend preview h2_vqe
-[qarm: QVLOAD: 2 qubits, 5 Pauli terms, an ansatz of 3 operations (1 two-qubit) with 1 parameter; on preview: noise model of fake_fez (156 qubits): 2 measurement bases, readout correction, up to 1 two-qubit gates after transpiling]
+[qarm: QVLOAD: 2 qubits, 5 Pauli terms, an ansatz of 3 operations (1 two-qubit gates, 0 multi-qubit Pauli rotations) with 1 parameter; on preview: noise model of fake_fez (156 qubits): 2 measurement bases, readout correction, up to 1 two-qubit gates after transpiling]
 ...
 $ python3 qarm_exec.py --qpu h2_vqe           # config.json: a real IBM device
 ```
@@ -565,9 +595,9 @@ while (qarm_job_ready(j) == 0)
 qarm_job_wait(j, energies, errors);                  // the results; frees the job
 ```
 
-With libqarm on `ibm`, `qarm_job_ready` polls IBM once and never waits. In the other builds the batch is
-computed when it is sent, so the job is ready at once. This is the asynchronous instruction set of
-section 5 (`QSUBMIT` / `QPOLL` / `QWAIT`), as a C API.
+With libqarm on `ibm`, `qarm_job_ready` polls IBM once and never waits. The arm64 packet build sends the
+batch with `QSUBMIT` and polls with `QPOLL`. Under QEMU on `ibm` the job is then really asynchronous; in
+the other builds the batch is computed when it is sent, so the job is ready at once.
 
 **What is not native yet.** `qarm_search` is classical in a libqarm build. Its oracle is built from the
 function's machine code by qoracle, which is Python. A native `QSEARCH` needs that oracle compiled at
@@ -665,6 +695,48 @@ or build the program natively against libqarm (section 7).
 
 CI builds QEMU 10.2.4 once and caches it.
 
+### Binaries built without qarm.h: `tools/qarm_patch.py`
+
+A program does not need to be written for Q-ARM. Many programs already contain a brute-force search: a
+loop that tries every candidate until a predicate accepts one, or keeps the cheapest. `tools/qarm_patch.py`
+rewrites such a binary, ELF for AArch64, after it was built:
+
+```
+$ aarch64-linux-gnu-gcc -O1 examples/qarm/legacy_search.c -o legacy_search        # no qarm.h in it
+$ python3 tools/qarm_patch.py legacy_search --search find_key=valid_key:12 \
+                                            --min cheapest_route=route_cost:12 -o legacy_search.qarm
+qarm_patch: find_key (0x17c4): QSEARCH on valid_key (0x1798), 12 bits; the instruction at 0x17c4 (stp x29, x30, [sp, #-0x20]!) moved to the trampoline at 0x22000
+qarm_patch: cheapest_route (0x1818): QMIN on route_cost (0x1800), 12 bits; ...
+$ qemu-aarch64 -plugin libqarm-qemu.so legacy_search.qarm
+[qarm-qemu: QSEARCH valid_key, 12 bits: oracle of 92 qubits and 345 gates from the machine code; Grover (BBHT) found x = 90 with 161 oracle calls in 23 rounds (simulated: ...)]
+[qarm-qemu: QMIN route_cost, 12 bits: compute oracle of 193 qubits and 758 gates (32 result bits) from the machine code; Durr-Hoyer found x = 1381, value 0, with 626 oracle calls in 8 Grover searches (simulated)]
+key: 90 (valid)
+cheapest route: 1381 (cost 0)
+```
+
+`--search FUNC=PRED:BITS` states that `FUNC` returns some x < 2^BITS with `PRED(x) = 1`.
+`--min FUNC=COST:BITS` states that it returns an x with the least `COST(x)`. The statement is the
+user's; the tool cannot prove it.
+
+The patch adds an executable segment with one trampoline per function. `FUNC`'s first instruction
+becomes a `B` to the trampoline, which:
+1. saves the arguments;
+2. emits the `QSEARCH` or `QMIN` packet on `PRED`;
+3. checks the runtime's answer by calling `PRED`, the program's own code;
+4. returns the answer.
+
+When the packet is not executed (a plain CPU), declined, finds nothing, or the check fails, the
+trampoline restores the arguments. It then runs the moved instruction and branches back into `FUNC`'s
+own loop. The patched binary behaves as before on every AArch64 CPU.
+
+The patch is careful about the prologue:
+- A `BTI` or `PACIASP` landing pad stays in place. With `PACIASP` the trampoline authenticates the
+  return address before it returns.
+- Every branch is direct, so BTI-guarded pages need no new landing pads.
+- A PC-relative first instruction is refused.
+
+`qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
+
 ## 9. What is checked
 
 `tests/test_qarm_exec.py`, in CI on Linux x86-64 (GCC cross compiler, qemu), Linux arm64 and macOS:
@@ -695,9 +767,6 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 - More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
   `QCOLLISION`.
-- A versioned, vendor-neutral specification of the instruction set, with a conformance suite that any
-  runtime can be checked against.
-- `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;

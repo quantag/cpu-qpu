@@ -11,7 +11,8 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
      libqarm): tiny_search finds x = 3; Code Breaker finds the secret with its ~1100-qubit oracle; without the
      helper, QAVAIL reports no QSEARCH and the program searches classically.
   4. The simulator backend (plugin option backend=simulator); without the plugin, the classical path.
-  5. (libcurl, qiskit, qiskit-aer) the ibm backend against tests/ibm_mock.py: 3 qubits within 5 standard errors.
+  5. (libcurl, qiskit, qiskit-aer) the ibm backend against tests/ibm_mock.py: 3 qubits within 5 standard errors;
+     qarm_expect_n_async through QSUBMIT: the job runs in libqarm while the guest polls (QPOLL), then QWAIT.
   6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
   7. examples/qarm/partition.c: QMIN finds a split of difference 1, QCOUNT counts the nearly balanced splits (32)
      within its error bound, both from the guest's own functions.
@@ -19,12 +20,18 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   9. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c, its gate tables read from guest memory; with 5, on the ibm mock
      (the device's samples, QRAND measured, QCAPS: hardware).
  10. QVSAMPLE: examples/qarm/maxcut_qaoa.c, the same output as under qarm_exec.py's exact simulator up to the
-     samples: the largest cut, 10; RY CX: only 00 and 11 (and on the ibm mock with 5).
+     samples: the largest cut, 10; RY CX: only 00 and 11 (and on the ibm mock with 5). spin_chain.c (time
+     evolution): the same table as under qarm_exec.py.
+ 11. The conformance program (docs/qarm_isa.md): 14 of 14 under the plugin; without the oracle helper the
+     oracle instructions are not claimed (skipped) and the rest pass.
+ 12. tools/qarm_patch.py: examples/qarm/legacy_search.c, built without qarm.h and patched, runs QSEARCH and QMIN
+     under the plugin (the trampoline's packets in a segment the tool added); without the plugin, the original loops.
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
 from tests.test_qarm_vqe import ALL_OPS, EXACT, VSAMPLE
+from tests.test_libqarm import ASYNC
 
 EX = os.path.join(ROOT, "examples", "qarm")
 
@@ -63,9 +70,10 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
+        csrc = os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c")
         vsrc = os.path.join(d, "vsample.c")
         open(vsrc, "w").write(VSAMPLE)
-        for name, src in (("maxcut", os.path.join(EX, "maxcut_qaoa.c")), ("vsample", vsrc), ("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+        for name, src in (("spin", os.path.join(EX, "spin_chain.c")), ("conformance", csrc), ("maxcut", os.path.join(EX, "maxcut_qaoa.c")), ("vsample", vsrc), ("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
                           ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
@@ -140,6 +148,11 @@ def main():
             p = sh(qemu(f",config={cfg}") + [exe["ghz"]])
             assert "quantum hardware" in p.stdout and "qemu libqarm: ibm" in p.stdout and "(hardware)" in p.stdout, p.stdout
             assert len(re.findall(r"QCIRC: .* shots on ibm_fez \(job mock-", p.stderr)) == 5, p.stderr
+            asrc = os.path.join(d, "async.c")
+            open(asrc, "w").write(ASYNC)
+            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), asrc, "-o", os.path.join(d, "async"), "-lm"])
+            p = sh(qemu(f",config={cfg}") + [os.path.join(d, "async")])
+            assert "asynchronous" in p.stderr and len(p.stdout.splitlines()) == 4, (p.stdout, p.stderr)
             w, *c = (int(v) for v in sh(qemu(f",config={cfg}") + [exe["vsample"]]).stdout.split())
             assert w == 1 and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, (w, c)
             mock.close()
@@ -161,7 +174,9 @@ def main():
         p, p2 = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
         assert "15 = 3 x 5" in p.stdout and "21 = 7 x 3" in p.stdout and "QPERIOD on the quantum" in p.stdout, p
         assert "shift is 0x2d (QSIMON)" in p2.stdout and "string is 0x35 (QBV" in p2.stdout, p2
+        os.environ["QARM_SEED"] = "2"                    # QAMPEST's bound holds with probability >= 8/pi^2: seeded
         p = sh(qemu(",quiet=on") + [exe["pi"]])
+        del os.environ["QARM_SEED"]
         est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
         assert abs(est - 3.1475) <= err, p.stdout
         print(f"8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35; "
@@ -176,8 +191,34 @@ def main():
         assert p.stdout.splitlines()[0] == sh(EXEC + ["-q", exe["maxcut"]]).stdout.splitlines()[0]
         w, *c = (int(v) for v in sh(qemu(",quiet=on") + [exe["vsample"]]).stdout.split())
         assert w == 1 and c[1] == c[2] == 0, c
+        p = sh(qemu(",quiet=on") + [exe["spin"]])
+        assert p.stdout == sh(EXEC + ["-q", exe["spin"]]).stdout and len(p.stdout.splitlines()) == 15, p.stdout
         print("10) QVSAMPLE: maxcut_qaoa under QEMU, the same QAOA energy as under qarm_exec.py, the largest cut 10 "
-              f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}")
+              f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}; spin_chain: the same M(t) as under qarm_exec.py")
+        p = sh(qemu(",quiet=on") + [exe["conformance"]], check=False)
+        assert p.returncode == 0 and "14 passed, 0 failed, 0 skipped (features 0x1fff)" in p.stdout, p.stdout
+        p = sh(qemu(",quiet=on,helper=/nonexistent") + [exe["conformance"]], check=False)
+        skips = re.findall(r"SKIP (\w+): \w+ not claimed", p.stdout)
+        assert p.returncode == 0 and sorted(skips) == sorted(["QSEARCH", "QMIN", "QCOUNT", "QAMPEST", "QPERIOD", "QSIMON",
+                                                             "QBV"]), p.stdout
+        lexe, lout = os.path.join(d, "legacy"), os.path.join(d, "legacy.qarm")
+        sh(cc + ["-O1", os.path.join(EX, "legacy_search.c"), "-o", lexe])
+        sh([sys.executable, os.path.join(ROOT, "tools", "qarm_patch.py"), lexe, "--search", "find_key=valid_key:12",
+            "--min", "cheapest_route=route_cost:12", "-o", lout])
+        want = "key: 90 (valid)\ncheapest route: 1381 (cost 0)\n"
+        p, r = sh(qemu() + [lout]), sh([q] + sysroot + [lout])
+        assert p.stdout == want and r.stdout == want, (p.stdout, r.stdout)
+        assert "QSEARCH valid_key, 12 bits" in p.stderr and "QMIN route_cost, 12 bits" in p.stderr, p.stderr
+        sh(cc + ["-O1", "-mbranch-protection=standard", os.path.join(EX, "legacy_search.c"), "-o", lexe])
+        sh([sys.executable, os.path.join(ROOT, "tools", "qarm_patch.py"), lexe, "--search", "find_key=valid_key:12",
+            "--min", "cheapest_route=route_cost:12", "-o", lout])
+        p = sh([q, "-cpu", "max"] + sysroot + ["-plugin", plugin + ",quiet=on", lout])     # PAC and BTI enforced
+        assert p.stdout == want, p.stdout
+        print("12) qarm_patch: legacy_search (no qarm.h) patched: QSEARCH and QMIN under the plugin; without it the "
+              "original loops; the same output; built with -mbranch-protection=standard (PACIASP kept, AUTIASP before the "
+              "trampoline's RET), the same under -cpu max")
+        print("11) conformance: 14 of 14 under the plugin; without the oracle helper the 7 oracle instructions are "
+              "not claimed, the other 7 tests pass")
     print("PASS")
 
 
