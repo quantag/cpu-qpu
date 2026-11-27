@@ -400,7 +400,7 @@ class Runtime:
         name = self.p.functions.get(fn, f"function at {fn:#x}")
         if not 1 <= bits <= 16:
             raise QarmError(f"QCOUNT {name}: bits = {bits}; 1 to 16")
-        circuit = phase_oracle(self, fn, name, bits)
+        circuit = phase_oracle(self, fn, name, bits, "QCOUNT")
         sign = oracle_signs(circuit, bits)
         est, bound, t, calls = quantum_count(int((sign < 0).sum()), bits)
         self.set_x(0, 1)
@@ -418,11 +418,11 @@ class Runtime:
         if not 1 <= bits <= 16:
             raise QarmError(f"{kind} {name}: bits = {bits}; 1 to 16")
         if op == OP_QBV:
-            circuit = phase_oracle(self, fn, name, bits)
+            circuit = phase_oracle(self, fn, name, bits, kind)
             r, queries = bernstein_vazirani(oracle_signs(circuit, bits), bits)
             what = "phase oracle"
         else:
-            circuit = compute_oracle(self, fn, name, bits)
+            circuit = compute_oracle(self, fn, name, bits, kind)
             values = oracle_values(circuit, bits)
             r, queries = (period_find if op == OP_QPERIOD else simon)(values, bits)
             what = "compute oracle"
@@ -711,7 +711,31 @@ DATA_IMPORTS = {"__stack_chk_guard": 0x2F8A5C3E91D04B76, "stdout": STDOUT_FILE, 
 
 
 # ------------------------------------------------------------------ oracle and Grover's search
-def phase_oracle(rt, fn, name, bits):
+def _explain(rt, e):
+    """qoracle's error, with the undecodable instruction's word and disassembly when it names an address."""
+    import re as _re
+    text = str(e)
+    m = _re.search(r"at offset (0x[0-9a-f]+)", text)
+    if m:
+        addr = int(m.group(1), 16)
+        try:
+            word = bytes(rt.mu.mem_read(addr, 4))
+            text += f" (word {int.from_bytes(word, 'little'):08x}"
+            try:
+                import capstone
+                md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
+                ins = next(md.disasm(word, addr), None)
+                if ins:
+                    text += f": {ins.mnemonic} {ins.op_str}"
+            except ImportError:
+                pass
+            text += ")"
+        except Exception:
+            pass
+    return text
+
+
+def phase_oracle(rt, fn, name, bits, kind="QSEARCH"):
     """qoracle's phase oracle of f, from the program's machine code at the program's own addresses."""
     try:
         import qoracle
@@ -732,15 +756,15 @@ def phase_oracle(rt, fn, name, bits):
         full = qoracle.build(name, name, spec, out_bits=32)
         if full.out_bits != 1:
             if not full.report["verification"]["exhaustive"]:
-                raise QarmError(f"QSEARCH {name}: its result is not proven to be 0 or 1")
+                raise QarmError(f"{kind} {name}: its result is not proven to be 0 or 1")
             from qoracle import verify
             cpu = verify.CPU(image)
             for v in range(1 << bits):
                 if cpu.call([v]) & 0xFFFFFFFF not in (0, 1):
-                    raise QarmError(f"QSEARCH {name}: {name}({v}) is neither 0 nor 1")
+                    raise QarmError(f"{kind} {name}: {name}({v}) is neither 0 nor 1")
         ph = qoracle.build(name, name, spec, out_bits=1, mode="phase")
     except qoracle.OracleError as e:
-        raise QarmError(f"QSEARCH {name}: qoracle: {e}")
+        raise QarmError(f"{kind} {name}: qoracle: {_explain(rt, e)}")
     finally:
         frontend.load = load
     c = ph.circuit
@@ -804,7 +828,7 @@ def grover_signs(sign, bits, check, seed=None, rng=None):
     return None, calls, rounds
 
 
-def compute_oracle(rt, fn, name, bits):
+def compute_oracle(rt, fn, name, bits, kind="QMIN"):
     """qoracle's compute oracle of a cost function: |x>|0> -> |x>|cost(x)>, from its machine code."""
     try:
         import qoracle
@@ -823,7 +847,7 @@ def compute_oracle(rt, fn, name, bits):
     try:
         o = qoracle.build(name, name, [qoracle.Arg(name="x", bits=bits)], out_bits=32)
     except qoracle.OracleError as e:
-        raise QarmError(f"{name}: qoracle: {e}")
+        raise QarmError(f"{kind} {name}: qoracle: {_explain(rt, e)}")
     finally:
         frontend.load = load
     c = o.circuit
