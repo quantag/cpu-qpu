@@ -267,7 +267,7 @@ int qarm_rt_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_rt **out)
         snprintf(extra, sizeof extra, ", %s, up to %d two-qubit gates after transpiling",
                  r->mitigate ? "readout correction" : "no readout correction", twoq);
     qarm_note("QVLOAD: %d qubits, %u Pauli terms, an ansatz of %d operations (%d two-qubit) with %d parameter%s; "
-              "native libqarm on %s: %d measurement bases%s", r->n, h->terms, r->nops, two_ansatz, r->params,
+              "libqarm on %s: %d measurement bases%s", r->n, h->terms, r->nops, two_ansatz, r->params,
               r->params == 1 ? "" : "s", r->where, r->ngroups, extra);
     return r->backend == B_EXACT ? 0 : 1;
 }
