@@ -86,6 +86,21 @@ int main(void) {
         r = qarm_rt_count(o, &n, &b, report, sizeof report);
         printf("count %d %ld %.3f | %s\n", r, n, b, report);
         qarm_rt_oracle_free(o);
+        /* QPERIOD: f(x) = x mod 4 on 4 bits (out = x's low two bits): period 4 */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 mod4 6 0 4 4 2 2\ncx 0 4\ncx 1 5\n", err, sizeof err);
+        int pr = -1; r = qarm_rt_period(o, &pr, report, sizeof report);
+        printf("period %d %d | %s\n", r, pr, report);
+        qarm_rt_oracle_free(o);
+        /* QSIMON: f(x) = x0 xor x1 on 2 bits: f(x) = f(x ^ 3) */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 xor01 3 0 2 2 1 2\ncx 0 2\ncx 1 2\n", err, sizeof err);
+        int sh = -1; r = qarm_rt_simon(o, &sh, report, sizeof report);
+        printf("simon %d %d | %s\n", r, sh, report);
+        qarm_rt_oracle_free(o);
+        /* QBV: f(x) = x0 xor x2 on 3 bits (z on qubits 0 and 2): s = 5 */
+        o = qarm_rt_oracle_parse("qarm-oracle 1 bv5 3 0 3 2\nz 0\nz 2\n", err, sizeof err);
+        int sv = -1; r = qarm_rt_bv(o, &sv, report, sizeof report);
+        printf("bv %d %d | %s\n", r, sv, report);
+        qarm_rt_oracle_free(o);
     }
     return 0;
 }
@@ -193,8 +208,10 @@ def main():
         assert lines[4].startswith("min 1 5 0 |"), lines
         n, b = int(lines[5].split()[2]), float(lines[5].split()[3])
         assert lines[5].startswith("count 1 ") and abs(n - 4) <= b, lines
+        assert lines[6].startswith("period 1 4 |") and lines[7].startswith("simon 1 3 |") and lines[8].startswith("bv 1 5 |"), lines
         print(f"6) QSEARCH's engine: x == 3 found; x & 5 == 5 found ({x}); an oracle that leaves a work qubit set refused;"
-              f" no answer reported. QMIN: x xor 5 least at 5. QCOUNT: {n} +- {b:.1f} of 4")
+              f" no answer reported. QMIN: x xor 5 least at 5. QCOUNT: {n} +- {b:.1f} of 4. QPERIOD: x mod 4 has period 4; "
+              "QSIMON: x0 xor x1 has shift 3; QBV: x0 xor x2 gives 5")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

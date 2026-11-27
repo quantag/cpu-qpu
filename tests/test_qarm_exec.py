@@ -10,6 +10,7 @@
   3. Errors: a predicate that calls another function (exit 70, the reason); a missing library function.
      3b. QMIN and QCOUNT: examples/qarm/partition.c (number partitioning), oracles from imbalance()'s and
      nearly_balanced()'s machine code; on the plain CPU every split is tried.
+     3c. QPERIOD, QSIMON, QBV: examples/qarm/shor.c (factoring 15 and 21) and hidden.c.
   4. (with qiskit, qiskit-aer, qiskit-ibm-runtime) QSEARCH on a QPU backend from a config file:
      examples/qarm/tiny_search.c on IBM's noise model of Fez and through the "ibm" backend's local channel (the
      code path of a real device, one asynchronous job, without the login); Code Breaker's 1000-qubit oracle is
@@ -136,6 +137,18 @@ def main():
             assert "every split tried on this CPU" in q.stdout and "difference 1\n" in q.stdout and "32 (counted)" in q.stdout
         print(f"3b) QMIN and QCOUNT (examples/qarm/partition.c): a split of difference 1; about {n} +- {err} nearly "
               "balanced splits (32 counted on the CPU)")
+
+        for ex, want in (("shor", ["15 = 3 x 5", "21 = 7 x 3"]), ("hidden", ["shift is 0x2d", "string is 0x35"])):
+            sexe = os.path.join(d, ex)
+            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", ex + ".c"),
+                     "-o", sexe])
+            p = sh(EXEC + [sexe])
+            assert all(w in p.stdout for w in want) and "(simulated)" in p.stderr, (p.stdout, p.stderr)
+            if native:
+                q = sh(native + [sexe])
+                assert all(w in q.stdout for w in want), q.stdout
+        print("3c) QPERIOD (examples/qarm/shor.c: 15 = 3 x 5, 21 = 7 x 3 from C modexp's oracle), QSIMON (shift 0x2d), "
+              "QBV (string 0x35): the same answers as the plain CPU")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

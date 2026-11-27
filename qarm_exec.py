@@ -39,8 +39,9 @@ STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT = 0x10, 0x11, 0x15, 0x16
+OP_QPERIOD, OP_QSIMON, OP_QBV = 0x18, 0x19, 0x1A
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -325,13 +326,15 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 15)                      # W1: features, QSEARCH | VQE | QMIN | QCOUNT
+            self.set_x(1, 127)                     # W1: features: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
             self.qmin(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QCOUNT:
             self.qcount(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op in (OP_QPERIOD, OP_QSIMON, OP_QBV):
+            self.qstructure(op, self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
         mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
@@ -406,6 +409,33 @@ class Runtime:
         self.note(f"QCOUNT {name}, {bits} bits: quantum counting with {t} precision qubits, {calls} controlled Grover "
                   f"iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
                   f"(error bound {bound:.1f}; simulated)")
+
+    def qstructure(self, op, fn, bits):
+        """QPERIOD, QSIMON, QBV: X1 = f, W2 = bits; W0 = 1 and W3 = the period r, the hidden shift s or the hidden
+        string s; W0 = 2: none (QPERIOD, QSIMON). Oracles from f's machine code; simulated."""
+        kind = {OP_QPERIOD: "QPERIOD", OP_QSIMON: "QSIMON", OP_QBV: "QBV"}[op]
+        name = self.p.functions.get(fn, f"function at {fn:#x}")
+        if not 1 <= bits <= 16:
+            raise QarmError(f"{kind} {name}: bits = {bits}; 1 to 16")
+        if op == OP_QBV:
+            circuit = phase_oracle(self, fn, name, bits)
+            r, queries = bernstein_vazirani(oracle_signs(circuit, bits), bits)
+            what = "phase oracle"
+        else:
+            circuit = compute_oracle(self, fn, name, bits)
+            values = oracle_values(circuit, bits)
+            r, queries = (period_find if op == OP_QPERIOD else simon)(values, bits)
+            what = "compute oracle"
+        head = (f"{kind} {name}, {bits} bits: the {circuit['qubits']}-qubit, {circuit['gates']}-gate {what} from "
+                f"{name}'s machine code, {queries} quantum quer{'y' if queries == 1 else 'ies'} (simulated)")
+        if r is None:
+            self.set_x(0, 2)
+            self.note(f"{head}: none")
+        else:
+            self.set_x(0, 1)
+            self.set_x(3, r)
+            label = {"QPERIOD": "period r", "QSIMON": "hidden shift s", "QBV": "hidden string s"}[kind]
+            self.note(f"{head}: {label} = {r}" + (f" ({r:#x})" if kind != "QPERIOD" else ""))
 
     def qsearch_qpu(self, fn, name, bits, circuit):
         """QSEARCH on config.json's backend: one job, then the answers checked by running f."""
@@ -876,6 +906,92 @@ def quantum_count(M, bits, seed=None):
     est = N * math.sin(math.pi * y / T) ** 2
     bound = 2 * math.pi * math.sqrt(est * (N - est)) / T + math.pi ** 2 * N / T ** 2
     return int(round(est)), bound, t, T - 1
+
+
+def _walsh_hadamard(v):
+    """The normalized Walsh-Hadamard transform: H on every qubit."""
+    import numpy as np
+    v = np.array(v, dtype=float)
+    h = 1
+    while h < len(v):
+        v = v.reshape(-1, 2, h)
+        v = np.stack((v[:, 0] + v[:, 1], v[:, 0] - v[:, 1]), axis=1).reshape(-1)
+        h *= 2
+    return v / math.sqrt(len(v))
+
+
+def _sample(p, rng):
+    import numpy as np
+    return min(int(np.searchsorted(np.cumsum(p), rng.random() * p.sum())), len(p) - 1)
+
+
+def period_find(values, bits, seed=None, rounds=24):
+    """Shor's period finding, simulated: measure f (a random value), quantum Fourier transform of the inputs with
+    that value, measure y; the continued fractions of y / 2^bits give candidates, each checked on all inputs.
+    Returns (the least period found or None, quantum queries)."""
+    import numpy as np
+    from fractions import Fraction
+    N = 1 << bits
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+
+    def periodic(r):
+        return 0 < r < N and bool((values[:N - r] == values[r:]).all())
+    best = None
+    for q in range(1, rounds + 1):
+        x0 = int(rng.random() * N)
+        amp = (values == values[x0]).astype(float)
+        amp /= math.sqrt(amp.sum())
+        p = np.abs(np.fft.fft(amp) / math.sqrt(N)) ** 2
+        y = _sample(p, rng)
+        if y == 0:
+            continue
+        frac, cands = Fraction(y, N), set()
+        a, b = frac.numerator, frac.denominator          # the convergents of y/N, by the continued fraction
+        h0, h1, k0, k1 = 0, 1, 1, 0
+        while b:
+            t = a // b
+            a, b = b, a - t * b
+            h0, h1, k0, k1 = h1, t * h1 + h0, k1, t * k1 + k0
+            cands.update(k1 * m for m in range(1, 5))
+        for r in sorted(cands):
+            if periodic(r):
+                best = min(d for d in range(1, r + 1) if r % d == 0 and periodic(d))   # its least periodic divisor
+                return best, q
+    return None, rounds
+
+
+def simon(values, bits, seed=None):
+    """Simon's algorithm, simulated: Walsh-Hadamard samples y with y.s = 0 until n - 1 independent ones, then s
+    from the null space over GF(2), checked on all inputs. Returns (s or None for a one-to-one f, queries)."""
+    import numpy as np
+    N = 1 << bits
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    basis = {}                                           # leading bit -> row
+    queries = 0
+    while len(basis) < bits - 1 and queries < 4 * bits + 8:
+        queries += 1
+        x0 = int(rng.random() * N)
+        amp = (values == values[x0]).astype(float)
+        amp /= math.sqrt(amp.sum())
+        y = _sample(_walsh_hadamard(amp) ** 2, rng)
+        for lead in sorted(basis, reverse=True):         # reduce y by the rows so far
+            if y >> lead & 1:
+                y ^= basis[lead]
+        if y:
+            basis[y.bit_length() - 1] = y
+    for s in range(1, N):                                # the null space of at most n - 1 rows: a nonzero s
+        if all(bin(row & s).count("1") % 2 == 0 for row in basis.values()):
+            if bool((values == values[np.arange(N) ^ s]).all()):
+                return s, queries
+    return None, queries
+
+
+def bernstein_vazirani(sign, bits):
+    """Bernstein-Vazirani: H, the phase oracle once, H; for f(x) = s.x the result is s with certainty."""
+    import numpy as np
+    N = 1 << bits
+    p = _walsh_hadamard(sign / math.sqrt(N)) ** 2
+    return int(np.argmax(p)), 1
 
 
 def qiskit_oracle(circuit):

@@ -262,3 +262,170 @@ int qarm_rt_count(const qarm_oracle *o, long *count, double *bound, char *report
              "simulated)", o->name, o->bits, o->n, o->ngates, t, T - 1, *count, *bound);
     return 1;
 }
+
+/* ---------------------------------------------------------------- QPERIOD, QSIMON, QBV */
+static long sample_p(const double *p, long N)
+{
+    double total = 0, acc = 0;
+    for (long b = 0; b < N; b++) total += p[b];
+    double u = s_uniform() * total;
+    for (long b = 0; b < N - 1; b++) { acc += p[b]; if (u < acc) return b; }
+    return N - 1;
+}
+
+static void fft(double *re, double *im, long N)          /* in place, radix 2, e^{+2 pi i jk / N} */
+{
+    for (long i = 1, j = 0; i < N; i++) {
+        long bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { double t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (long len = 2; len <= N; len <<= 1) {
+        double a = 2 * M_PI / (double)len, wr = cos(a), wi = sin(a);
+        for (long i = 0; i < N; i += len) {
+            double cr = 1, ci = 0;
+            for (long k = 0; k < len / 2; k++) {
+                long u = i + k, v = i + k + len / 2;
+                double tr = re[v] * cr - im[v] * ci, ti = re[v] * ci + im[v] * cr;
+                re[v] = re[u] - tr; im[v] = im[u] - ti;
+                re[u] += tr; im[u] += ti;
+                double nr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = nr;
+            }
+        }
+    }
+}
+
+static void wht(double *v, long N)                       /* the normalized Walsh-Hadamard transform */
+{
+    for (long h = 1; h < N; h <<= 1)
+        for (long i = 0; i < N; i += 2 * h)
+            for (long j = i; j < i + h; j++) {
+                double a = v[j], b = v[j + h];
+                v[j] = a + b;
+                v[j + h] = a - b;
+            }
+    double s = 1 / sqrt((double)N);
+    for (long i = 0; i < N; i++) v[i] *= s;
+}
+
+static int periodic(const int64_t *v, long N, long r)
+{
+    if (r <= 0 || r >= N) return 0;
+    for (long x = 0; x + r < N; x++)
+        if (v[x] != v[x + r]) return 0;
+    return 1;
+}
+
+static int cmp_long(const void *a, const void *b) { long x = *(const long *)a, y = *(const long *)b; return (x > y) - (x < y); }
+
+int qarm_rt_period(const qarm_oracle *o, int *r, char *report, size_t len)
+{
+    char err[300];
+    if (!o->out_bits) { snprintf(report, len, "QPERIOD %s: a phase oracle, not a compute oracle", o->name); return -1; }
+    long N = 1L << o->bits;
+    int64_t *v = malloc(sizeof *v * (size_t)N);
+    if (evaluate(o, NULL, v, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(v); return -1; }
+    double *re = malloc(sizeof *re * (size_t)N), *im = malloc(sizeof *im * (size_t)N);
+    long found = -1;
+    int q;
+    for (q = 1; q <= 24 && found < 0; q++) {
+        long x0 = (long)(s_uniform() * N), n = 0;            /* measuring f: the inputs with f(x0)'s value */
+        for (long x = 0; x < N; x++) n += v[x] == v[x0];
+        for (long x = 0; x < N; x++) { re[x] = v[x] == v[x0] ? 1 / sqrt((double)n) : 0; im[x] = 0; }
+        fft(re, im, N);
+        for (long x = 0; x < N; x++) re[x] = (re[x] * re[x] + im[x] * im[x]) / (double)N;
+        long y = sample_p(re, N);
+        if (!y) continue;
+        long cand[256], nc = 0, a = y, b = N, h0 = 0, h1 = 1, k0 = 1, k1 = 0;
+        while (b && nc < 250) {                              /* the convergents of y / N */
+            long t = a / b, rem = a - t * b, h2 = t * h1 + h0, k2 = t * k1 + k0;
+            a = b; b = rem; h0 = h1; h1 = h2; k0 = k1; k1 = k2;
+            for (long m = 1; m <= 4; m++) cand[nc++] = k1 * m;
+        }
+        qsort(cand, (size_t)nc, sizeof *cand, cmp_long);
+        for (long i = 0; i < nc && found < 0; i++)
+            if (periodic(v, N, cand[i]))
+                for (long d = 1; d <= cand[i]; d++)          /* its least periodic divisor */
+                    if (cand[i] % d == 0 && periodic(v, N, d)) { found = d; break; }
+    }
+    free(re); free(im); free(v);
+    if (found < 0) {
+        snprintf(report, len, "QPERIOD %s, %d bits: no period after 24 quantum queries (simulated)", o->name, o->bits);
+        return 2;
+    }
+    *r = (int)found;
+    snprintf(report, len, "QPERIOD %s, %d bits: compute oracle of %d qubits and %d gates from the machine code; the "
+             "quantum Fourier transform and continued fractions: period r = %ld after %d quantum quer%s (simulated)",
+             o->name, o->bits, o->n, o->ngates, found, q - 1, q - 1 == 1 ? "y" : "ies");
+    return 1;
+}
+
+int qarm_rt_simon(const qarm_oracle *o, int *s, char *report, size_t len)
+{
+    char err[300];
+    if (!o->out_bits) { snprintf(report, len, "QSIMON %s: a phase oracle, not a compute oracle", o->name); return -1; }
+    long N = 1L << o->bits;
+    int64_t *v = malloc(sizeof *v * (size_t)N);
+    if (evaluate(o, NULL, v, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(v); return -1; }
+    double *amp = malloc(sizeof *amp * (size_t)N);
+    long rows[64] = {0};                                     /* rows[lead]: a row with that leading bit, or 0 */
+    int rank = 0, queries = 0;
+    while (rank < o->bits - 1 && queries < 4 * o->bits + 8) {
+        queries++;
+        long x0 = (long)(s_uniform() * N), n = 0;
+        for (long x = 0; x < N; x++) n += v[x] == v[x0];
+        for (long x = 0; x < N; x++) amp[x] = v[x] == v[x0] ? 1 / sqrt((double)n) : 0;
+        wht(amp, N);
+        for (long x = 0; x < N; x++) amp[x] *= amp[x];
+        long y = sample_p(amp, N);
+        for (int lead = o->bits - 1; lead >= 0; lead--)
+            if ((y >> lead & 1) && rows[lead]) y ^= rows[lead];
+        if (y) {
+            int lead = 63;
+            while (!(y >> lead & 1)) lead--;
+            rows[lead] = y;
+            rank++;
+        }
+    }
+    long found = -1;
+    for (long c = 1; c < N && found < 0; c++) {              /* a nonzero s orthogonal to every row */
+        int ok = 1;
+        for (int l = 0; l < o->bits && ok; l++)
+            if (rows[l]) { long p = rows[l] & c; int odd = 0; while (p) { p &= p - 1; odd ^= 1; } ok = !odd; }
+        for (long x = 0; x < N && ok; x++) ok = v[x] == v[x ^ c];
+        if (ok) found = c;
+    }
+    free(amp); free(v);
+    if (found < 0) {
+        snprintf(report, len, "QSIMON %s, %d bits: no hidden shift after %d quantum queries (simulated)", o->name,
+                 o->bits, queries);
+        return 2;
+    }
+    *s = (int)found;
+    snprintf(report, len, "QSIMON %s, %d bits: compute oracle of %d qubits and %d gates from the machine code; "
+             "hidden shift s = %#lx after %d quantum queries (simulated)", o->name, o->bits, o->n, o->ngates, found,
+             queries);
+    return 1;
+}
+
+int qarm_rt_bv(const qarm_oracle *o, int *s, char *report, size_t len)
+{
+    char err[300];
+    if (o->out_bits) { snprintf(report, len, "QBV %s: a compute oracle, not a phase oracle", o->name); return -1; }
+    long N = 1L << o->bits;
+    unsigned char *mark = malloc((size_t)N);
+    if (evaluate(o, mark, NULL, err, sizeof err) < 0) { snprintf(report, len, "%s", err); free(mark); return -1; }
+    double *amp = malloc(sizeof *amp * (size_t)N);
+    for (long x = 0; x < N; x++) amp[x] = (mark[x] ? -1 : 1) / sqrt((double)N);
+    wht(amp, N);
+    long best = 0;
+    for (long x = 1; x < N; x++) if (amp[x] * amp[x] > amp[best] * amp[best]) best = x;
+    free(amp); free(mark);
+    *s = (int)best;
+    snprintf(report, len, "QBV %s, %d bits: phase oracle of %d qubits and %d gates from the machine code; hidden "
+             "string s = %#lx with one quantum query (simulated)", o->name, o->bits, o->n, o->ngates, best);
+    return 1;
+}

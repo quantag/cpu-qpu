@@ -15,6 +15,7 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
   7. examples/qarm/partition.c: QMIN finds a split of difference 1, QCOUNT counts the nearly balanced splits (32)
      within its error bound, both from the guest's own functions.
+  8. QPERIOD, QSIMON, QBV: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets.
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
@@ -58,7 +59,8 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
+        for name, src in (("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+                          ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
             if src is None:
@@ -144,6 +146,11 @@ def main():
         assert abs(int(n) - 32) <= float(err) and "the compute oracle of imbalance" in p.stderr, (p.stdout, p.stderr)
         print(f"7) partition: QMIN a split of difference 1 (Durr-Hoyer, imbalance()'s compute oracle); QCOUNT about "
               f"{n} +- {err} nearly balanced splits (exactly 32)")
+
+        p, q = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
+        assert "15 = 3 x 5" in p.stdout and "21 = 7 x 3" in p.stdout and "QPERIOD on the quantum" in p.stdout, p
+        assert "shift is 0x2d (QSIMON)" in q.stdout and "string is 0x35 (QBV" in q.stdout, q
+        print("8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35")
     print("PASS")
 
 

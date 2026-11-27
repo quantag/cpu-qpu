@@ -14,6 +14,7 @@
  *   QAVAIL    W0 = 1, W1 = QARM_F_VQE, with QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT when the oracle helper is there
  *   QMIN      X1 = cost, W2 = bits: a compute oracle of cost, Durr-Hoyer in libqarm: W0 = 1, W3 = x, W4 = cost(x)
  *   QCOUNT    X1 = f, W2 = bits: the phase oracle, quantum counting: W0 = 1, X3 = the count, D0 = its error bound
+ *   QPERIOD, QSIMON (compute oracles), QBV (phase oracle): X1 = f, W2 = bits: W0 = 1, W3 = r or s; W0 = 2: none
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
@@ -41,7 +42,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
-enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
+enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
+       OP_QBV = 0x1A, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
@@ -306,6 +308,21 @@ static void qmin_count(int min)
     note("%s", report);
 }
 
+static void qstructure(unsigned op)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, op != OP_QBV) : NULL;
+    if (!o) return;
+    char report[600];
+    int out = 0;
+    int s = op == OP_QPERIOD ? qarm_rt_period(o, &out, report, sizeof report)
+          : op == OP_QSIMON ? qarm_rt_simon(o, &out, report, sizeof report) : qarm_rt_bv(o, &out, report, sizeof report);
+    note("%s", report);
+    if (s == 1) { set_x(0, 1); set_x(3, (uint64_t)(uint32_t)out); }
+    else if (s == 2) set_x(0, 2);
+}
+
 static void packet(unsigned int vcpu, void *udata)
 {
     (void)vcpu;
@@ -318,7 +335,8 @@ static void packet(unsigned int vcpu, void *udata)
     switch (op) {
     case OP_QAVAIL:
         set_x(0, 1);
-        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT : 0));
+        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON
+                                             | QARM_F_BV : 0));
         break;
     case OP_QSEARCH:
         qsearch();
@@ -326,6 +344,11 @@ static void packet(unsigned int vcpu, void *udata)
     case OP_QMIN:
     case OP_QCOUNT:
         qmin_count(op == OP_QMIN);
+        break;
+    case OP_QPERIOD:
+    case OP_QSIMON:
+    case OP_QBV:
+        qstructure(op);
         break;
     case OP_QVLOAD:
         set_x(0, qvload(x(1), x(2)));
