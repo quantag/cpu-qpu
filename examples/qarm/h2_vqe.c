@@ -46,7 +46,10 @@ int main(void)
     for (int r = 0; r < ROUNDS; r++) {             // a grid, then a finer grid around the lowest point
         for (int i = 0; i < K; i++)
             theta[i] = lo + (hi - lo) * i / (K - 1);
-        qarm_expect_n(&v, theta, K, e);
+        if (qarm_expect_n(&v, theta, K, e) < 0) {
+            printf("the energies could not be measured\n");
+            return 3;
+        }
         int m = 0;
         for (int i = 1; i < K; i++)
             if (e[i] < e[m])
