@@ -607,3 +607,152 @@ int qarm_rt_grad(qarm_rt *r, const double *theta, int shots, double *e, double *
     free(et); free(eo); free(ed);
     return s > 0 ? 1 : -1;
 }
+
+/* ---------------------------------------------------------------- QCIRC, QRAND, QCAPS */
+/* a qarm_circuit lowered (qarm_sv_lower) to libqarm's gate list */
+static int lower_circuit(const qarm_circuit *c, qcirc *out, char *err, size_t len)
+{
+    if (!c || c->qubits < 1 || c->qubits > 64 || (c->gates && !c->g)) {
+        snprintf(err, len, "not a circuit");
+        return -1;
+    }
+    out->qubits = (int)c->qubits;
+    qarm_op ops[16];
+    for (uint32_t i = 0; i < c->gates; i++) {
+        if (!qarm_sv_gate_ok(&c->g[i], c->qubits)) {
+            snprintf(err, len, "gate %u: kind %u on qubits %u %u %u of %u", i, c->g[i].kind, c->g[i].q0, c->g[i].q1,
+                     c->g[i].q2, c->qubits);
+            return -1;
+        }
+        int k = qarm_sv_lower(&c->g[i], ops);
+        for (int j = 0; j < k; j++) {
+            static const int map[] = {[QARM_X] = G_X, [QARM_H] = G_H, [QARM_CX] = G_CX, [QARM_CZ] = G_CZ,
+                                      [QARM_RY] = G_RY, [QARM_RZ] = G_RZ};
+            qc_add(out, map[ops[j].kind], ops[j].q0, ops[j].q1, ops[j].scale);
+        }
+    }
+    return 0;
+}
+
+static int sample_local(const qcirc *c, int shots, uint64_t *samples, char *err, size_t len)
+{
+    long N = 1L << c->qubits;
+    double *p = malloc(sizeof *p * (size_t)N);
+    if (!p || qsv_probabilities(c, p, err, len) < 0) { free(p); if (!p) snprintf(err, len, "out of memory"); return -1; }
+    for (long b = 1; b < N; b++) p[b] += p[b - 1];
+    for (int s = 0; s < shots; s++) {
+        double u = uniform() * p[N - 1];
+        long lo = 0, hi = N - 1;
+        while (lo < hi) { long mid = (lo + hi) / 2; if (u < p[mid]) hi = mid; else lo = mid + 1; }
+        samples[s] = (uint64_t)lo;
+    }
+    free(p);
+    return 0;
+}
+
+/* one circuit on the configured device, waited for; samples in logical bits */
+static int sample_ibm(const qcirc *c, int shots, uint64_t *samples, const char *what, char *where, size_t wlen)
+{
+    char err[400], id[128];
+    qibm *b = qibm_open(cfg.opts, c->qubits, err, sizeof err);
+    if (!b) { qarm_note("%s refused: ibm: %s", what, err); return -1; }
+    int *final = malloc(sizeof *final * (size_t)c->qubits), twoq = 0, rc = -1;
+    char *qasm = qibm_qasm(b, c, final, &twoq);
+    double t0 = qarm_now();
+    if (qibm_submit(b, &qasm, 1, shots, id, sizeof id, err, sizeof err) < 0) {
+        qarm_note("%s: ibm: %s", what, err);
+        goto done;
+    }
+    int s, waited = 0;
+    while ((s = qibm_status(b, id, err, sizeof err)) == 0) {
+        if (!waited++) qarm_note("%s: waiting for job %s on %s (it may be queued)", what, id, qibm_device(b));
+        qarm_sleep(cfg.poll);
+    }
+    if (s < 0) { qarm_note("%s: job %s: %s", what, id, err); goto done; }
+    uint64_t *got = NULL;
+    int n = qibm_results(b, id, 1, &got, err, sizeof err);
+    if (n <= 0) { qarm_note("%s: job %s: %s", what, id, n == 0 ? "no shots" : err); free(got); goto done; }
+    for (int i = 0; i < shots; i++) samples[i] = got[i % n];
+    free(got);
+    snprintf(where, wlen, "%s (job %s, %d two-qubit gates after transpiling, %.1f s)", qibm_device(b), id, twoq,
+             qarm_now() - t0);
+    rc = 1;
+done:
+    free(qasm);
+    free(final);
+    qibm_close(b);
+    return rc;
+}
+
+int qarm_rt_circuit(const qarm_circuit *c, int shots, uint64_t *samples)
+{
+    config();
+    char err[300], where[300];
+    qcirc q = {0};
+    int rc = -1;
+    if (shots < 1 || !samples) { qarm_note("QCIRC refused: %d shots", shots); return -1; }
+    if (lower_circuit(c, &q, err, sizeof err) < 0) { qarm_note("QCIRC refused: %s", err); goto done; }
+    int twoq = 0;
+    for (uint32_t i = 0; i < c->gates; i++) twoq += c->g[i].kind >= QARM_G_CX;
+    if (cfg.backend == B_IBM) {
+        rc = sample_ibm(&q, shots, samples, "QCIRC", where, sizeof where);
+    } else {
+        if (sample_local(&q, shots, samples, err, sizeof err) < 0) { qarm_note("QCIRC refused: %s", err); goto done; }
+        snprintf(where, sizeof where, "the state vector");
+        rc = 1;
+    }
+    if (rc >= 0)
+        qarm_note("QCIRC: %u qubits, %u gates (%d multi-qubit), %d shots on %s", c->qubits, c->gates, twoq, shots, where);
+done:
+    qc_free(&q);
+    return rc;
+}
+
+int qarm_rt_rand(void *buf, int n)
+{
+    config();
+    if (n < 1 || !buf) return -1;
+    uint8_t *out = buf;
+    if (cfg.backend == B_IBM) {
+        qcirc q = {0};
+        q.qubits = 8;
+        for (int i = 0; i < 8; i++) qc_add(&q, G_H, i, 0, 0);
+        uint64_t *s = malloc(sizeof *s * (size_t)n);
+        char where[300];
+        int rc = sample_ibm(&q, n, s, "QRAND", where, sizeof where);
+        qc_free(&q);
+        if (rc > 0) {
+            for (int i = 0; i < n; i++) out[i] = (uint8_t)s[i];
+            free(s);
+            qarm_note("QRAND: %d bytes from H on 8 qubits, measured on %s", n, where);
+            return 1;
+        }
+        free(s);
+        return -1;
+    }
+    for (int i = 0; i < n; i++) out[i] = (uint8_t)(uniform() * 256);
+    qarm_note("QRAND: %d bytes, pseudo-random (the %s backend has no quantum randomness)", n,
+              cfg.backend == B_EXACT ? "exact" : "simulator");
+    return 0;
+}
+
+int qarm_rt_caps(qarm_capabilities *caps)
+{
+    config();
+    if (!caps) return -1;
+    memset(caps, 0, sizeof *caps);
+    caps->version = 1;
+    caps->features = 2047;
+    caps->qubits = MAX_QUBITS;
+    const char *name = cfg.backend == B_EXACT ? "exact" : cfg.backend == B_SIMULATOR ? "simulator" : "ibm";
+    if (cfg.backend == B_IBM) {
+        caps->flags = QARM_CAPS_HARDWARE | QARM_CAPS_MEASURED | QARM_CAPS_ASYNC;
+        const char *dev = qj_str(qj_get(cfg.opts, "device"), NULL);
+        if (!dev) dev = qj_str(qj_get(cfg.opts, "backend"), NULL);
+        snprintf(caps->backend, sizeof caps->backend, "libqarm: ibm %s", dev ? dev : "(least busy)");
+    } else {
+        caps->flags = cfg.backend == B_SIMULATOR ? QARM_CAPS_MEASURED : 0;
+        snprintf(caps->backend, sizeof caps->backend, "libqarm: %s", name);
+    }
+    return 1;
+}

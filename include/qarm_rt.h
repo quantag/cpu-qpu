@@ -31,6 +31,11 @@ int qarm_rt_session(int open);
 void qarm_rt_free(qarm_rt *r);
 const char *qarm_rt_where(const qarm_rt *r);                                       /* "ibm: ibm_aachen", ... */
 
+/* QCIRC, QRAND, QCAPS on the backend of the configuration */
+int qarm_rt_circuit(const qarm_circuit *c, int shots, uint64_t *samples);  /* 1 (on ibm or simulated), -1 refused */
+int qarm_rt_rand(void *buf, int n);                                          /* 1 from ibm's measurements, 0 pseudo */
+int qarm_rt_caps(qarm_capabilities *caps);
+
 /* QSEARCH: a phase oracle as tools/qarm_oracle.py writes it; Grover simulated on the search register's amplitudes */
 typedef struct qarm_oracle qarm_oracle;
 qarm_oracle *qarm_rt_oracle_parse(const char *text, char *err, size_t errlen);

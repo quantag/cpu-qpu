@@ -40,8 +40,12 @@ HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT = 0x10, 0x11, 0x15, 0x16
 OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QAMPEST = 0x18, 0x19, 0x1A, 0x17
+OP_QRAND, OP_QCIRC, OP_QCAPS = 0x1C, 0x30, 0x31
+GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: "sx", 10: "rx", 11: "ry", 12: "rz",
+         13: "cx", 14: "cz", 15: "swap", 16: "ccx"}
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
+       OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -327,13 +331,19 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 255)                     # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST
+            self.set_x(1, 2047)                    # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
             self.qmin(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QCOUNT:
             self.qcount(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QCIRC:
+            self.qcirc(self.x(1), self.x(2) & 0xFFFFFFFF, self.x(3))
+        elif op == OP_QRAND:
+            self.qrand(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QCAPS:
+            self.qcaps(self.x(1))
         elif op == OP_QAMPEST:
             self.qampest(self.x(1), self.x(2) & 0xFFFFFFFF, self.x(3) & 0xFFFFFFFF)
         elif op in (OP_QPERIOD, OP_QSIMON, OP_QBV):
@@ -412,6 +422,68 @@ class Runtime:
         self.note(f"QCOUNT {name}, {bits} bits: quantum counting with {t} precision qubits (the median of "
                   f"{MEDIAN_OF} runs), {calls} controlled Grover iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
                   f"(error bound {bound:.1f}; simulated)")
+
+    def read_circuit(self, addr):
+        """A qarm_circuit {u32 qubits, gates; qarm_gate *g} and its gates {u8 kind, q0, q1, q2; u32; double angle}."""
+        n, count, gp = struct.unpack("<IIQ", bytes(self.mu.mem_read(addr, 16)))
+        if not 1 <= n <= 64 or count > 100000:
+            raise QarmError(f"QCIRC: a circuit of {n} qubits and {count} gates")
+        raw = bytes(self.mu.mem_read(gp, 16 * count)) if count else b""
+        gates = []
+        for i in range(count):
+            k, q0, q1, q2, _, ang = struct.unpack_from("<BBBBId", raw, 16 * i)
+            name = GATES.get(k)
+            arity = 3 if name == "ccx" else 2 if name in ("cx", "cz", "swap") else 1
+            qs = (q0, q1, q2)[:arity]
+            if name is None or any(q >= n for q in qs) or len(set(qs)) != arity:
+                raise QarmError(f"QCIRC: gate {i}: kind {k}, qubits {qs} of {n}")
+            gates.append((name, qs, ang))
+        return n, gates
+
+    def qcirc(self, addr, shots, out):
+        """QCIRC: X1 = a qarm_circuit, W2 = shots, X3 = shots uint64 outcomes (bit q = qubit q); W0 = 1, or 2:
+        refused. Exact: the state vector, sampled; --qpu: config.json's backend (a real device's samples on ibm)."""
+        try:
+            n, gates = self.read_circuit(addr)
+        except QarmError as e:
+            self.set_x(0, 2)
+            self.note(str(e))
+            return
+        if self.qpu is None:
+            if n > 20:
+                self.set_x(0, 2)
+                self.note(f"QCIRC: {n} qubits; the exact simulator takes up to 20")
+                return
+            outcomes, where = circuit_samples(n, gates, shots), "the exact simulator"
+        else:
+            outcomes, where = circuit_on_backend(n, gates, shots, self.qpu, self.note)
+        self.mu.mem_write(out, struct.pack(f"<{shots}Q", *outcomes))
+        self.set_x(0, 1)
+        twoq = sum(1 for g in gates if g[0] in ("cx", "cz", "swap", "ccx"))
+        self.note(f"QCIRC: {n} qubits, {len(gates)} gates ({twoq} multi-qubit), {shots} shots on {where}")
+
+    def qrand(self, buf, n):
+        """QRAND: X1 = a buffer, W2 = bytes: 8 qubits in H, measured once per byte. W0 = 1 on a real device
+        (quantum randomness), 3 on a simulator (pseudo-random: numpy's generator)."""
+        gates = [("h", (q,), 0.0) for q in range(8)]
+        if self.qpu is None:
+            outcomes, where = circuit_samples(8, gates, n), "the exact simulator: pseudo-random"
+        else:
+            outcomes, where = circuit_on_backend(8, gates, n, self.qpu, self.note)
+        self.mu.mem_write(buf, bytes(o & 0xFF for o in outcomes))
+        self.set_x(0, 1 if self.qpu is not None and self.qpu["backend"] == "ibm" else 3)
+        self.note(f"QRAND: {n} bytes from H on 8 qubits, measured on {where}")
+
+    def qcaps(self, addr):
+        """QCAPS: X1 = a qarm_capabilities {u32 version, features, qubits, flags; char backend[48]}."""
+        if self.qpu is None:
+            qubits, flags, name = 20, 0, "qarm_exec.py: exact simulator"
+        else:
+            b = self.qpu["backend"]
+            name = f"qarm_exec.py: {b}" + (f" {self.qpu['ibm'].get('backend')}" if b == "ibm" else "")
+            qubits, flags = (156 if b in ("ibm", "preview") else 30), (1 if b == "ibm" else 0) | 2 | (4 if b == "ibm" else 0)
+        self.mu.mem_write(addr, struct.pack("<IIII48s", 1, 2047, qubits, flags, name.encode()[:47]))
+        self.set_x(0, 1)
 
     def qampest(self, fn, bits, vbits):
         """QAMPEST: X1 = g, W2 = bits, W3 = value bits k (g(x) in 0 .. 2^k - 1); D0 = the estimated mean of g over all
@@ -1056,6 +1128,72 @@ def amplitude_estimate(a, bits, seed=None):
     est = sorted(runs)[MEDIAN_OF // 2]
     bound = 2 * math.pi * math.sqrt(est * (1 - est)) / T + math.pi ** 2 / T ** 2
     return est, bound, t, MEDIAN_OF * (T - 1)
+
+
+def circuit_samples(n, gates, shots, seed=None):
+    """The state vector of a gate list on |0..0>, then shots outcomes (bit q = qubit q)."""
+    import numpy as np
+    N = 1 << n
+    psi = np.zeros(N, dtype=complex)
+    psi[0] = 1
+    idx = np.arange(N)
+    r2 = 1 / math.sqrt(2)
+    one = {"x": [[0, 1], [1, 0]], "y": [[0, -1j], [1j, 0]], "z": [[1, 0], [0, -1]], "h": [[r2, r2], [r2, -r2]],
+           "s": [[1, 0], [0, 1j]], "sdg": [[1, 0], [0, -1j]], "t": [[1, 0], [0, complex(r2, r2)]],
+           "tdg": [[1, 0], [0, complex(r2, -r2)]], "sx": [[0.5 + 0.5j, 0.5 - 0.5j], [0.5 - 0.5j, 0.5 + 0.5j]]}
+    for name, qs, ang in gates:
+        if name in ("rx", "ry", "rz"):
+            c, s_ = math.cos(ang / 2), math.sin(ang / 2)
+            m = {"rx": [[c, -1j * s_], [-1j * s_, c]], "ry": [[c, -s_], [s_, c]],
+                 "rz": [[complex(c, -s_), 0], [0, complex(c, s_)]]}[name]
+        else:
+            m = one.get(name)
+        if m is not None:
+            q = 1 << qs[0]
+            lo = idx[(idx & q) == 0]
+            a, b = psi[lo].copy(), psi[lo | q].copy()
+            psi[lo], psi[lo | q] = m[0][0] * a + m[0][1] * b, m[1][0] * a + m[1][1] * b
+        elif name == "cx" or name == "ccx":
+            ctl = (1 << qs[0]) | ((1 << qs[1]) if name == "ccx" else 0)
+            t = 1 << qs[-1]
+            sel = idx[((idx & ctl) == ctl) & ((idx & t) == 0)]
+            psi[sel], psi[sel | t] = psi[sel | t].copy(), psi[sel].copy()
+        elif name == "cz":
+            both = (1 << qs[0]) | (1 << qs[1])
+            psi[(idx & both) == both] *= -1
+        elif name == "swap":
+            a, b = 1 << qs[0], 1 << qs[1]
+            sel = idx[((idx & a) != 0) & ((idx & b) == 0)]
+            psi[sel], psi[sel ^ a ^ b] = psi[sel ^ a ^ b].copy(), psi[sel].copy()
+    p = np.abs(psi) ** 2
+    rng = np.random.default_rng(int(os.environ["QCPU_SEED"]) if os.environ.get("QCPU_SEED") else None)
+    return [int(v) for v in rng.choice(N, size=shots, p=p / p.sum())]
+
+
+def circuit_on_backend(n, gates, shots, cfg, note=lambda t: None):
+    """A gate list on a backend of qcpu_run.py (Sampler; one job). Returns (outcomes, where)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import qcpu_run
+    from qiskit import QuantumCircuit
+    qc = QuantumCircuit(n, n)
+    for name, qs, ang in gates:
+        if name in ("rx", "ry", "rz"):
+            getattr(qc, name)(ang, *qs)
+        else:
+            getattr(qc, name)(*qs)
+    qc.measure(range(n), range(n))
+    try:
+        dev, where = qcpu_run.backend_for(cfg, n)
+    except qcpu_run.Error as e:
+        raise QarmError(f"QCIRC: {e}")
+    counts, job_id, twoq, depth, secs = qcpu_run.sample(qc, dev, cfg, shots)
+    outcomes = [int(k, 2) for k, c in counts.items() for _ in range(c)]
+    random.Random(0).shuffle(outcomes)
+    return outcomes[:shots], f"{where.split(';')[0]} (job {job_id}, {two_q_note(twoq)}, {secs:.1f} s)"
+
+
+def two_q_note(n):
+    return f"{n} two-qubit gates after transpiling"
 
 
 def qiskit_oracle(circuit):

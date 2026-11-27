@@ -7,6 +7,9 @@
   2. backend simulator: the sampled energies agree with the exact ones within 5 standard errors.
   3. The async API (qarm_expect_n_async, qarm_job_ready, qarm_job_wait) in the plain and the native build.
   4. Refused: inconsistent tables; "aer" (Python only) falls back to exact; ibm in a build without libcurl.
+  7. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c (a GHZ state, a Toffoli truth table) in the plain and the native
+     build; circuits with a qubit out of range or a CX on one qubit refused. With 5: ghz.c on the ibm mock, its
+     samples a device's, QRAND's bytes measured, QCAPS flags hardware.
   6. QSEARCH's engine (qarm_search.c) on hand-written oracles: x == 3 in 2 bits; x & 5 == 5 in 4 bits (four answers);
      a predicate with no answer; an oracle that leaves a work qubit set (refused).
   5. (libcurl, qiskit, qiskit-aer) backend ibm against tests/ibm_mock.py, a local stand-in for IBM's REST API that
@@ -22,6 +25,20 @@ INC = os.path.join(ROOT, "include")
 LIB = [os.path.join(ROOT, "runtime", "libqarm", f) for f in ("qarm_rt.c", "qarm_sim.c", "qarm_json.c", "qarm_ibm.c",
                                                                   "qarm_search.c")]
 H2 = os.path.join(ROOT, "examples", "qarm", "h2_vqe.c")
+GHZ = os.path.join(ROOT, "examples", "qarm", "ghz.c")
+BADCIRC = r"""
+#include <stdio.h>
+#include "qarm.h"
+static const qarm_gate g[] = {{QARM_G_H, 0, 0, 0, 0, 0}, {QARM_G_CX, 0, 3, 0, 0, 0}};
+static const qarm_gate h[] = {{QARM_G_CX, 1, 1, 0, 0, 0}};
+int main(void)
+{
+    static uint64_t s[4];
+    qarm_circuit a = {3, 2, g}, b = {2, 1, h};
+    printf("%d %d\n", qarm_run(&a, 4, s), qarm_run(&b, 4, s));
+    return 0;
+}
+"""
 EXE = ".exe" if os.name == "nt" else ""
 
 ASYNC = r"""
@@ -159,10 +176,10 @@ def main():
         curl = has_curl(cc, d)
         env = {"QARM_CONFIG": os.path.join(d, "none.json")}             # no config: the exact backend
         exe = {}
-        for name, src in (("h2", H2), ("all", None), ("async", None)):
+        for name, src in (("h2", H2), ("all", None), ("async", None), ("ghz", GHZ), ("badcirc", None)):
             if src is None:
                 src = os.path.join(d, name + ".c")
-                open(src, "w").write(ALL_OPS if name == "all" else ASYNC)
+                open(src, "w").write({"all": ALL_OPS, "async": ASYNC, "badcirc": BADCIRC}[name])
             for native in (False, True):
                 exe[name, native] = os.path.join(d, f"{name}_{'native' if native else 'plain'}{EXE}")
                 build(cc, src, exe[name, native], native, curl)
@@ -199,6 +216,20 @@ def main():
         p = sh([nocurl], dict(env, QARM_BACKEND="ibm"), check=False)
         assert p.returncode == 2 and "built without libcurl" in p.stderr, p.stderr
         print("4) refused: an ansatz of the wrong size; aer falls back to exact; ibm without libcurl")
+
+        outs = []
+        for native in (False, True):
+            p = sh([exe["ghz", native]], dict(env, QARM_SEED="3"))
+            assert re.search(r"GHZ\(5\): 00000 \d+, 11111 \d+, other 0 of 2000", p.stdout), p.stdout
+            assert "11->1 100%" in p.stdout and "00->0 100%" in p.stdout and "pseudo-random" in p.stdout, p.stdout
+            outs.append(p)
+        assert "libqarm: exact" in outs[1].stdout and "simulated here" in outs[0].stdout, outs[1].stdout
+        assert "on the coprocessor" in outs[1].stdout and "QCIRC: 5 qubits, 5 gates (4 multi-qubit)" in outs[1].stderr
+        p = sh([exe["badcirc", True]], env)
+        assert p.stdout.split() == ["-1", "-1"] and p.stderr.count("QCIRC refused") == 2, (p.stdout, p.stderr)
+        assert sh([exe["badcirc", False]]).stdout.split() == ["-1", "-1"]
+        print("7) QCIRC, QRAND, QCAPS: ghz.c in the plain and the native build (GHZ: only 00000 and 11111; Toffoli's "
+              "truth table); a qubit out of range and a CX on one qubit refused by both")
 
         src = os.path.join(d, "search.c")
         open(src, "w").write(SEARCH)
@@ -247,6 +278,11 @@ def main():
         assert cz >= 9, cz
         print(f"5a) ibm (mock of IBM's REST API, ideal): 3 qubits on a chain of ibm_fez, ISA circuits with a SWAP "
               f"({cz} CZ), within {worst / m[5]:.1f} standard errors")
+        p = sh([exe["ghz", True]], {"QARM_CONFIG": cfg})
+        g = re.search(r"00000 (\d+), 11111 (\d+), other (\d+)", p.stdout)
+        assert g and int(g[3]) < 100 and "quantum hardware" in p.stdout and "flags 7 (hardware)" in p.stdout, p.stdout
+        assert len(re.findall(r"QCIRC: .* shots on ibm_fez \(job mock-", p.stderr)) == 5 and "QRAND: 16 bytes" in p.stderr
+        print(f"5d) ghz.c on ibm (mock): GHZ {g[1]}/{g[2]}/{g[3]}, Toffoli's table, QRAND measured, QCAPS: hardware")
         p = sh([exe["async", True]], {"QARM_CONFIG": cfg})
         polls = int(p.stdout.split()[1])
         assert polls >= 2, p.stdout

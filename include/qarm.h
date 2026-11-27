@@ -19,6 +19,13 @@
  *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
  *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
  *                               (that is the search's job), so a quantum answer is right with high probability
+ *   qarm_run(&circuit, shots, samples)  QCIRC: any circuit as a table (qarm_gate: X Y Z H S SDG T TDG SX RX RY RZ
+ *                               CX CZ SWAP CCX), every qubit measured at the end; samples[i] bit q = qubit q. 1: run
+ *                               by the coprocessor (qarm_caps says whether it is hardware), 0: simulated here (up
+ *                               to QARM_VQE_MAX_QUBITS qubits), -1: refused
+ *   qarm_rand(buf, n)           QRAND: n random bytes. 1: measurements on quantum hardware (8 qubits in H, one shot
+ *                               per byte); 0: pseudo-random (a simulator's measurements, or made here)
+ *   qarm_caps(&caps)            QCAPS: the coprocessor: features, qubits, backend name, flags (hardware, measured)
  *   qarm_mean(g, bits, k, &err) QAMPEST: the mean of g(x) over all x, g(x) in 0 .. 2^k - 1: amplitude estimation;
  *                               err: its error bound (probability >= 8/pi^2), 0 when computed classically
  *   qarm_period(f, bits, &r)    QPERIOD: the least r > 0 with f(x + r) = f(x): Shor's period finding (quantum Fourier
@@ -68,7 +75,16 @@ typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; u
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
-       QARM_F_BV = 64, QARM_F_AMPEST = 128 };
+       QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024 };
+
+/* QCIRC's circuits: gates in order on qubits that start at 0; every qubit measured at the end */
+enum { QARM_G_X = 1, QARM_G_Y, QARM_G_Z, QARM_G_H, QARM_G_S, QARM_G_SDG, QARM_G_T, QARM_G_TDG, QARM_G_SX, QARM_G_RX,
+       QARM_G_RY, QARM_G_RZ, QARM_G_CX, QARM_G_CZ, QARM_G_SWAP, QARM_G_CCX, QARM_G_LAST = QARM_G_CCX };
+typedef struct { uint8_t kind, q0, q1, q2; uint32_t reserved; double angle; } qarm_gate;   /* CX: q0 control */
+typedef struct { uint32_t qubits, gates; const qarm_gate *g; } qarm_circuit;
+/* QCAPS */
+enum { QARM_CAPS_HARDWARE = 1, QARM_CAPS_MEASURED = 2, QARM_CAPS_ASYNC = 4 };
+typedef struct { uint32_t version, features, qubits, flags; char backend[48]; } qarm_capabilities;
 
 /* the classical paths of QMIN and QCOUNT */
 static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)
@@ -189,6 +205,12 @@ static inline qarm_job *qarm_expect_n_async(qarm_vqe *v, const double *thetas, i
 static inline int qarm_job_ready(qarm_job *j) { return qarm_rt_poll(j); }
 static inline int qarm_job_wait(qarm_job *j, double *e, double *err) { return qarm_rt_wait(j, e, err); }
 static inline int qarm_session(int open) { return qarm_rt_session(open); }
+static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples)
+{
+    return qarm_rt_circuit(c, shots, samples);
+}
+static inline int qarm_rand(void *buf, int n) { return qarm_rt_rand(buf, n); }
+static inline int qarm_caps(qarm_capabilities *caps) { return qarm_rt_caps(caps); }
 static inline void qarm_vqe_free(qarm_vqe *v)
 {
     qarm_rt_free((qarm_rt *)v->handle);
@@ -219,6 +241,43 @@ static double qarm__grad(const qarm_hamiltonian *h, const qarm_ansatz *a, const 
 {
     qarm_sv s = qarm__sv((int)h->qubits);
     return qarm_sv_grad(&s, h, a, theta, grad);
+}
+
+/* QCIRC's, QRAND's and QCAPS's classical paths */
+static uint64_t qarm__sample_rng = 0x2545F4914F6CDD1DULL;
+static double qarm__uniform(void)
+{
+    uint64_t z = (qarm__sample_rng += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return (double)((z ^ (z >> 31)) >> 11) / 9007199254740992.0;
+}
+static int qarm__run(const qarm_circuit *c, int shots, uint64_t *samples)
+{
+    if (c->qubits < 1 || c->qubits > QARM_VQE_MAX_QUBITS || shots < 0) return -1;
+    for (uint32_t i = 0; i < c->gates; i++)
+        if (!qarm_sv_gate_ok(&c->g[i], c->qubits)) return -1;
+    qarm_sv s = qarm__sv((int)c->qubits);
+    qarm_sv_circuit(&s, c);
+    long N = 1L << c->qubits;
+    for (long b = 0; b < N; b++) s.tr[b] = (b ? s.tr[b - 1] : 0) + s.re[b] * s.re[b] + s.im[b] * s.im[b];
+    for (int k = 0; k < shots; k++) {
+        double u = qarm__uniform() * s.tr[N - 1];
+        long lo = 0, hi = N - 1;
+        while (lo < hi) { long mid = (lo + hi) / 2; if (u < s.tr[mid]) hi = mid; else lo = mid + 1; }
+        samples[k] = (uint64_t)lo;
+    }
+    return 0;
+}
+static int qarm__rand(void *buf, int n)
+{
+    for (int i = 0; i < n; i++) ((unsigned char *)buf)[i] = (unsigned char)(qarm__uniform() * 256);
+    return 0;
+}
+static int qarm__caps(qarm_capabilities *c)
+{
+    *c = (qarm_capabilities){1, 0, QARM_VQE_MAX_QUBITS, 0, "classical"};
+    return 0;
 }
 
 static int qarm__vqe_classical(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_vqe *v)
@@ -394,6 +453,36 @@ static inline long qarm_count(int (*f)(int), int bits, double *err)
     return qarm__count(f, bits, err);
 }
 
+static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples)
+{
+    register long x0 __asm__("x0") = 0;                     /* 0: not executed, 1: sampled, 2: refused */
+    register const qarm_circuit *x1 __asm__("x1") = c;
+    register long x2 __asm__("x2") = shots;
+    register uint64_t *x3 __asm__("x3") = samples;
+    __asm__ volatile(QARM_PACKET(0x02300000) : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    if (x0 == 1) return 1;
+    if (x0 == 2) return -1;
+    return qarm__run(c, shots, samples);
+}
+
+static inline int qarm_rand(void *buf, int n)
+{
+    register long x0 __asm__("x0") = 0;                     /* 1: hardware's bytes, 3: a simulator's */
+    register void *x1 __asm__("x1") = buf;
+    register long x2 __asm__("x2") = n;
+    __asm__ volatile(QARM_PACKET(0x021c0000) : "+r"(x0) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1 || x0 == 3) return x0 == 1;
+    return qarm__rand(buf, n);
+}
+
+static inline int qarm_caps(qarm_capabilities *caps)
+{
+    register long x0 __asm__("x0") = 0;
+    register qarm_capabilities *x1 __asm__("x1") = caps;
+    __asm__ volatile(QARM_PACKET(0x02310000) : "+r"(x0) : "r"(x1) : "memory");
+    return x0 == 1 ? 1 : qarm__caps(caps);
+}
+
 static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 {
     if (v->quantum) {
@@ -446,6 +535,9 @@ static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
     return qarm__grad(v->h, v->a, theta, grad);
 }
 static inline int qarm_session(int open) { (void)open; return 0; }
+static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples) { return qarm__run(c, shots, samples); }
+static inline int qarm_rand(void *buf, int n) { return qarm__rand(buf, n); }
+static inline int qarm_caps(qarm_capabilities *caps) { return qarm__caps(caps); }
 static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }

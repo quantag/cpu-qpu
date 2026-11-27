@@ -54,7 +54,7 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
@@ -62,6 +62,9 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x18` | `QPERIOD` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = the least r > 0 with f(x + r) = f(x); or `W0 = 2`: none |
 | `0x19` | `QSIMON` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s ≠ 0 with f(x) = f(x ⊕ s); or `W0 = 2`: none |
 | `0x1A` | `QBV` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s with f(x) = s·x mod 2 (+ a constant) |
+| `0x1C` | `QRAND` | `X1` = buffer, `W2` = n bytes | `W0 = 1`: measurements on quantum hardware; `W0 = 3`: a simulator's (pseudo-random) |
+| `0x30` | `QCIRC` | `X1` = `qarm_circuit`, `W2` = shots, `X3` = `uint64_t` samples | `W0 = 1`: samples written; `W0 = 2`: refused |
+| `0x31` | `QCAPS` | `X1` = `qarm_capabilities` | `W0 = 1`: version, features, qubits, flags (1 hardware, 2 measured, 4 async), backend name |
 | `0x20`–`0x26` | VQE | section 6 | |
 
 **The instruction set, planned.** Each algorithm family is one instruction. Its input is an ordinary C
@@ -72,11 +75,8 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 |---|---|---|---|---|
 | `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
-| `0x1C` | `QRAND` | n | random bits from the quantum device | — |
 | `0x25` | `QVSAMPLE` | VQE tables | bitstrings of the prepared state | — |
 | `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ by Trotter steps | exact for small cases |
-| `0x30` | `QCIRC` | a gate table | samples of any circuit given as data | — |
-| `0x31` | `QCAPS` | a buffer | the device: qubits, error rates, backend | — |
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
 instructions.
@@ -176,6 +176,55 @@ from gcd(a^(r/2) − 1, N). `examples/qarm/hidden.c` finds the shift 0x2d and th
 $ python3 qarm_exec.py shor
 [qarm: QPERIOD f21, 9 bits: the 16626-qubit, 59942-gate compute oracle from f21's machine code, 1 quantum query (simulated): period r = 6]
 N = 21, a = 2: the period of a^x mod N is 6 -> 21 = 7 x 3
+```
+
+### `QCIRC`, `QRAND` and `QCAPS`
+
+The algorithm instructions above take a C function. `QCIRC` is the escape hatch for everything else:
+any circuit, given as data. It is still not OpenQASM. The circuit is a C table in the program's
+memory, and the runtime reads it from there.
+
+```c
+typedef struct { uint8_t kind, q0, q1, q2; uint32_t reserved; double angle; } qarm_gate;   /* 16 bytes */
+typedef struct { uint32_t qubits, gates; const qarm_gate *g; } qarm_circuit;
+
+static const qarm_gate g[] = {{QARM_G_H, 0}, {QARM_G_CX, 0, 1}, {QARM_G_CX, 1, 2}};
+static const qarm_circuit ghz = {3, 3, g};
+uint64_t samples[1000];
+qarm_run(&ghz, 1000, samples);        /* samples[s] bit q = qubit q, every qubit measured at the end */
+```
+
+- **Gates:** `X Y Z H S SDG T TDG SX RX RY RZ CX CZ SWAP CCX`, with `angle` for the rotations. For CX
+  and CCX, `q0` (and `q1`) are the controls and the last qubit is the target.
+- **Refused** (`W0 = 2`, `qarm_run` returns −1): an unknown kind, a qubit outside the register, or a
+  multi-qubit gate that uses one qubit twice.
+- **Return value of `qarm_run`:** 1 when the coprocessor ran it, 0 when the plain CPU simulated it.
+  The plain CPU uses `qarm_sv.h`'s state vector, up to `QARM_VQE_MAX_QUBITS` qubits. `qarm_caps` says
+  whether the coprocessor is hardware.
+- **Where it runs:**
+  - libqarm (and so the QEMU plugin) lowers each gate to X, H, RY, RZ, CX and CZ (`qarm_sv_lower`; CCX
+    is the 15-gate Clifford+T circuit). It samples the state vector, or sends the circuit to IBM as one
+    Sampler job with routing on a chain.
+  - `qarm_exec.py` simulates with numpy, or with `--qpu` sends the circuit to the config's backend.
+
+`QRAND` fills a buffer with bytes from 8 qubits in H, one shot per byte. `qarm_rand` returns 1 only
+when the bytes are measurements on quantum hardware. A simulator's measurements are pseudo-random, and
+the function says so by returning 0.
+
+`QCAPS` describes the coprocessor: the ISA version, the feature bits, the qubits it simulates or has,
+flags, and a backend name.
+
+`examples/qarm/ghz.c` prepares a 5-qubit GHZ state and a Toffoli truth table, and draws 16 random
+bytes. Each build runs it differently:
+
+```
+$ python3 qarm_exec.py -q ghz                          # the arm64 binary; the exact simulator
+device: qarm_exec.py: exact simulator, 20 qubits, flags 0
+GHZ(5): 00000 983, 11111 1017, other 0 of 2000 shots (on the coprocessor)
+Toffoli: 00->0 100% 10->0 100% 01->0 100% 11->1 100%
+$ python3 qarm_exec.py --backend preview -q ghz        # the noise model of Fez
+GHZ(5): 00000 953, 11111 927, other 120 of 2000 shots (on the coprocessor)
+Toffoli: 00->0 96% 10->0 98% 01->0 94% 11->1 94%
 ```
 
 ## 4. The runtime: `qarm_exec.py`
@@ -608,6 +657,8 @@ CI builds QEMU 10.2.4 once and caches it.
 - a second program: `printf` formats, `puts`, `putchar`, the exit code, `QAVAIL`; `QSEARCH` with several
   solutions, none, and 12 bits; the same output on the plain CPU, except `QAVAIL`;
 - errors: a predicate that calls a function, a C library function the runtime lacks;
+- `QMIN`, `QCOUNT`, `QPERIOD`, `QSIMON`, `QBV`, `QAMPEST` on the examples; `QCIRC`, `QRAND`, `QCAPS` on
+  `ghz.c` (and, with Qiskit, on the noise model of Fez);
 - with Qiskit (the export job, Linux x86-64): `tiny_search` on the noise model of Fez and through the
   `ibm` backend's local channel (the code path of a real device: one job, without the login); Code
   Breaker's oracle refused as larger than the device.
@@ -626,8 +677,10 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 ## 10. Next
 
-- More instructions on the same model: `QCOUNT` (quantum counting), `QMIN` (Dürr–Høyer minimum),
-  `QPERIOD` (period finding).
+- More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
+  `QVSAMPLE` (bitstrings of a VQE state), `QCOLLISION`.
+- A versioned, vendor-neutral specification of the instruction set, with a conformance suite that any
+  runtime can be checked against.
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;

@@ -11,12 +11,16 @@
  * tables from guest memory, calls libqarm and writes the results back. Then the branch skips the packet, as it
  * does on a plain CPU. Needs QEMU 10.1 or newer (plugin API with qemu_plugin_write_register).
  *
- *   QAVAIL    W0 = 1, W1 = QARM_F_VQE, with QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT when the oracle helper is there
+ *   QAVAIL    W0 = 1, W1 = QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS, with QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT when the oracle helper is there
  *   QMIN      X1 = cost, W2 = bits: a compute oracle of cost, Durr-Hoyer in libqarm: W0 = 1, W3 = x, W4 = cost(x)
  *   QCOUNT    X1 = f, W2 = bits: the phase oracle, quantum counting: W0 = 1, X3 = the count, D0 = its error bound
  *   QAMPEST   X1 = g, W2 = bits, W3 = value bits k: a compute oracle, amplitude estimation: W0 = 1, D0 = the mean of
  *             g, D1 = its error bound
  *   QPERIOD, QSIMON (compute oracles), QBV (phase oracle): X1 = f, W2 = bits: W0 = 1, W3 = r or s; W0 = 2: none
+ *   QCIRC     X1 = a qarm_circuit, W2 = shots, X3 = the samples: the gate table read from guest memory and run by
+ *             libqarm (state vector, or a real device on ibm): W0 = 1, or 2: refused
+ *   QRAND     X1 = a buffer, W2 = bytes: W0 = 1 (ibm's measurements) or 3 (pseudo-random, libqarm's generator)
+ *   QCAPS     X1 = a qarm_capabilities: libqarm's backend, with this plugin's feature bits
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
@@ -45,7 +49,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
-       OP_QBV = 0x1A, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
+       OP_QBV = 0x1A, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
@@ -341,6 +345,56 @@ static void qstructure(unsigned op)
     else if (s == 2) set_x(0, 2);
 }
 
+static uint32_t features(void)
+{
+    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS
+           | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON | QARM_F_BV
+                            | QARM_F_AMPEST : 0);
+}
+
+#define MAX_SHOTS (1 << 22)
+static int qcirc(void)
+{
+    struct { uint32_t qubits, gates; uint64_t g; } h;
+    int shots = (int)(uint32_t)x(2);
+    if (!rd(x(1), &h, sizeof h) || h.gates > 1000000 || shots < 1 || shots > MAX_SHOTS) {
+        note("QCIRC refused: unreadable circuit at %#llx, or %d shots", (unsigned long long)x(1), shots);
+        return 2;
+    }
+    qarm_gate *g = g_new0(qarm_gate, h.gates + 1);
+    uint64_t *samples = g_new(uint64_t, (size_t)shots);
+    int rc = 2;
+    if (h.gates && !rd(h.g, g, sizeof *g * h.gates)) note("QCIRC refused: unreadable gate table");
+    else {
+        qarm_circuit c = {h.qubits, h.gates, g};
+        if (qarm_rt_circuit(&c, shots, samples) >= 0 && wr(x(3), samples, sizeof *samples * (size_t)shots)) rc = 1;
+    }
+    g_free(g);
+    g_free(samples);
+    return rc;
+}
+
+static int qrand(void)
+{
+    int n = (int)(uint32_t)x(2);
+    if (n < 1 || n > MAX_SHOTS) return 0;
+    uint8_t *b = g_malloc((size_t)n);
+    int q = qarm_rt_rand(b, n), rc = q < 0 ? 0 : wr(x(1), b, (size_t)n) ? (q == 1 ? 1 : 3) : 0;
+    g_free(b);
+    return rc;
+}
+
+static int qcaps(void)
+{
+    qarm_capabilities c;
+    if (qarm_rt_caps(&c) < 0) return 0;
+    char name[sizeof c.backend];
+    memcpy(name, c.backend, sizeof name);
+    snprintf(c.backend, sizeof c.backend, "qemu %.42s", name);
+    c.features = features();
+    return wr(x(1), &c, sizeof c) ? 1 : 0;
+}
+
 static void packet(unsigned int vcpu, void *udata)
 {
     (void)vcpu;
@@ -353,8 +407,16 @@ static void packet(unsigned int vcpu, void *udata)
     switch (op) {
     case OP_QAVAIL:
         set_x(0, 1);
-        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON
-                                             | QARM_F_BV | QARM_F_AMPEST : 0));
+        set_x(1, features());
+        break;
+    case OP_QCIRC:
+        set_x(0, qcirc());
+        break;
+    case OP_QRAND:
+        set_x(0, qrand());
+        break;
+    case OP_QCAPS:
+        set_x(0, qcaps());
         break;
     case OP_QSEARCH:
         qsearch();

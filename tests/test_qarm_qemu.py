@@ -16,6 +16,8 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   7. examples/qarm/partition.c: QMIN finds a split of difference 1, QCOUNT counts the nearly balanced splits (32)
      within its error bound, both from the guest's own functions.
   8. QPERIOD, QSIMON, QBV: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets.
+  9. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c, its gate tables read from guest memory; with 5, on the ibm mock
+     (the device's samples, QRAND measured, QCAPS: hardware).
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
@@ -59,7 +61,7 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+        for name, src in (("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
                           ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
@@ -131,6 +133,9 @@ def main():
             worst = max(abs(x - y) for x, y in zip(m[:5], a[:5]))
             jobs = re.findall(r"job (mock-\w+) sent to ibm_fez", p.stderr)
             assert 0 < m[5] < 0.02 and worst < 5 * m[5] and len(jobs) == 2, (m, p.stderr)
+            p = sh(qemu(f",config={cfg}") + [exe["ghz"]])
+            assert "quantum hardware" in p.stdout and "qemu libqarm: ibm" in p.stdout and "(hardware)" in p.stdout, p.stdout
+            assert len(re.findall(r"QCIRC: .* shots on ibm_fez \(job mock-", p.stderr)) == 5, p.stderr
             mock.close()
             print(f"5) ibm via the mock of IBM's REST API: 3 qubits, {len(jobs)} jobs, within {worst / m[5]:.1f} "
                   "standard errors")
@@ -155,6 +160,11 @@ def main():
         assert abs(est - 3.1475) <= err, p.stdout
         print(f"8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35; "
               f"pi: QAMPEST {est} +- {err} (the grid: 3.1475)")
+        p = sh(qemu() + [exe["ghz"]])
+        assert re.search(r"GHZ\(5\): 00000 \d+, 11111 \d+, other 0 of 2000 shots \(on the coprocessor\)", p.stdout), p.stdout
+        assert "11->1 100%" in p.stdout and "device: qemu libqarm: exact" in p.stdout, p.stdout
+        print("9) ghz: QCIRC (GHZ on 5 qubits, Toffoli's truth table), QRAND, QCAPS through the plugin and libqarm"
+              + ("; on the ibm mock: the device's samples, QRAND measured" if curl else ""))
     print("PASS")
 
 
