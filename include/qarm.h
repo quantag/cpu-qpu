@@ -9,6 +9,8 @@
  * from config.json). The same binary runs on both.
  *
  *   qarm_available()            1 under the Q-ARM runtime, 0 on a plain CPU (QAVAIL)
+ *   qarm_features()             what that runtime executes: QARM_F_SEARCH | QARM_F_VQE (QAVAIL's W1); 0 on a plain
+ *                               CPU. Under the QEMU plugin QSEARCH takes the classical path, so it reports QARM_F_VQE
  *   qarm_search(f, bits, &x)    an x in 0 .. 2^bits - 1 with f(x) == 1: Grover's search on the coprocessor (QSEARCH),
  *                               with f's oracle built from f's own machine code; on a plain CPU, every x in turn.
  *                               Returns 1 and stores x, or 0 if there is none. f returns 0 or 1, calls no other
@@ -49,12 +51,14 @@ enum { QARM_X = 1, QARM_H, QARM_CX, QARM_CZ, QARM_RY, QARM_RZ, QARM_PAULI_ROT };
 typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
+enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2 };
 
 #if defined(QARM_RUNTIME)
 #include <math.h>
 #include "qarm_rt.h"
 
 static inline int qarm_available(void) { return 0; }
+static inline int qarm_features(void) { return 0; }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)
@@ -213,6 +217,14 @@ static inline int qarm_available(void)
     return (int)x0;
 }
 
+static inline int qarm_features(void)
+{
+    register long x0 __asm__("x0") = 0;
+    register long x1 __asm__("x1") = 0;
+    __asm__ volatile(QARM_PACKET(0x02100000) : "+r"(x0), "+r"(x1) : : "memory");
+    return x0 == 1 ? (int)(x1 ? x1 : QARM_F_SEARCH) : 0;     /* a runtime without feature bits: QSEARCH only */
+}
+
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     register long x0 __asm__("x0") = 0;                     /* 0: not executed, 1: found, 2: none */
@@ -307,6 +319,7 @@ static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double
 static inline int qarm_session(int open) { (void)open; return 0; }
 static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
 static inline int qarm_available(void) { return 0; }
+static inline int qarm_features(void) { return 0; }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)

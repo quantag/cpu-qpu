@@ -20,7 +20,7 @@ int main(void)
     int x;
     int r = qarm_search(is_three, 2, &x);
     if (r)
-        printf("%s: x = %d\n", qarm_available() ? "Q-ARM QSEARCH" : "classical search", x);
+        printf("%s: x = %d\n", qarm_features() & QARM_F_SEARCH ? "Q-ARM QSEARCH" : "classical search", x);
     else
         printf("none\n");
     return r ? 0 : 1;

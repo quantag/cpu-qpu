@@ -323,6 +323,7 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
+            self.set_x(1, 3)                       # W1: features, QSEARCH | VQE
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QSESSION, OP_QVFREE):
