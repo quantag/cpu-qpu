@@ -75,7 +75,7 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 |---|---|---|---|---|
 | `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
-| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ by Trotter steps | exact for small cases |
+| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ natively in the runtime (qDRIFT, higher-order formulas); today a library function, section 6 | exact for small cases |
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
 instructions.
@@ -344,6 +344,35 @@ QVSAMPLE (the coprocessor's measurements): best cut 10 (11010010), in 38.1% of 1
     queue per gradient.
   - The gradient is then summed per parameter, weighted by each rotation's `scale`.
 
+### Time evolution: `qarm_evolve_n`
+
+Hamiltonian simulation needs no new instruction. `qarm_trotter` writes exp(−iHt) as an ansatz table of
+second-order (symmetric) Trotter steps. Each Pauli term of H becomes a `QARM_PAULI_ROT`, and adjacent
+equal terms are merged.
+
+The rotation angles are scale × θ₀ with θ₀ = t / steps. So one table serves every time t, and k times are
+k parameter vectors of one `QEXPECTN` batch: one job on a QPU.
+
+```c
+/* <O(t)> for k times from the basis state init; ops: room for about 2 * steps * terms operations */
+int qarm_evolve_n(const qarm_hamiltonian *h, const qarm_hamiltonian *o, uint64_t init, const double *t, int k,
+                  int steps, qarm_op *ops, uint32_t cap, double *out);
+```
+
+`examples/qarm/spin_chain.c` quenches the transverse-field Ising chain at its critical point: 8 spins,
+H = −Σ ZᵢZᵢ₊₁ − Σ Xᵢ, all spins up at t = 0. It prints the magnetization for 13 times, with 4 Trotter steps
+and with 32.
+
+| backend | M(0) | M(1.0) | the error at 32 steps |
+|---|---|---|---|
+| plain CPU, `qarm_exec.py`, libqarm, QEMU (exact) | 1.0000 | 0.2388 | ≤ 3.4·10⁻⁴ from exp(−iHt) |
+| noise model of Fez, 4 steps (53 two-qubit rotations) | 0.8177 | 0.1784 | — |
+| noise model of Fez, 32 steps (834 two-qubit gates) | 0.2647 | 0.0437 | — |
+
+The last row is the hardware's limit. At t = 0 the angles are zero, but the transpiled circuit is still
+834 CZ deep, and decoherence takes most of the signal. Fewer, longer steps are the better trade on
+today's devices.
+
 ### Tables (include/qarm.h)
 
 ```c
@@ -385,7 +414,7 @@ $ ./h2_vqe                                    # a plain CPU
 E(-2.918398) = -1.137306 Ha; exact ground state -1.137306 Ha, difference 0.0 mHa
 $ python3 qarm_exec.py h2_vqe                 # the same, from the runtime's exact simulator
 $ python3 qarm_exec.py --backend preview h2_vqe
-[qarm: QVLOAD: 2 qubits, 5 Pauli terms, an ansatz of 3 operations (1 two-qubit) with 1 parameter; on preview: noise model of fake_fez (156 qubits): 2 measurement bases, readout correction, up to 1 two-qubit gates after transpiling]
+[qarm: QVLOAD: 2 qubits, 5 Pauli terms, an ansatz of 3 operations (1 two-qubit gates, 0 multi-qubit Pauli rotations) with 1 parameter; on preview: noise model of fake_fez (156 qubits): 2 measurement bases, readout correction, up to 1 two-qubit gates after transpiling]
 ...
 $ python3 qarm_exec.py --qpu h2_vqe           # config.json: a real IBM device
 ```

@@ -143,6 +143,7 @@ cell k), `--mem=1,2,3` to initialise user data cells (32-bit), `-v`, `--report P
 | `examples/qarm/shor.c` | Q-ARM `QPERIOD`: factoring 15 and 21, the period of a C `modexp` found from its compiled code |
 | `examples/qarm/hidden.c` | Q-ARM `QSIMON` and `QBV`: the hidden shift and the hidden string of two C functions |
 | `examples/qarm/maxcut_qaoa.c` | Q-ARM QAOA for MaxCut: cost and layers as VQE tables, L-BFGS with `QGRAD`, then `QVSAMPLE` draws the cuts (the largest, 10, in about 37% of shots) |
+| `examples/qarm/spin_chain.c` | Q-ARM time evolution: a quench of the Ising chain (8 spins), Trotter tables on `QVLOAD` and `QEXPECTN`, 13 times in one batch, on the exact curve to 3.4·10⁻⁴ |
 | `examples/qarm/ghz.c` | Q-ARM `QCIRC`, `QRAND`, `QCAPS`: a GHZ state and a Toffoli truth table given as gate tables, random bytes, the device |
 | `examples/qarm/pi.c` | Q-ARM `QAMPEST`: pi by amplitude estimation, the quantum replacement for Monte Carlo, from a C function |
 | `examples/qarm/partition.c` | Q-ARM `QMIN` and `QCOUNT`: number partitioning (an NP-hard QUBO) as plain C; oracles from its compiled functions |

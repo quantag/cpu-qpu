@@ -73,8 +73,9 @@ class Problem:
 
     def describe(self):
         twoq = sum(1 for o in self.ops if o[0] in TWO_QUBIT)
+        multi = sum(1 for o in self.ops if o[0] not in TWO_QUBIT and bin(o[5] | o[6]).count("1") > 1)
         return (f"{self.n} qubits, {len(self.terms)} Pauli terms, an ansatz of {len(self.ops)} operations "
-                f"({twoq} two-qubit) with {self.params} parameter{'s' if self.params != 1 else ''}")
+                f"({twoq} two-qubit gates, {multi} multi-qubit Pauli rotations) with {self.params} parameter{'s' if self.params != 1 else ''}")
 
     # ---------------------------------------------------------------- exact
     # ---------------------------------------------------------------- exact

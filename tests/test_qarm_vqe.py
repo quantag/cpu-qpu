@@ -13,6 +13,9 @@
   5. QVSAMPLE: examples/qarm/maxcut_qaoa.c (QAOA, the Wagner graph) finds the largest cut, 10, on the plain CPU and
      under qarm_exec.py; a 2-qubit state RY(pi/2) then CX gives only 00 and 11, half each. With 4's packages, the
      same on the noise model of Fez (mostly 00 and 11).
+  6. Time evolution (qarm_evolve_n: Trotter tables on QVLOAD and QEXPECTN): examples/qarm/spin_chain.c, the Ising
+     chain quench, 8 spins: the same table on the plain CPU and under qarm_exec.py; 32 steps within 2e-3 of the
+     exact curve (numpy's eigendecomposition of H).
 Run: python3 -m tests.test_qarm_vqe   (needs an arm64 C compiler: the host's on arm64, else aarch64-linux-gnu-gcc)"""
 import json, os, re, subprocess, sys, tempfile, textwrap
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
@@ -21,6 +24,31 @@ H2 = os.path.join(ROOT, "examples", "qarm", "h2_vqe.c")
 EXACT = -1.1373060357534
 
 MAXCUT = os.path.join(ROOT, "examples", "qarm", "maxcut_qaoa.c")
+SPIN = os.path.join(ROOT, "examples", "qarm", "spin_chain.c")
+
+
+def ising_exact(n=8, times=None):
+    """M(t) of spin_chain.c's quench, exactly: H = -sum Z_i Z_i+1 - sum X_i, from all up."""
+    import numpy as np
+    N = 1 << n
+    b = np.arange(N)
+    z = [1 - 2 * ((b >> i) & 1) for i in range(n)]
+    H = np.diag(-sum(z[i] * z[i + 1] for i in range(n - 1)).astype(float))
+    for i in range(n):
+        H[b, b ^ (1 << i)] -= 1
+    w, U = np.linalg.eigh(H)
+    m = sum(z) / n
+    c = U[0].conj()                                       # <b|U>, the start state |0>
+    out = []
+    for t in times:
+        psi = U @ (np.exp(-1j * w * t) * c)
+        out.append(float(np.real((np.abs(psi) ** 2) @ m)))
+    return out
+
+
+def table(text):
+    """spin_chain.c's rows: (t, 4 steps, 32 steps)."""
+    return [tuple(float(v) for v in line.split()) for line in text.splitlines() if re.match(r"^\s*\d+\.\d+\s", line)]
 VSAMPLE = r"""
 #include <stdio.h>
 #include "qarm.h"
@@ -163,6 +191,20 @@ def main():
             assert sh(native + [vexe]).stdout.split()[0] == "0"
         print(f"5) QVSAMPLE: maxcut_qaoa (QAOA, 3 layers, 8 qubits): the expected cut {expected}, the largest cut 10 "
               f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}, 01 and 10 never")
+
+        sexe = os.path.join(d, "spin")
+        build(cc, SPIN, sexe)
+        p = sh(EXEC + ["-q", sexe])
+        rows = table(p.stdout)
+        exact = ising_exact(times=[r[0] for r in rows])
+        worst = max(abs(r[2] - e) for r, e in zip(rows, exact))
+        coarse = max(abs(r[1] - e) for r, e in zip(rows, exact))
+        assert len(rows) == 13 and worst < 2e-3 and "quantum coprocessor" in p.stdout, (p.stdout, worst)
+        if native is not None:
+            q = table(sh(native + [sexe]).stdout)
+            assert all(abs(x - y) < 1e-3 for a, b in zip(q, rows) for x, y in zip(a, b)), (q, rows)
+        print(f"6) time evolution (spin_chain.c, Ising quench, 8 spins): 32 Trotter steps within {worst:.1e} of the "
+              f"exact M(t), 4 steps within {coarse:.3f}; one QEXPECTN batch for 13 times")
 
         if how.startswith("; Aer skipped"):
             print("4) skipped: Qiskit is not installed")

@@ -50,6 +50,8 @@
  *   qarm_vsample(&v, theta, shots, s)  QVSAMPLE: shots bitstrings of |psi(theta)> measured in the Z basis (bit q =
  *                                      qubit q): the answer of a QAOA or VQE run. 1: on the coprocessor, 0:
  *                                      sampled here, -1: refused
+ *   qarm_evolve_n(&h, &o, init, t, k, steps, ops, cap, out)  time evolution: <O(t)> for k times, second-order
+ *                                      Trotter tables (qarm_trotter) on QVLOAD and one QEXPECTN batch
  *   qarm_session(1) / qarm_session(0)  QSESSION: reserve a QPU for the optimizer loop, release it
  *   qarm_vqe_free(&v)                  QVFREE
  *
@@ -620,4 +622,41 @@ static inline int qarm_job_wait(qarm_job *j, double *e, double *err)
     return ok ? 1 : -1;
 }
 #endif /* QARM_RUNTIME */
+
+/* ---------------------------------------------------------------- time evolution, on the VQE instructions
+ * exp(-i H t) as an ansatz table: second-order (symmetric) Trotter steps, each Pauli term of h a QARM_PAULI_ROT.
+ * The rotations' angles are scale * theta[0] with theta[0] = dt = t / steps, so one table serves every t: k times
+ * are k parameter vectors of one QEXPECTN batch (one job on a QPU). */
+static inline uint32_t qarm_trotter(const qarm_hamiltonian *h, int steps, uint64_t init, qarm_op *ops, uint32_t cap,
+                                    qarm_ansatz *a)
+{
+    uint32_t n = 0;
+    for (int s = 0; s < steps; s++)
+        for (int half = 0; half < 2; half++)
+            for (uint32_t i = 0; i < h->terms; i++) {
+                const qarm_pauli *p = &h->t[half ? h->terms - 1 - i : i];
+                if (!p->x && !p->z) continue;                        /* the identity: a global phase */
+                if (n && ops[n - 1].x == p->x && ops[n - 1].z == p->z) { ops[n - 1].scale += p->c / 2; continue; }
+                if (n == cap) return 0;
+                ops[n++] = (qarm_op){QARM_PAULI_ROT, 0, 0, 0, 0, p->c / 2, p->x, p->z};
+            }
+    *a = (qarm_ansatz){h->qubits, 1, n, 0, init, ops};
+    return n;
+}
+
+/* <O(t)> = <init| exp(iHt) O exp(-iHt) |init> for k times, steps Trotter steps each; ops: room for the table
+ * (about 2 * steps * terms). 1: on the coprocessor, 0: on this CPU, -1: refused */
+static inline int qarm_evolve_n(const qarm_hamiltonian *h, const qarm_hamiltonian *o, uint64_t init, const double *t,
+                                int k, int steps, qarm_op *ops, uint32_t cap, double *out)
+{
+    qarm_ansatz a;
+    qarm_vqe v;
+    if (steps < 1 || k < 1 || o->qubits != h->qubits || !qarm_trotter(h, steps, init, ops, cap, &a)) return -1;
+    int where = qarm_vqe_load(o, &a, &v);
+    if (where < 0) return -1;
+    for (int i = 0; i < k; i++) out[i] = t[i] / steps;      /* the parameter vectors, replaced by the energies */
+    int ok = qarm_expect_n(&v, out, k, out);
+    qarm_vqe_free(&v);
+    return ok < 0 ? -1 : where;
+}
 #endif
