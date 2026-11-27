@@ -13,6 +13,9 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   4. The simulator backend (plugin option backend=simulator); without the plugin, the classical path.
   5. (libcurl, qiskit, qiskit-aer) the ibm backend against tests/ibm_mock.py: 3 qubits within 5 standard errors.
   6. examples/qarm/molecule_vqe.c, LiH (L-BFGS with QGRAD): the same output as under qarm_exec.py.
+  7. examples/qarm/partition.c: QMIN finds a split of difference 1, QCOUNT counts the nearly balanced splits (32)
+     within its error bound, both from the guest's own functions.
+  8. QPERIOD, QSIMON, QBV: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets.
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
@@ -56,7 +59,8 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("cb", os.path.join(EX, "codebreaker_search.c")),
+        for name, src in (("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+                          ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
             if src is None:
@@ -90,6 +94,7 @@ def main():
         p = sh(qemu() + [exe["cb"]])
         m = re.search(r"QSEARCH consistent, 8 bits: oracle of (\d+) qubits and (\d+) gates", p.stderr)
         assert m and "the secret code: BYRG" in p.stdout, (p.stdout, p.stderr)
+        assert "the phase oracle of consistent from its machine code" in p.stderr, p.stderr
         p = sh(qemu(",helper=/nonexistent/qarm_oracle.py") + [exe["tiny"]])
         assert p.stdout == "classical search: x = 3\n", p
         print(f"3) QSEARCH under the plugin from the guest's own machine code: tiny_search x = 3; Code Breaker BYRG "
@@ -132,6 +137,24 @@ def main():
         p, r = sh(qemu(",quiet=on") + [exe["lih"]]), sh(EXEC + ["-q", exe["lih"]])
         assert p.stdout == r.stdout and "VQE - exact:   0.000000 mHa" in p.stdout, (p.stdout, r.stdout)
         print("6) molecule_vqe, LiH (10 qubits, L-BFGS with QGRAD): the same output under QEMU and qarm_exec.py")
+
+        os.environ["QARM_SEED"] = "2"                    # QCOUNT's bound holds with probability >= 8/pi^2: seeded
+        p = sh(qemu() + [exe["part"]])
+        del os.environ["QARM_SEED"]
+        n, err = re.search(r"about (\d+) \(\+- ([\d.]+); QCOUNT\)", p.stdout).groups()
+        assert "difference 1\n" in p.stdout and "QMIN on the quantum coprocessor" in p.stdout, p.stdout
+        assert abs(int(n) - 32) <= float(err) and "the compute oracle of imbalance" in p.stderr, (p.stdout, p.stderr)
+        print(f"7) partition: QMIN a split of difference 1 (Durr-Hoyer, imbalance()'s compute oracle); QCOUNT about "
+              f"{n} +- {err} nearly balanced splits (exactly 32)")
+
+        p, p2 = sh(qemu() + [exe["shor"]]), sh(qemu() + [exe["hidden"]])
+        assert "15 = 3 x 5" in p.stdout and "21 = 7 x 3" in p.stdout and "QPERIOD on the quantum" in p.stdout, p
+        assert "shift is 0x2d (QSIMON)" in p2.stdout and "string is 0x35 (QBV" in p2.stdout, p2
+        p = sh(qemu(",quiet=on") + [exe["pi"]])
+        est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
+        assert abs(est - 3.1475) <= err, p.stdout
+        print(f"8) shor: 15 = 3 x 5 and 21 = 7 x 3 with QPERIOD on modexp's oracle; hidden: QSIMON 0x2d, QBV 0x35; "
+              f"pi: QAMPEST {est} +- {err} (the grid: 3.1475)")
     print("PASS")
 
 

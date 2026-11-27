@@ -11,7 +11,12 @@
  * tables from guest memory, calls libqarm and writes the results back. Then the branch skips the packet, as it
  * does on a plain CPU. Needs QEMU 10.1 or newer (plugin API with qemu_plugin_write_register).
  *
- *   QAVAIL    W0 = 1, W1 = QARM_F_VQE | QARM_F_SEARCH (the latter when the oracle helper is there)
+ *   QAVAIL    W0 = 1, W1 = QARM_F_VQE, with QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT when the oracle helper is there
+ *   QMIN      X1 = cost, W2 = bits: a compute oracle of cost, Durr-Hoyer in libqarm: W0 = 1, W3 = x, W4 = cost(x)
+ *   QCOUNT    X1 = f, W2 = bits: the phase oracle, quantum counting: W0 = 1, X3 = the count, D0 = its error bound
+ *   QAMPEST   X1 = g, W2 = bits, W3 = value bits k: a compute oracle, amplitude estimation: W0 = 1, D0 = the mean of
+ *             g, D1 = its error bound
+ *   QPERIOD, QSIMON (compute oracles), QBV (phase oracle): X1 = f, W2 = bits: W0 = 1, W3 = r or s; W0 = 2: none
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
@@ -39,7 +44,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
-enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
+enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
+       OP_QBV = 0x1A, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
@@ -219,9 +225,10 @@ static int run(char *const argv[], gchar **out, gchar **err)
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static qarm_oracle *oracle_for(uint64_t fn, unsigned bits)
+static qarm_oracle *oracle_for(uint64_t fn, unsigned bits, int compute)
 {
-    qarm_oracle *o = g_hash_table_lookup(oracles, (gpointer)(uintptr_t)fn);
+    gpointer key = (gpointer)(uintptr_t)(fn * 2 + (compute != 0));     /* f is 4-byte aligned: room for the kind */
+    qarm_oracle *o = g_hash_table_lookup(oracles, key);
     if (o) return o == ORACLE_FAILED ? NULL : o;
     o = ORACLE_FAILED;
     const char *path = qemu_plugin_path_to_binary();
@@ -231,7 +238,8 @@ static qarm_oracle *oracle_for(uint64_t fn, unsigned bits)
         snprintf(func, sizeof func, "%#llx", (unsigned long long)fn);
         snprintf(nb, sizeof nb, "%u", bits);
         for (size_t i = 0; i < sizeof code; i++) snprintf(hex + 2 * i, 3, "%02x", code[i]);
-        char *argv[] = {python, helper, "--elf", (char *)path, "--function", func, "--code", hex, "--bits", nb, NULL};
+        char *argv[] = {python, helper, "--elf", (char *)path, "--function", func, "--code", hex, "--bits", nb,
+                        "--kind", compute ? "compute" : "phase", NULL};
         gchar *out = NULL, *err = NULL;
         gint64 t0 = g_get_monotonic_time();
         int status = run(argv, &out, &err);
@@ -244,8 +252,8 @@ static qarm_oracle *oracle_for(uint64_t fn, unsigned bits)
             qarm_oracle *p = qarm_rt_oracle_parse(out, perr, sizeof perr);
             if (p) {
                 o = p;
-                note("QSEARCH: the phase oracle of %s from its machine code: %d qubits, %d gates (%.1f s)",
-                     qarm_rt_oracle_name(p), qarm_rt_oracle_qubits(p), qarm_rt_oracle_gates(p), (g_get_monotonic_time() - t0) / 1e6);
+                note("the %s oracle of %s from its machine code: %d qubits, %d gates (%.1f s)",
+                     compute ? "compute" : "phase", qarm_rt_oracle_name(p), qarm_rt_oracle_qubits(p), qarm_rt_oracle_gates(p), (g_get_monotonic_time() - t0) / 1e6);
             } else
                 note("QSEARCH: the helper's oracle: %s", perr);
         }
@@ -253,7 +261,7 @@ static qarm_oracle *oracle_for(uint64_t fn, unsigned bits)
         g_free(err);
     }
     g_free((gpointer)path);
-    g_hash_table_insert(oracles, (gpointer)(uintptr_t)fn, o);
+    g_hash_table_insert(oracles, key, o);
     return o == ORACLE_FAILED ? NULL : o;
 }
 
@@ -261,7 +269,7 @@ static void qsearch(void)
 {
     uint64_t fn = x(1);
     unsigned bits = (uint32_t)x(2);
-    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits) : NULL;
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, 0) : NULL;
     if (!o) {
         if (!told_search++) note("QSEARCH: the program takes its classical path");
         return;                                        /* W0 stays 0 */
@@ -271,6 +279,65 @@ static void qsearch(void)
     int s = qarm_rt_search(o, &found, report, sizeof report);
     note("%s", report);
     if (s == 1) { set_x(0, 1); set_x(3, (uint64_t)(uint32_t)found); }
+    else if (s == 2) set_x(0, 2);
+}
+
+/* QMIN and QCOUNT: W0 stays 0 (the classical path) when there is no oracle */
+static void qmin_count(int min)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, min) : NULL;
+    if (!o) return;
+    char report[600];
+    if (min) {
+        int found = 0;
+        long value = 0;
+        if (qarm_rt_min(o, &found, &value, report, sizeof report) == 1) {
+            set_x(0, 1);
+            set_x(3, (uint64_t)(uint32_t)found);
+            set_x(4, (uint64_t)(uint32_t)value);
+        }
+    } else {
+        long count = 0;
+        double bound = 0;
+        if (qarm_rt_count(o, &count, &bound, report, sizeof report) == 1) {
+            set_x(0, 1);
+            set_x(3, (uint64_t)count);
+            set_d(0, bound);
+        }
+    }
+    note("%s", report);
+}
+
+static void qampest(void)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2), k = (uint32_t)x(3);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, 1) : NULL;
+    if (!o) return;
+    char report[600];
+    double mean = 0, bound = 0;
+    if (qarm_rt_ampest(o, (int)k, &mean, &bound, report, sizeof report) == 1) {
+        set_x(0, 1);
+        set_d(0, mean);
+        set_d(1, bound);
+    }
+    note("%s", report);
+}
+
+static void qstructure(unsigned op)
+{
+    uint64_t fn = x(1);
+    unsigned bits = (uint32_t)x(2);
+    qarm_oracle *o = bits >= 1 && bits <= 20 ? oracle_for(fn, bits, op != OP_QBV) : NULL;
+    if (!o) return;
+    char report[600];
+    int out = 0;
+    int s = op == OP_QPERIOD ? qarm_rt_period(o, &out, report, sizeof report)
+          : op == OP_QSIMON ? qarm_rt_simon(o, &out, report, sizeof report) : qarm_rt_bv(o, &out, report, sizeof report);
+    note("%s", report);
+    if (s == 1) { set_x(0, 1); set_x(3, (uint64_t)(uint32_t)out); }
     else if (s == 2) set_x(0, 2);
 }
 
@@ -286,10 +353,23 @@ static void packet(unsigned int vcpu, void *udata)
     switch (op) {
     case OP_QAVAIL:
         set_x(0, 1);
-        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH : 0));
+        set_x(1, QARM_F_VQE | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON
+                                             | QARM_F_BV | QARM_F_AMPEST : 0));
         break;
     case OP_QSEARCH:
         qsearch();
+        break;
+    case OP_QMIN:
+    case OP_QCOUNT:
+        qmin_count(op == OP_QMIN);
+        break;
+    case OP_QAMPEST:
+        qampest();
+        break;
+    case OP_QPERIOD:
+    case OP_QSIMON:
+    case OP_QBV:
+        qstructure(op);
         break;
     case OP_QVLOAD:
         set_x(0, qvload(x(1), x(2)));

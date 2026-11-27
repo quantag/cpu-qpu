@@ -72,6 +72,41 @@ int main(void) {
     run("qarm-oracle 1 bits_0_2 5 0 4 3\nccx 0 2 4\nz 4\nccx 0 2 4\n");
     run("qarm-oracle 1 never 3 0 2 1\nx 2\n");
     run("qarm-oracle 1 none 3 0 2 0\n");
+    {   /* QMIN: f(x) = x xor 5 on 3 bits (cx from each input bit, x on bits 0 and 2): least at x = 5 */
+        char err[300], report[600];
+        qarm_oracle *o = qarm_rt_oracle_parse("qarm-oracle 2 xor5 6 0 3 3 3 5\ncx 0 3\ncx 1 4\ncx 2 5\nx 3\nx 5\n",
+                                              err, sizeof err);
+        int x = -1; long v = -1;
+        int r = o ? qarm_rt_min(o, &x, &v, report, sizeof report) : -9;
+        printf("min %d %d %ld | %s\n", r, x, v, o ? report : err);
+        qarm_rt_oracle_free(o);
+        /* QCOUNT: bits 0 and 2 set, 4 bits: 4 of 16 */
+        o = qarm_rt_oracle_parse("qarm-oracle 1 bits_0_2 5 0 4 3\nccx 0 2 4\nz 4\nccx 0 2 4\n", err, sizeof err);
+        long n = -1; double b = -1;
+        r = qarm_rt_count(o, &n, &b, report, sizeof report);
+        printf("count %d %ld %.3f | %s\n", r, n, b, report);
+        qarm_rt_oracle_free(o);
+        /* QPERIOD: f(x) = x mod 4 on 4 bits (out = x's low two bits): period 4 */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 mod4 6 0 4 4 2 2\ncx 0 4\ncx 1 5\n", err, sizeof err);
+        int pr = -1; r = qarm_rt_period(o, &pr, report, sizeof report);
+        printf("period %d %d | %s\n", r, pr, report);
+        qarm_rt_oracle_free(o);
+        /* QSIMON: f(x) = x0 xor x1 on 2 bits: f(x) = f(x ^ 3) */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 xor01 3 0 2 2 1 2\ncx 0 2\ncx 1 2\n", err, sizeof err);
+        int sh = -1; r = qarm_rt_simon(o, &sh, report, sizeof report);
+        printf("simon %d %d | %s\n", r, sh, report);
+        qarm_rt_oracle_free(o);
+        /* QBV: f(x) = x0 xor x2 on 3 bits (z on qubits 0 and 2): s = 5 */
+        o = qarm_rt_oracle_parse("qarm-oracle 1 bv5 3 0 3 2\nz 0\nz 2\n", err, sizeof err);
+        int sv = -1; r = qarm_rt_bv(o, &sv, report, sizeof report);
+        printf("bv %d %d | %s\n", r, sv, report);
+        qarm_rt_oracle_free(o);
+        /* QAMPEST: g(x) = x on 2 bits (out = x), values 0..3: mean 1.5 */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 identity 4 0 2 2 2 2\ncx 0 2\ncx 1 3\n", err, sizeof err);
+        double mean = -1, mb = -1; r = qarm_rt_ampest(o, 2, &mean, &mb, report, sizeof report);
+        printf("ampest %d %.4f %.4f | %s\n", r, mean, mb, report);
+        qarm_rt_oracle_free(o);
+    }
     return 0;
 }
 """
@@ -175,8 +210,15 @@ def main():
         assert lines[1].startswith("1 ") and x & 5 == 5, lines
         assert lines[2].startswith("-1 ") and "leaves qubit 2 at 1" in lines[2], lines
         assert lines[3].startswith("2 ") and "no x with f(x) = 1" in lines[3], lines
+        assert lines[4].startswith("min 1 5 0 |"), lines
+        n, b = int(lines[5].split()[2]), float(lines[5].split()[3])
+        assert lines[5].startswith("count 1 ") and abs(n - 4) <= b, lines
+        assert lines[6].startswith("period 1 4 |") and lines[7].startswith("simon 1 3 |") and lines[8].startswith("bv 1 5 |"), lines
+        mean, mb = float(lines[9].split()[2]), float(lines[9].split()[3])
+        assert lines[9].startswith("ampest 1 ") and abs(mean - 1.5) <= mb, lines
         print(f"6) QSEARCH's engine: x == 3 found; x & 5 == 5 found ({x}); an oracle that leaves a work qubit set refused;"
-              " no answer reported")
+              f" no answer reported. QMIN: x xor 5 least at 5. QCOUNT: {n} +- {b:.1f} of 4. QPERIOD: x mod 4 has period 4; "
+              f"QSIMON: x0 xor x1 has shift 3; QBV: x0 xor x2 gives 5; QAMPEST: the mean of x, {mean} +- {mb} of 1.5")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

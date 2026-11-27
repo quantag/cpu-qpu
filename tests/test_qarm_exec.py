@@ -8,6 +8,9 @@
   2. A second program: printf formats, puts, putchar, an exit code; QSEARCH with several solutions (any one is
      right), with none (0), and at 12 bits; QAVAIL.
   3. Errors: a predicate that calls another function (exit 70, the reason); a missing library function.
+     3b. QMIN and QCOUNT: examples/qarm/partition.c (number partitioning), oracles from imbalance()'s and
+     nearly_balanced()'s machine code; on the plain CPU every split is tried.
+     3c. QPERIOD, QSIMON, QBV: examples/qarm/shor.c (factoring 15 and 21) and hidden.c.
   4. (with qiskit, qiskit-aer, qiskit-ibm-runtime) QSEARCH on a QPU backend from a config file:
      examples/qarm/tiny_search.c on IBM's noise model of Fez and through the "ibm" backend's local channel (the
      code path of a real device, one asynchronous job, without the login); Code Breaker's 1000-qubit oracle is
@@ -119,6 +122,38 @@ def main():
         assert p.returncode == 70 and "which this runtime does not provide" in p.stderr, p.stderr
         print("3) errors: a predicate that calls another function, a library function the runtime lacks: exit 70 "
               "with the reason")
+
+        part = os.path.join(ROOT, "examples", "qarm", "partition.c")
+        pexe = os.path.join(d, "partition")
+        sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), part, "-o", pexe])
+        os.environ["QCPU_SEED"] = "2"                    # QCOUNT's bound holds with probability >= 8/pi^2: seeded
+        p = sh(EXEC + [pexe])
+        del os.environ["QCPU_SEED"]
+        n, err = re.search(r"about (\d+) \(\+- ([\d.]+); QCOUNT\)", p.stdout).groups()
+        assert "difference 1\n" in p.stdout and abs(int(n) - 32) <= float(err), p.stdout
+        assert re.search(r"QMIN imbalance, 8 bits: Durr-Hoyer with a \d+-qubit", p.stderr), p.stderr
+        if native:
+            q = sh(native + [pexe])
+            assert "every split tried on this CPU" in q.stdout and "difference 1\n" in q.stdout and "32 (counted)" in q.stdout
+        print(f"3b) QMIN and QCOUNT (examples/qarm/partition.c): a split of difference 1; about {n} +- {err} nearly "
+              "balanced splits (32 counted on the CPU)")
+
+        for ex, want in (("shor", ["15 = 3 x 5", "21 = 7 x 3"]), ("hidden", ["shift is 0x2d", "string is 0x35"])):
+            sexe = os.path.join(d, ex)
+            sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", ex + ".c"),
+                     "-o", sexe])
+            p = sh(EXEC + [sexe])
+            assert all(w in p.stdout for w in want) and "(simulated)" in p.stderr, (p.stdout, p.stderr)
+            if native:
+                q = sh(native + [sexe])
+                assert all(w in q.stdout for w in want), q.stdout
+        pexe = os.path.join(d, "pi")
+        sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"), os.path.join(ROOT, "examples", "qarm", "pi.c"), "-o", pexe])
+        p = sh(EXEC + [pexe])
+        est, err = (float(v) for v in re.search(r"pi is about ([\d.]+) \+- ([\d.]+)", p.stdout).groups())
+        assert abs(est - 3.1475) <= err, p.stdout                 # the grid's exact value: 3.1475
+        print("3c) QPERIOD (examples/qarm/shor.c: 15 = 3 x 5, 21 = 7 x 3 from C modexp's oracle), QSIMON (shift 0x2d), "
+              f"QBV (string 0x35): the same answers as the plain CPU; QAMPEST (pi.c): {est} +- {err} (the grid: 3.1475)")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

@@ -15,6 +15,20 @@
  *                               with f's oracle built from f's own machine code; on a plain CPU, every x in turn.
  *                               Returns 1 and stores x, or 0 if there is none. f returns 0 or 1, calls no other
  *                               function and writes no memory; bits <= 16. Every answer is checked by calling f.
+ *   qarm_min(cost, bits, &x, &v)  QMIN: an x with the least cost(x) (signed), and v = cost(x): Durr-Hoyer, Grover
+ *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
+ *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
+ *                               (that is the search's job), so a quantum answer is right with high probability
+ *   qarm_mean(g, bits, k, &err) QAMPEST: the mean of g(x) over all x, g(x) in 0 .. 2^k - 1: amplitude estimation;
+ *                               err: its error bound (probability >= 8/pi^2), 0 when computed classically
+ *   qarm_period(f, bits, &r)    QPERIOD: the least r > 0 with f(x + r) = f(x): Shor's period finding (quantum Fourier
+ *                               transform, continued fractions); checked on f(0..3). 0 if none is found
+ *   qarm_simon(f, bits, &s)     QSIMON: s != 0 with f(x) = f(x ^ s) for all x (Simon); checked on f(0..3). 0: none
+ *   qarm_bv(f, bits, &s)        QBV: s with f(x) = s.x mod 2 (+ a constant): one query (Bernstein-Vazirani); checked
+ *                               on four inputs
+ *   qarm_count(f, bits, &err)   QCOUNT: the number of x with f(x) = 1: quantum counting; err: its error bound, which
+ *                               holds with probability >= 8/pi^2 (0 when
+ *                               counted classically)
  *
  * VQE (section 6 of docs/qarm_v2.md): the program's optimizer runs on the CPU; the coprocessor prepares the
  * ansatz state and measures the energy. On a plain CPU each call computes the energy exactly from the state
@@ -53,7 +67,79 @@ enum { QARM_X = 1, QARM_H, QARM_CX, QARM_CZ, QARM_RY, QARM_RZ, QARM_PAULI_ROT };
 typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
 typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
-enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2 };
+enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
+       QARM_F_BV = 64, QARM_F_AMPEST = 128 };
+
+/* the classical paths of QMIN and QCOUNT */
+static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)
+{
+    int bx = 0, bv = cost(0);
+    for (long v = 1; v < (1L << bits); v++) {
+        int c = cost((int)v);
+        if (c < bv) { bv = c; bx = (int)v; }
+    }
+    *x = bx;
+    if (value) *value = bv;
+    return 1;
+}
+/* checks of QPERIOD's, QSIMON's and QBV's answers, and their classical paths */
+static inline int qarm__is_period(int (*f)(int), int r)
+{
+    for (int i = 0; i < 4; i++)
+        if (f(i) != f(i + r)) return 0;
+    return r > 0;
+}
+static inline int qarm__is_shift(int (*f)(int), int s)
+{
+    for (int i = 0; i < 4; i++)
+        if (f(i) != f(i ^ s)) return 0;
+    return s != 0;
+}
+static inline int qarm__is_bv(int (*f)(int), int bits, int s)
+{
+    static const int probe[4] = {0x5A5A5A5, 0x3333333, 0x0F0F0F0, 0x7FFFFFF};
+    int b0 = f(0) & 1;
+    for (int i = 0; i < 4; i++) {
+        int x = probe[i] & (int)((1L << bits) - 1), p = 0;
+        for (int v = x & s; v; v &= v - 1) p ^= 1;
+        if ((f(x) & 1) != (p ^ b0)) return 0;
+    }
+    return 1;
+}
+static inline int qarm__period(int (*f)(int), int bits, int *r)
+{
+    for (long v = 1; v < (1L << bits); v++)
+        if (qarm__is_period(f, (int)v)) { *r = (int)v; return 1; }
+    return 0;
+}
+static inline int qarm__simon(int (*f)(int), int bits, int *s)
+{
+    int f0 = f(0);
+    for (long v = 1; v < (1L << bits); v++)            /* s is f(0)'s other input: f(0) = f(0 ^ s) */
+        if (f((int)v) == f0 && qarm__is_shift(f, (int)v)) { *s = (int)v; return 1; }
+    return 0;
+}
+static inline int qarm__bv(int (*f)(int), int bits, int *s)
+{
+    int b0 = f(0) & 1;
+    *s = 0;
+    for (int i = 0; i < bits; i++) *s |= ((f(1 << i) & 1) ^ b0) << i;
+    return 1;
+}
+static inline double qarm__mean(int (*g)(int), int bits, double *err)
+{
+    double s = 0;
+    for (long v = 0; v < (1L << bits); v++) s += g((int)v);
+    if (err) *err = 0;
+    return s / (double)(1L << bits);
+}
+static inline long qarm__count(int (*f)(int), int bits, double *err)
+{
+    long n = 0;
+    for (long v = 0; v < (1L << bits); v++) n += f((int)v) == 1;
+    if (err) *err = 0;
+    return n;
+}
 
 #if defined(QARM_RUNTIME)
 #include <math.h>
@@ -61,6 +147,12 @@ enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2 };
 
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
+static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
+static inline int qarm_bv(int (*f)(int), int bits, int *s) { return qarm__bv(f, bits, s); }
+static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)
@@ -222,6 +314,86 @@ static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double
     return 0;
 }
 
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = cost;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = 0;
+    __asm__ volatile(QARM_PACKET(0x02150000) : "+r"(x0), "+r"(x3), "+r"(x4) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1 && cost((int)x3) == (int)x4) {             /* the answer's cost checked by cost itself */
+        *x = (int)x3;
+        if (value) *value = (int)x4;
+        return 1;
+    }
+    return qarm__min(cost, bits, x, value);
+}
+
+/* QPERIOD 0x18, QSIMON 0x19, QBV 0x1A: X1 = f, W2 = bits -> W0 = 1 and W3 = the answer, W0 = 2: none */
+static inline long qarm__structure(unsigned op, int (*f)(int), int bits, int *out)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = f;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    if (op == 0x18) __asm__ volatile(QARM_PACKET(0x02180000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
+    else if (op == 0x19) __asm__ volatile(QARM_PACKET(0x02190000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
+    else __asm__ volatile(QARM_PACKET(0x021a0000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
+    *out = (int)x3;
+    return x0;
+}
+static inline int qarm_period(int (*f)(int), int bits, int *r)
+{
+    long s = qarm__structure(0x18, f, bits, r);
+    if (s == 1 && qarm__is_period(f, *r)) return 1;
+    if (s == 2) return 0;
+    return qarm__period(f, bits, r);
+}
+static inline int qarm_simon(int (*f)(int), int bits, int *sh)
+{
+    long s = qarm__structure(0x19, f, bits, sh);
+    if (s == 1 && qarm__is_shift(f, *sh)) return 1;
+    if (s == 2) return 0;
+    return qarm__simon(f, bits, sh);
+}
+static inline int qarm_bv(int (*f)(int), int bits, int *sv)
+{
+    long s = qarm__structure(0x1a, f, bits, sv);
+    if (s == 1 && qarm__is_bv(f, bits, *sv)) return 1;
+    return qarm__bv(f, bits, sv);
+}
+
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = g;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = k;
+    register double d0 __asm__("d0") = 0, d1 __asm__("d1") = 0;
+    __asm__ volatile(QARM_PACKET(0x02170000) : "+r"(x0), "+w"(d0), "+w"(d1) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    if (x0 == 1) {
+        if (err) *err = d1;
+        return d0;
+    }
+    return qarm__mean(g, bits, err);
+}
+
+static inline long qarm_count(int (*f)(int), int bits, double *err)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = f;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    register double d0 __asm__("d0") = 0;
+    __asm__ volatile(QARM_PACKET(0x02160000) : "+r"(x0), "+r"(x3), "+w"(d0) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1) {
+        if (err) *err = d0;
+        return x3;
+    }
+    return qarm__count(f, bits, err);
+}
+
 static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 {
     if (v->quantum) {
@@ -277,6 +449,12 @@ static inline int qarm_session(int open) { (void)open; return 0; }
 static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
+static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
+static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
+static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
+static inline int qarm_bv(int (*f)(int), int bits, int *s) { return qarm__bv(f, bits, s); }
+static inline long qarm_count(int (*f)(int), int bits, double *err) { return qarm__count(f, bits, err); }
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
     for (long v = 0; v < (1L << bits); v++)
