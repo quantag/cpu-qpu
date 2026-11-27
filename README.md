@@ -35,6 +35,8 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Minimum, counting, mean, period, hidden shift and string, with C functions as oracles | `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Any circuit as a C table, quantum random bytes, the device's capabilities | `QCIRC`, `QRAND`, `QCAPS` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| Hamiltonian time evolution (Trotter tables, many times in one job) | `qarm_evolve_n` on `QVLOAD`, `QEXPECTN` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| An open specification of the instruction set, and a conformance program for runtimes | [`docs/qarm_isa.md`](docs/qarm_isa.md), `tests/conformance` | [the spec](docs/qarm_isa.md) |
 | VQE: a molecule's ground-state energy, the optimizer in C; QAOA and its answer's bitstrings | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QGRAD`, `QVSAMPLE`, `QSESSION`; `tools/qarm_molecule.py` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |

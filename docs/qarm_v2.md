@@ -1,5 +1,8 @@
 # Q-ARM v2: quantum instructions with a classical fallback, in one ARM binary
 
+> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.0),
+> with a conformance program in `tests/conformance`. This document is the reference implementation's.
+
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm
 extension, and no claim of a speedup today (section 11).
@@ -724,8 +727,6 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 - More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
   `QCOLLISION`.
-- A versioned, vendor-neutral specification of the instruction set, with a conformance suite that any
-  runtime can be checked against.
 - `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;

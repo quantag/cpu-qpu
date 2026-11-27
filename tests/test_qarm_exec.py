@@ -13,6 +13,8 @@
      3c. QPERIOD, QSIMON, QBV: examples/qarm/shor.c (factoring 15 and 21) and hidden.c.
      3d. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c (a GHZ state, a Toffoli truth table), the circuit tables read
      from the program's memory; with 4's packages, the same binary on the noise model of Fez.
+  5. The conformance program (tests/conformance/qarm_conformance.c, docs/qarm_isa.md): every test passes under
+     qarm_exec.py with all 12 feature bits; on the plain CPU it reports no runtime.
   4. (with qiskit, qiskit-aer, qiskit-ibm-runtime) QSEARCH on a QPU backend from a config file:
      examples/qarm/tiny_search.c on IBM's noise model of Fez and through the "ibm" backend's local channel (the
      code path of a real device, one asynchronous job, without the login); Code Breaker's 1000-qubit oracle is
@@ -169,6 +171,18 @@ def main():
             assert "simulated here" in q.stdout and "11->1 100%" in q.stdout and "device: classical" in q.stdout, q.stdout
         print("3d) QCIRC, QRAND, QCAPS (examples/qarm/ghz.c): GHZ on 5 qubits, only 00000 and 11111; Toffoli's truth "
               "table; the plain CPU's state vector gives the same")
+
+        cexe = os.path.join(d, "conformance")
+        sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"),
+                 os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c"), "-o", cexe, "-lm"])
+        p = sh(EXEC + ["-q", cexe], check=False)
+        assert p.returncode == 0 and "conformance: 13 passed, 0 failed, 0 skipped (features 0xfff)" in p.stdout, \
+            (p.stdout, p.stderr)
+        if native:
+            q = sh(native + [cexe])
+            assert "SKIP QAVAIL: no runtime" in q.stdout, q.stdout
+        print("5) conformance (tests/conformance/qarm_conformance.c): 13 of 13 under qarm_exec.py, features 0xfff"
+              + ("; the plain CPU: no runtime" if native else ""))
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401
