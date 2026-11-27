@@ -34,7 +34,7 @@ import struct
 import sys
 
 STACK_TOP, STACK_SIZE = 0x7ff000000, 0x100000
-HEAP, HEAP_SIZE = 0x6f0000000, 0x400000
+HEAP, HEAP_SIZE = 0x6f0000000, 0x4000000
 STUBS = 0x6e0000000             # one 4-byte slot per imported function, handled by this runtime
 HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
@@ -45,8 +45,11 @@ GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: 
          13: "cx", 14: "cz", 15: "swap", 16: "ccx"}
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
 OP_QVSAMPLE = 0x25
+OP_QSUBMIT, OP_QPOLL, OP_QWAIT = 0x12, 0x13, 0x14
+FEATURES = 8191           # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
 OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
-       OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE)
+       OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE, OP_QSUBMIT, OP_QPOLL,
+       OP_QWAIT)
 
 
 class QarmError(Exception):
@@ -283,10 +286,17 @@ class Runtime:
         return found
 
     # registers and memory
+    vregs = None                                   # QSUBMIT: the request's registers X0-X5, D0, D1
+
     def x(self, n):
+        if self.vregs is not None and n < 6:
+            return self.vregs["x"][n]
         return self.mu.reg_read(getattr(self.A, f"UC_ARM64_REG_X{n}"))
 
     def set_x(self, n, v):
+        if self.vregs is not None and n < 6:
+            self.vregs["x"][n] = v & 0xFFFFFFFFFFFFFFFF
+            return
         self.mu.reg_write(getattr(self.A, f"UC_ARM64_REG_X{n}"), v & 0xFFFFFFFFFFFFFFFF)
 
     def cstr(self, addr, limit=1 << 16):
@@ -338,10 +348,40 @@ class Runtime:
     def on_packet(self, mu, address, size, user):
         w2 = struct.unpack("<I", mu.mem_read(address + 8, 4))[0]
         op = (w2 >> 16) & 0xFF
+        if op == OP_QSUBMIT:
+            self.qsubmit(self.x(1))
+        elif op in (OP_QPOLL, OP_QWAIT):           # every request is done at QSUBMIT: this runtime is synchronous
+            state = struct.unpack("<I", bytes(mu.mem_read(self.x(1) + 4, 4)))[0]
+            self.set_x(0, 1)
+            if op == OP_QPOLL:
+                self.set_x(1, state)
+        else:
+            self.dispatch(op)
+        mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
+
+    REQUEST = struct.Struct("<II6Q2dQ")            # qarm_request: opcode, state, x[6], d[2], ticket
+
+    def qsubmit(self, addr):
+        """QSUBMIT: the request's instruction, run now on a register file of its own; state 1 at once."""
+        op, _, *rest = self.REQUEST.unpack(bytes(self.mu.mem_read(addr, self.REQUEST.size)))
+        xs, ds = list(rest[:6]), list(rest[6:8])
+        if op not in OPS or op in (OP_QSUBMIT, OP_QPOLL, OP_QWAIT):
+            self.set_x(0, 2)
+            self.note(f"QSUBMIT: opcode {op:#x} cannot be submitted")
+            return
+        self.vregs = {"x": [0] + xs[1:], "d": ds}
+        try:
+            self.dispatch(op)
+            v = self.vregs
+        finally:
+            self.vregs = None
+        self.mu.mem_write(addr, self.REQUEST.pack(op, 1, *v["x"], *v["d"], addr))
+        self.set_x(0, 1)
+
+    def dispatch(self, op):
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 4095)                    # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS
-                                                   #     QVSAMPLE
+            self.set_x(1, FEATURES)
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
@@ -360,7 +400,6 @@ class Runtime:
             self.qstructure(op, self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
-        mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
 
     def call(self, fn, arg):
         """Call a function of the program: f(arg) -> W0 (used to check answers)."""
@@ -371,7 +410,7 @@ class Runtime:
         self.mu.reg_write(A.UC_ARM64_REG_LR, HALT + 0x800)
         self.mu.reg_write(A.UC_ARM64_REG_SP, saved["SP"] - 0x10000)
         self.mu.emu_start(fn, HALT + 0x800, count=1_000_000)
-        v = self.x(0) & 0xFFFFFFFF
+        v = self.mu.reg_read(A.UC_ARM64_REG_X0) & 0xFFFFFFFF
         for r, val in saved.items():
             self.mu.reg_write(getattr(A, f"UC_ARM64_REG_{r}"), val)
         return v
@@ -511,7 +550,7 @@ class Runtime:
             b = self.qpu["backend"]
             name = f"qarm_exec.py: {b}" + (f" {self.qpu['ibm'].get('backend')}" if b == "ibm" else "")
             qubits, flags = (156 if b in ("ibm", "preview") else 30), (1 if b == "ibm" else 0) | 2 | (4 if b == "ibm" else 0)
-        self.mu.mem_write(addr, struct.pack("<IIII48s", 1, 4095, qubits, flags, name.encode()[:47]))
+        self.mu.mem_write(addr, struct.pack("<IIII48s", 1, FEATURES, qubits, flags, name.encode()[:47]))
         self.set_x(0, 1)
 
     def qampest(self, fn, bits, vbits):
@@ -582,6 +621,9 @@ class Runtime:
 
     # VQE (qarm_vqe.py)
     def set_d(self, n, v):
+        if self.vregs is not None:
+            self.vregs["d"][n] = float(v)
+            return
         self.mu.reg_write(self.A.UC_ARM64_REG_D0 + n, struct.unpack("<Q", struct.pack("<d", v))[0])
 
     def doubles(self, addr, n):
@@ -765,6 +807,32 @@ def _memset(rt):
     rt.ret(d)
 
 
+def _malloc(rt):                        # a bump allocator: free() does nothing; the size is kept before the block
+    n = rt.x(0)
+    a = rt.alloc(n + 16) + 16
+    rt.mu.mem_write(a - 8, struct.pack("<Q", n))
+    rt.ret(a)
+
+
+def _calloc(rt):                        # fresh heap memory is zero
+    rt.mu.reg_write(rt.A.UC_ARM64_REG_X0, rt.x(0) * rt.x(1))
+    _malloc(rt)
+
+
+def _realloc(rt):
+    old, n = rt.x(0), rt.x(1)
+    a = rt.alloc(n + 16) + 16
+    rt.mu.mem_write(a - 8, struct.pack("<Q", n))
+    if old:
+        size = struct.unpack("<Q", bytes(rt.mu.mem_read(old - 8, 8)))[0]
+        rt.mu.mem_write(a, bytes(rt.mu.mem_read(old, min(size, n))))
+    rt.ret(a)
+
+
+def _free(rt):
+    rt.ret(0)
+
+
 def _bzero(rt):
     rt.mu.mem_write(rt.x(0), bytes(rt.x(1)))
     rt.ret(0)
@@ -839,7 +907,8 @@ MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp"
 LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
         "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
-        "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
+        "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "malloc": _malloc, "calloc": _calloc,
+        "realloc": _realloc, "free": _free, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
         "fputs": _fputs, "fwrite": _fwrite, "fflush": _fflush}
 STDOUT_FILE, STDERR_FILE = 0x5100, 0x5200      # what the program sees as FILE *stdout, *stderr
 DATA_IMPORTS = {"__stack_chk_guard": 0x2F8A5C3E91D04B76, "stdout": STDOUT_FILE, "stderr": STDERR_FILE,

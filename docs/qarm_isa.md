@@ -87,7 +87,8 @@ continues classically. A development runtime MAY stop the program instead, with 
 the reason. `qarm_exec.py` does that for an oracle it cannot translate.
 
 **Synchronous.** Each packet completes before the next instruction executes. The runtime may wait for a
-queued QPU job while the program is stopped. Asynchronous forms are reserved (section 7.6).
+queued QPU job while the program is stopped. The asynchronous form of any instruction is `QSUBMIT`
+(section 6.5).
 
 **Randomness.** Quantum instructions are probabilistic. Section 6 states, per instruction, what is
 guaranteed: an exact property of every answer, or a bound that holds with a stated probability. Where the
@@ -112,8 +113,9 @@ answer has a cheap classical check, the library MUST run it (section 6) before i
 | `QARM_F_RAND` | 512 | `QRAND` |
 | `QARM_F_CAPS` | 1024 | `QCAPS` |
 | `QARM_F_VSAMPLE` | 2048 | `QVSAMPLE` |
+| `QARM_F_ASYNC` | 4096 | `QSUBMIT`, `QPOLL`, `QWAIT` |
 
-Bits 12–31 are reserved and MUST be 0 in 1.0. A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
+Bits 13–31 are reserved and MUST be 0 in 1.0. A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
 from before feature bits. Libraries treat it as `QARM_F_SEARCH` only.
 
 ## 5. Operands
@@ -278,6 +280,30 @@ value. It is valid until `QVFREE` or the end of the process.
 `QRAND`'s bytes MUST be uniformly distributed to the backend's precision. Only `W0 = 1` claims quantum
 randomness.
 
+### 6.5 Asynchronous execution
+
+A request holds one instruction and its input registers:
+
+```c
+typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ticket; } qarm_request;  /* 80 */
+```
+
+| opcode | name | in | out |
+|---|---|---|---|
+| 0x12 | `QSUBMIT` | `X1` = `qarm_request *` | `W0 = 1`: taken (`state` 0 running, or already 1); `W0 = 2`: refused |
+| 0x13 | `QPOLL` | `X1` = the request | `W0 = 1`, `W1` = `state` (1: done); never waits |
+| 0x14 | `QWAIT` | `X1` = the request | `W0 = 1` once `state` is 1 |
+
+- The runtime MUST read all of the instruction's inputs, registers and memory, at `QSUBMIT`.
+- When `state` becomes 1:
+  - `x[0]` holds the instruction's `W0`;
+  - `x[1..5]`, `d[0..1]` hold its output registers, and every other register field is unchanged;
+  - its memory outputs are written.
+- Until then the program MUST NOT read the outputs or modify the request.
+- `ticket` is the runtime's. `QSUBMIT` of `QSUBMIT`, `QPOLL` or `QWAIT` MUST be refused.
+- A runtime MAY complete any request at `QSUBMIT`. It SHOULD run QPU jobs (`QEXPECTN` at least)
+  asynchronously, so that the program keeps computing while the job is queued.
+
 ## 7. Library obligations and reserved opcodes
 
 ### 7.1 Classical paths
@@ -301,11 +327,10 @@ A program also need not include the library. A binary rewriter can emit the pack
 `tools/qarm_patch.py` does for brute-force search functions in finished ELF binaries. The rewriter then
 takes on the library's obligations: the check and the classical path.
 
-### 7.3–7.6 Reserved
+### 7.3 Reserved
 
 | opcode | name | for |
 |---|---|---|
-| 0x12–0x14 | `QSUBMIT`, `QPOLL`, `QWAIT` | the asynchronous form of any instruction |
 | 0x1B | `QCOLLISION` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) |
 | 0x27 | `QEVOLVE` | native time evolution in the runtime (higher-order product formulas, qDRIFT) |
 | 0x28–0x2F, 0x32–0x3F | — | future variational and circuit instructions |
@@ -324,9 +349,11 @@ A runtime states the profiles it implements. Its feature bits must cover them.
 | Oracle | `QSEARCH`, `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV` | 1 4 8 16 32 64 128 |
 | Variational | `QVLOAD` … `QVFREE`, `QVSAMPLE` | 2 2048 |
 | Circuit | `QCIRC`, `QRAND` | 256 512 |
+| Async | `QSUBMIT`, `QPOLL`, `QWAIT` | 4096 |
 
-`qarm_exec.py` and the QEMU plugin with its oracle helper implement all four. The QEMU plugin without
-the helper implements Core, Variational and Circuit.
+`qarm_exec.py` and the QEMU plugin with its oracle helper implement all five. `qarm_exec.py` completes
+every request at `QSUBMIT`. The QEMU plugin submits `QEXPECTN` to libqarm, which polls an IBM job while
+the program runs. Without its oracle helper, the plugin implements Core, Variational, Circuit and Async.
 
 ## 9. Conformance
 
@@ -339,7 +366,7 @@ $ python3 qarm_exec.py -q conformance
 PASS QAVAIL
 PASS unassigned opcode
 ...
-conformance: 13 passed, 0 failed, 0 skipped (features 0xfff)
+conformance: 14 passed, 0 failed, 0 skipped (features 0x1fff)
 ```
 
 For each test it checks:

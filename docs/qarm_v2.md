@@ -57,7 +57,7 @@ The operands are in fixed registers, so the packet itself has none:
 
 | opcode | name | in | out |
 |---|---|---|---|
-| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE` (`qarm_features()`) |
+| `0x10` | `QAVAIL` | — | `W0 = 1`, `W1` = features: 1 `QSEARCH`, 2 VQE, 4 `QMIN`, 8 `QCOUNT`, 16 `QPERIOD`, 32 `QSIMON`, 64 `QBV`, 128 `QAMPEST`, 256 `QCIRC`, 512 `QRAND`, 1024 `QCAPS`, 2048 `QVSAMPLE`, 4096 `QSUBMIT`/`QPOLL`/`QWAIT` (`qarm_features()`) |
 | `0x11` | `QSEARCH` | `X1` = address of `f`, `W2` = bits (1 to 16) | `W0 = 1` and `W3 = x` with `f(x) = 1`; or `W0 = 2`: none |
 | `0x15` | `QMIN` | `X1` = address of `cost`, `W2` = bits | `W0 = 1`, `W3 = x` with the least `cost(x)`, `W4 = cost(x)` (signed) |
 | `0x16` | `QCOUNT` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `X3` = the number of `x` with `f(x) = 1`, `D0` = its error bound |
@@ -65,6 +65,7 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x18` | `QPERIOD` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = the least r > 0 with f(x + r) = f(x); or `W0 = 2`: none |
 | `0x19` | `QSIMON` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s ≠ 0 with f(x) = f(x ⊕ s); or `W0 = 2`: none |
 | `0x1A` | `QBV` | `X1` = address of `f`, `W2` = bits | `W0 = 1`, `W3` = s with f(x) = s·x mod 2 (+ a constant) |
+| `0x12`–`0x14` | `QSUBMIT`, `QPOLL`, `QWAIT` | `X1` = `qarm_request` (an instruction and its registers) | the instruction, asynchronously: `qarm_expect_n_async` under QEMU leaves the IBM job running while the program works (docs/qarm_isa.md 6.5) |
 | `0x1C` | `QRAND` | `X1` = buffer, `W2` = n bytes | `W0 = 1`: measurements on quantum hardware; `W0 = 3`: a simulator's (pseudo-random) |
 | `0x30` | `QCIRC` | `X1` = `qarm_circuit`, `W2` = shots, `X3` = `uint64_t` samples | `W0 = 1`: samples written; `W0 = 2`: refused |
 | `0x31` | `QCAPS` | `X1` = `qarm_capabilities` | `W0 = 1`: version, features, qubits, flags (1 hardware, 2 measured, 4 async), backend name |
@@ -76,7 +77,6 @@ function or table. Each has a classical path in `qarm.h`, a check of the answer 
 
 | opcode | name | input | result | check |
 |---|---|---|---|---|
-| `0x12`–`0x14` | `QSUBMIT` / `QPOLL` / `QWAIT` | any instruction | its asynchronous form (section 5) | — |
 | `0x1B` | `QCOLLISION` | `f(x)` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) | f(x) = f(y) |
 | `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ natively in the runtime (qDRIFT, higher-order formulas); today a library function, section 6 | exact for small cases |
 
@@ -283,19 +283,17 @@ refuses an oracle larger than the device, with the numbers (`needs 1120 qubits, 
 run`, exit code 70), before anything is submitted. In practice the limit today is depth, not width:
 `is_three` already has 155 two-qubit gates after transpiling to Fez, where one CZ would do.
 
-**Async instructions (design, not implemented).** A program that should keep working while the QPU
-runs needs the asynchrony in the instruction set rather than hidden in the runtime:
+**Async instructions.** A program that should keep working while the QPU runs needs the asynchrony in
+the instruction set, rather than hidden in the runtime.
+- `QSUBMIT` takes any instruction as a `qarm_request`: the opcode, and its input registers.
+- `QPOLL` reports whether the request is done. `QWAIT` waits for it.
+- When the request is done, it holds the output registers, and the memory outputs are written
+  (`docs/qarm_isa.md`, section 6.5).
 
-| opcode | name | in | out |
-|---|---|---|---|
-| `0x12` | `QSUBMIT` | `X1` = f, `W2` = bits | `W0` = 1 and `X3` = ticket, or `W0` = 0 (no coprocessor) |
-| `0x13` | `QPOLL` | `X3` = ticket | `W0` = 1 done, 3 still queued or running |
-| `0x14` | `QWAIT` | `X3` = ticket | as `QSEARCH`: `W0` = 1 and `W3` = x, or `W0` = 2 |
-
-On the simulator, `QSUBMIT` would compute the answer at once and `QPOLL` would always report done. On a
-plain CPU, `W0` = 0 sends the program down the classical path, as now. A ticket is the backend's job id held
-by the runtime, so a program could submit several searches and collect them later. That is how CUDA-Q's
-`cudaq::sample_async` and Qiskit's `job.result()` already work.
+Under QEMU with libqarm on `ibm`, `QEXPECTN` stays on the QPU while the program runs. Every other
+instruction, and every instruction under `qarm_exec.py`, completes at `QSUBMIT`. On a plain CPU `W0 = 0`,
+and `qarm.h` computes the batch itself. This is how CUDA-Q's `cudaq::sample_async` and Qiskit's
+`job.result()` work, but at the instruction level.
 
 ## 6. VQE
 
@@ -597,9 +595,9 @@ while (qarm_job_ready(j) == 0)
 qarm_job_wait(j, energies, errors);                  // the results; frees the job
 ```
 
-With libqarm on `ibm`, `qarm_job_ready` polls IBM once and never waits. In the other builds the batch is
-computed when it is sent, so the job is ready at once. This is the asynchronous instruction set of
-section 5 (`QSUBMIT` / `QPOLL` / `QWAIT`), as a C API.
+With libqarm on `ibm`, `qarm_job_ready` polls IBM once and never waits. The arm64 packet build sends the
+batch with `QSUBMIT` and polls with `QPOLL`. Under QEMU on `ibm` the job is then really asynchronous; in
+the other builds the batch is computed when it is sent, so the job is ready at once.
 
 **What is not native yet.** `qarm_search` is classical in a libqarm build. Its oracle is built from the
 function's machine code by qoracle, which is Python. A native `QSEARCH` needs that oracle compiled at
@@ -769,7 +767,6 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 - More instructions on the same model: `QEVOLVE` (Trotterized time evolution of a Hamiltonian table),
   `QCOLLISION`.
-- `QSUBMIT` / `QPOLL` / `QWAIT` (section 5), so the CPU keeps working while a QPU job is queued.
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;

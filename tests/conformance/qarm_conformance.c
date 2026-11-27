@@ -104,7 +104,7 @@ static int t_qavail(void)
     PRESERVED();
     features = (uint32_t)r.x[1];
     REQUIRE(features != 0, "W1 = 0: no features");
-    REQUIRE((features >> 12) == 0, "W1 = %#x: bits above QVSAMPLE are reserved", features);
+    REQUIRE((features >> 13) == 0, "W1 = %#x: bits above QARM_F_ASYNC are reserved", features);
     return 1;
 }
 
@@ -358,6 +358,50 @@ static int t_vqe(void)
     return 1;
 }
 
+/* QSUBMIT, QPOLL, QWAIT: QEXPECT and QSEARCH as requests; a request for QSUBMIT itself is refused */
+static int t_async(void)
+{
+    if (!have(QARM_F_ASYNC, "QSUBMIT")) return -1;
+    static qarm_request rq[3];
+    regs r = {{0, (uint64_t)(uintptr_t)&z_h, (uint64_t)(uintptr_t)&ry_a}, {0}};
+    PACKET(0x02200000, &r);
+    REQUIRE(r.x[0] == 1, "QVLOAD: W0 = %llu", (unsigned long long)r.x[0]);
+    static const double theta[1] = {1.0471975511965976};
+    memset(rq, 0, sizeof rq);
+    rq[0].opcode = 0x21; rq[0].x[1] = (uint64_t)(uintptr_t)theta; rq[0].x[3] = r.x[3];
+    int search = (features & QARM_F_SEARCH) != 0;
+    rq[1].opcode = 0x11; rq[1].x[1] = (uint64_t)(uintptr_t)is_eleven; rq[1].x[2] = 4;
+    rq[2].opcode = 0x12;
+    for (int i = 0; i < 2 + search; i++) {
+        int k = i == 2 ? 1 : i == 1 ? 2 : 0;                     /* QEXPECT, QSUBMIT (refused), QSEARCH */
+        regs s = {{0, (uint64_t)(uintptr_t)&rq[k]}, {0}};
+        CLEAN();
+        PACKET(0x02120000, &s);
+        PRESERVED();
+        if (k == 2) { REQUIRE(s.x[0] == 2, "QSUBMIT of QSUBMIT: W0 = %llu, must be 2", (unsigned long long)s.x[0]); continue; }
+        REQUIRE(s.x[0] == 1, "QSUBMIT: W0 = %llu", (unsigned long long)s.x[0]);
+        for (int polls = 0;; polls++) {
+            regs p = {{0, (uint64_t)(uintptr_t)&rq[k]}, {0}};
+            CLEAN();
+            PACKET(0x02130000, &p);
+            PRESERVED();
+            REQUIRE(p.x[0] == 1 && p.x[1] <= 1, "QPOLL: W0 = %llu, W1 = %llu", (unsigned long long)p.x[0],
+                    (unsigned long long)p.x[1]);
+            if (p.x[1] == 1 || polls > 100) break;
+        }
+        regs w = {{0, (uint64_t)(uintptr_t)&rq[k]}, {0}};
+        PACKET(0x02140000, &w);
+        REQUIRE(w.x[0] == 1 && rq[k].state == 1, "QWAIT: W0 = %llu, state %u", (unsigned long long)w.x[0], rq[k].state);
+    }
+    REQUIRE(rq[0].x[0] == 1 && fabs(rq[0].d[0] - 0.75) <= 5 * rq[0].d[1] + 1e-6, "QEXPECT as a request: W0 = %llu, E = %g",
+            (unsigned long long)rq[0].x[0], rq[0].d[0]);
+    REQUIRE(!search || (rq[1].x[0] == 2 || (rq[1].x[0] == 1 && rq[1].x[3] == 11)), "QSEARCH as a request: W0 = %llu, W3 = %llu",
+            (unsigned long long)rq[1].x[0], (unsigned long long)rq[1].x[3]);
+    regs f = {{0, 0, 0, r.x[3]}, {0}};
+    PACKET(0x02260000, &f);
+    return 1;
+}
+
 int main(void)
 {
     int rt = t_qavail();
@@ -378,6 +422,7 @@ int main(void)
     result("QCIRC", t_qcirc());
     result("QRAND", t_qrand());
     result("VQE (QVLOAD QEXPECT QEXPECTN QGRAD QVSAMPLE QSESSION QVFREE)", t_vqe());
+    result("QSUBMIT QPOLL QWAIT", t_async());
     printf("conformance: %d passed, %d failed, %d skipped (features %#x)\n", passed, failed, skipped, features);
     return failed;
 }

@@ -57,6 +57,9 @@
  *
  *   qarm_expect_n_async(&v, thetas, k) a batch that may still be on the QPU: a qarm_job
  *   qarm_job_ready(job)                1 done, 0 not yet, -1 failed; never waits
+ *   (thetas must stay valid until qarm_job_wait: a runtime reads them at once, the classical path at the end)
+ *   qarm_submit(&req), qarm_poll(&req), qarm_wait(&req)   QSUBMIT, QPOLL, QWAIT: any instruction as a qarm_request
+ *                                      (arm64 packet builds; QARM_HAVE_SUBMIT)
  *   qarm_job_wait(job, e, err)         the k energies (err may be NULL); frees the job; 1, or -1
  *
  * Three builds of the same source:
@@ -81,7 +84,12 @@ typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qa
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
        QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024,
-       QARM_F_VSAMPLE = 2048 };
+       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096 };
+
+/* QSUBMIT, QPOLL, QWAIT: any instruction, asynchronously. The request holds the instruction's input registers;
+ * when state becomes 1 it holds its output registers (x[0] = its W0) and its memory outputs are written. The
+ * runtime reads every input at QSUBMIT; the program must not use the outputs, or change the request, before then. */
+typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ticket; } qarm_request;   /* 80 bytes */
 
 /* QCIRC's circuits: gates in order on qubits that start at 0; every qubit measured at the end */
 enum { QARM_G_X = 1, QARM_G_Y, QARM_G_Z, QARM_G_H, QARM_G_S, QARM_G_SDG, QARM_G_T, QARM_G_TDG, QARM_G_SX, QARM_G_RX,
@@ -552,6 +560,30 @@ static inline void qarm_vqe_free(qarm_vqe *v)
     }
     v->quantum = 0;
 }
+
+/* 1: the runtime took the request (state 0: running, 1: done); 0: not executed (no runtime, or not async) */
+static inline int qarm_submit(qarm_request *r)
+{
+    register long x0 __asm__("x0") = 0;
+    register qarm_request *x1 __asm__("x1") = r;
+    r->state = 0;
+    __asm__ volatile(QARM_PACKET(0x02120000) : "+r"(x0) : "r"(x1) : "memory");
+    return x0 == 1;
+}
+static inline int qarm_poll(qarm_request *r)              /* 1 done, 0 running; never waits */
+{
+    register long x0 __asm__("x0") = 0;
+    register long x1 __asm__("x1") = (long)(intptr_t)r;
+    __asm__ volatile(QARM_PACKET(0x02130000) : "+r"(x0), "+r"(x1) : : "memory");
+    return x0 == 1 ? (int)x1 : 1;
+}
+static inline void qarm_wait(qarm_request *r)
+{
+    register long x0 __asm__("x0") = 0;
+    register qarm_request *x1 __asm__("x1") = r;
+    __asm__ volatile(QARM_PACKET(0x02140000) : "+r"(x0) : "r"(x1) : "memory");
+}
+#define QARM_HAVE_SUBMIT 1
 #else
 static inline int qarm_vqe_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_vqe *v)
 {
@@ -597,21 +629,47 @@ static inline int qarm_search(int (*f)(int), int bits, int *x)
 }
 #endif
 
-/* without the native runtime a batch is computed at once: the job is only its result */
+/* without the native runtime: QEXPECTN through QSUBMIT when a runtime takes it (under QEMU with libqarm's ibm
+ * backend the job really runs while the program does), else the batch computed at once */
 #include <stdlib.h>
-struct qarm_job { int k, ok; double *e; };
+struct qarm_job { int k, ok, pending; double *e; qarm_vqe *v; const double *thetas; qarm_request r; };
 typedef struct qarm_job qarm_job;
 static inline qarm_job *qarm_expect_n_async(qarm_vqe *v, const double *thetas, int k)
 {
-    qarm_job *j = (qarm_job *)malloc(sizeof *j);
+    qarm_job *j = (qarm_job *)calloc(1, sizeof *j);
     j->k = k;
+    j->v = v;
+    j->thetas = thetas;
     j->e = (double *)malloc(sizeof(double) * (size_t)(k > 0 ? k : 1));
+#ifdef QARM_HAVE_SUBMIT
+    if (v->quantum) {
+        j->r.opcode = 0x22;
+        j->r.x[1] = (uint64_t)(uintptr_t)thetas;
+        j->r.x[2] = (uint64_t)k;
+        j->r.x[3] = (uint64_t)v->handle;
+        j->r.x[4] = (uint64_t)(uintptr_t)j->e;
+        if (qarm_submit(&j->r)) { j->pending = 1; j->ok = 1; return j; }
+    }
+#endif
     j->ok = qarm_expect_n(v, thetas, k, j->e) >= 0;
     return j;
 }
-static inline int qarm_job_ready(qarm_job *j) { return j && j->ok ? 1 : -1; }
+static inline int qarm_job_ready(qarm_job *j)
+{
+    if (!j || !j->ok) return -1;
+#ifdef QARM_HAVE_SUBMIT
+    if (j->pending) return qarm_poll(&j->r);
+#endif
+    return 1;
+}
 static inline int qarm_job_wait(qarm_job *j, double *e, double *err)
 {
+#ifdef QARM_HAVE_SUBMIT
+    if (j->pending) {
+        qarm_wait(&j->r);
+        if (j->r.x[0] != 1) j->ok = qarm_expect_n(j->v, j->thetas, j->k, j->e) >= 0;   /* not executed: here */
+    }
+#endif
     int ok = j->ok;
     for (int i = 0; i < j->k; i++) {
         e[i] = j->e[i];

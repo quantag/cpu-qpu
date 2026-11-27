@@ -176,12 +176,12 @@ def main():
         sh(cc + ["-O1", "-iquote", os.path.join(ROOT, "include"),
                  os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c"), "-o", cexe, "-lm"])
         p = sh(EXEC + ["-q", cexe], check=False)
-        assert p.returncode == 0 and "conformance: 13 passed, 0 failed, 0 skipped (features 0xfff)" in p.stdout, \
+        assert p.returncode == 0 and "conformance: 14 passed, 0 failed, 0 skipped (features 0x1fff)" in p.stdout, \
             (p.stdout, p.stderr)
         if native:
             q = sh(native + [cexe])
             assert "SKIP QAVAIL: no runtime" in q.stdout, q.stdout
-        print("5) conformance (tests/conformance/qarm_conformance.c): 13 of 13 under qarm_exec.py, features 0xfff"
+        print("5) conformance (tests/conformance/qarm_conformance.c): 14 of 14 under qarm_exec.py, features 0x1fff"
               + ("; the plain CPU: no runtime" if native else ""))
 
         try:
