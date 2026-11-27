@@ -40,14 +40,15 @@ HALT = STUBS - 0x1000           # main returns here
 PACKET_BRANCH, PACKET_MAGIC = 0x14000008, 0x4D524151
 OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT = 0x10, 0x11, 0x15, 0x16
 OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QAMPEST = 0x18, 0x19, 0x1A, 0x17
-OP_QRAND, OP_QCIRC, OP_QCAPS = 0x1C, 0x30, 0x31
+OP_QRAND, OP_QCIRC, OP_QCAPS, OP_QCOLLISION = 0x1C, 0x30, 0x31, 0x1B
 GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: "sx", 10: "rx", 11: "ry", 12: "rz",
          13: "cx", 14: "cz", 15: "swap", 16: "ccx"}
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
 OP_QVSAMPLE = 0x25
 OP_QSUBMIT, OP_QPOLL, OP_QWAIT = 0x12, 0x13, 0x14
-FEATURES = 8191           # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
-OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
+FEATURES = 16383          # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
+                          #              QCOLLISION
+OPS = (OP_QAVAIL, OP_QSEARCH, OP_QCOLLISION, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
        OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE, OP_QSUBMIT, OP_QPOLL,
        OP_QWAIT)
 
@@ -388,6 +389,8 @@ class Runtime:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
             self.qmin(self.x(1), self.x(2) & 0xFFFFFFFF)
+        elif op == OP_QCOLLISION:
+            self.qcollision(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QCOUNT:
             self.qcount(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QCIRC:
@@ -457,6 +460,31 @@ class Runtime:
         self.note(f"QMIN {name}, {bits} bits: Durr-Hoyer with a {circuit['qubits']}-qubit, {circuit['gates']}-gate "
                   f"compute oracle ({circuit['out_bits']} result bits) from {name}'s machine code: x = {x}, "
                   f"{name}(x) = {v}, {calls} oracle calls in {searches} Grover searches (simulated)")
+
+    def qcollision(self, fn, bits):
+        """QCOLLISION: X1 = f, W2 = bits; W0 = 1, W3 = x, W4 = y with x != y and f(x) = f(y), or W0 = 2: none found.
+        Brassard-Hoyer-Tapp: f on a random set K of about N^(1/3) inputs, then Grover's search (BBHT) for an x
+        outside K whose f(x) is among f(K): O(N^(1/3)) oracle calls in all, against O(sqrt N) classically."""
+        name = self.p.functions.get(fn, f"function at {fn:#x}")
+        if not 1 <= bits <= 16:
+            raise QarmError(f"QCOLLISION {name}: bits = {bits}; 1 to 16")
+        circuit = compute_oracle(self, fn, name, bits, "QCOLLISION")
+        values = oracle_values(circuit, bits)
+        pair, calls, tries = collision(values, bits)
+        if pair is None:
+            self.set_x(0, 2)
+            self.note(f"QCOLLISION {name}, {bits} bits: no collision found in {calls} oracle calls ({tries} tries)")
+            return
+        x, y = pair
+        fx, fy = self.call(fn, x), self.call(fn, y)
+        if fx != fy:
+            raise QarmError(f"QCOLLISION {name}: the oracle says f({x}) = f({y}), {name} gives {fx} and {fy}")
+        self.set_x(0, 1)
+        self.set_x(3, x)
+        self.set_x(4, y)
+        self.note(f"QCOLLISION {name}, {bits} bits: Brassard-Hoyer-Tapp with a {circuit['qubits']}-qubit compute "
+                  f"oracle from {name}'s machine code: {name}({x}) = {name}({y}) = {fx}, {calls} oracle calls "
+                  f"(a table of {round((1 << bits) ** (1 / 3))}, then Grover; simulated)")
 
     def qcount(self, fn, bits):
         """QCOUNT: X1 = f, W2 = bits; W0 = 1, X3 = the estimated number of x with f(x) = 1, D0 = its error bound.
@@ -1112,6 +1140,33 @@ def durr_hoyer(values, bits, seed=None):
             break
         best = x
     return best, calls, searches
+
+
+def collision(values, bits, seed=None):
+    """Brassard-Hoyer-Tapp: ((x, y) or None, oracle calls, tries). K: k = ceil(N^(1/3)) random inputs, queried
+    classically; then BBHT for an x outside K with f(x) in f(K). Up to 3 tries with fresh K."""
+    import numpy as np
+    N = 1 << bits
+    rng = random.Random(seed if seed is not None else os.environ.get("QCPU_SEED"))
+    k = max(1, math.ceil(N ** (1 / 3)))
+    calls = 0
+    for tries in range(1, 4):
+        K = rng.sample(range(N), min(k, N))
+        calls += len(K)
+        seen = {}
+        for x in K:
+            if values[x] in seen:
+                return (seen[values[x]], x), calls, tries
+            seen[values[x]] = x
+        inK = np.zeros(N, dtype=bool)
+        inK[K] = True
+        marked = np.isin(values, list(seen)) & ~inK
+        sign = np.where(marked, -1, 1)
+        y, c, _ = grover_signs(sign, bits, lambda v: bool(marked[v]), rng=rng)
+        calls += c
+        if y is not None:
+            return (seen[values[y]], int(y)), calls, tries
+    return None, calls, 3
 
 
 def _walsh_hadamard(v):

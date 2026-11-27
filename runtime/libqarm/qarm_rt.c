@@ -743,7 +743,7 @@ int qarm_rt_caps(qarm_capabilities *caps)
     if (!caps) return -1;
     memset(caps, 0, sizeof *caps);
     caps->version = 1;
-    caps->features = 4095;
+    caps->features = QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC;   /* natively */
     caps->qubits = MAX_QUBITS;
     const char *name = cfg.backend == B_EXACT ? "exact" : cfg.backend == B_SIMULATOR ? "simulator" : "ibm";
     if (cfg.backend == B_IBM) {

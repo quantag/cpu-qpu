@@ -477,3 +477,55 @@ int qarm_rt_bv(const qarm_oracle *o, int *s, char *report, size_t len)
              "string s = %#lx with one quantum query (simulated)", o->name, o->bits, o->n, o->ngates, best);
     return 1;
 }
+
+/* Brassard-Hoyer-Tapp, simulated: f on a random set K of k = ceil(N^(1/3)) inputs (classical queries), then BBHT
+ * for an x outside K with f(x) among f(K); up to 3 tries with a fresh K. 1: x != y with f(x) = f(y), 2: none */
+static int cmp_i64(const void *a, const void *b)
+{
+    int64_t p = *(const int64_t *)a, q = *(const int64_t *)b;
+    return p < q ? -1 : p > q;
+}
+
+int qarm_rt_collision(const qarm_oracle *o, int *x, int *y, char *report, size_t len)
+{
+    char err[300];
+    if (!o->out_bits) { snprintf(report, len, "QCOLLISION %s: a phase oracle, not a compute oracle", o->name); return -1; }
+    long N = 1L << o->bits, calls = 0, k = (long)ceil(cbrt((double)N));
+    int rounds = 0;
+    int64_t *v = malloc(sizeof *v * (size_t)N), *table = malloc(sizeof *table * (size_t)k);
+    long *K = malloc(sizeof *K * (size_t)k);
+    unsigned char *mark = malloc((size_t)N), *in = malloc((size_t)N);
+    int rc = 2, tries = 0;
+    if (evaluate(o, NULL, v, err, sizeof err) < 0) { snprintf(report, len, "%s", err); rc = -1; goto done; }
+    for (tries = 1; tries <= 3 && rc == 2; tries++) {
+        memset(in, 0, (size_t)N);
+        for (long i = 0; i < k; i++) {                   /* k distinct random inputs */
+            long c;
+            do c = (long)(s_uniform() * N); while (in[c]);
+            in[c] = 1;
+            K[i] = c;
+            table[i] = v[c];
+        }
+        calls += k;
+        for (long i = 0; i < k && rc == 2; i++)          /* a collision inside K */
+            for (long j = i + 1; j < k; j++)
+                if (v[K[i]] == v[K[j]]) { *x = (int)K[i]; *y = (int)K[j]; rc = 1; break; }
+        if (rc == 1) break;
+        qsort(table, (size_t)k, sizeof *table, cmp_i64);
+        for (long b = 0; b < N; b++) mark[b] = !in[b] && bsearch(&v[b], table, (size_t)k, sizeof *table, cmp_i64);
+        long hit = bbht(mark, o->bits, &calls, &rounds);
+        if (hit >= 0)
+            for (long i = 0; i < k; i++)
+                if (v[K[i]] == v[hit]) { *x = (int)K[i]; *y = (int)hit; rc = 1; break; }
+    }
+    if (rc == 1)
+        snprintf(report, len, "QCOLLISION %s, %d bits: compute oracle of %d qubits and %d gates from the machine code; "
+                 "Brassard-Hoyer-Tapp found f(%d) = f(%d) = %lld with %ld oracle calls (a table of %ld, then Grover; "
+                 "simulated)", o->name, o->bits, o->n, o->ngates, *x, *y, (long long)v[*x], calls, k);
+    else if (rc == 2)
+        snprintf(report, len, "QCOLLISION %s, %d bits: no collision found in %ld oracle calls (3 tries)", o->name,
+                 o->bits, calls);
+done:
+    free(v); free(table); free(K); free(mark); free(in);
+    return rc;
+}

@@ -114,8 +114,9 @@ answer has a cheap classical check, the library MUST run it (section 6) before i
 | `QARM_F_CAPS` | 1024 | `QCAPS` |
 | `QARM_F_VSAMPLE` | 2048 | `QVSAMPLE` |
 | `QARM_F_ASYNC` | 4096 | `QSUBMIT`, `QPOLL`, `QWAIT` |
+| `QARM_F_COLLISION` | 8192 | `QCOLLISION` |
 
-Bits 13–31 are reserved and MUST be 0 in 1.0. A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
+Bits 14–31 are reserved and MUST be 0 in 1.0. A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
 from before feature bits. Libraries treat it as `QARM_F_SEARCH` only.
 
 ## 5. Operands
@@ -203,7 +204,7 @@ with an approximate oracle.
 Two kinds of oracle are used:
 - **phase oracles:** f(x) ∈ {0, 1}, applied as |x⟩ → (−1)^f(x) |x⟩. Used by `QSEARCH`, `QCOUNT` and `QBV`.
 - **compute oracles:** |x⟩|0⟩ → |x⟩|f(x)⟩ on the low 32 bits of the result. Used by `QMIN`, `QPERIOD`,
-  `QSIMON` and `QAMPEST`.
+  `QSIMON`, `QAMPEST` and `QCOLLISION`.
 
 ### 5.6 Capabilities
 
@@ -245,6 +246,7 @@ All take `X1` = the address of f and `W2` = bits (1 ≤ bits ≤ 31).
 | 0x17 | `QAMPEST` | in: `W3` = k (value bits). `W0 = 1`, `D0` = μ̃, `D1` = ε | \|μ̃ − μ\| ≤ ε with probability ≥ 8/π², where μ = 2^−bits Σₓ f(x), f(x) ∈ [0, 2ᵏ) | — |
 | 0x18 | `QPERIOD` | `W0 = 1`, `W3` = r; `W0 = 2`: none | r > 0 is the least period: f(x + r) = f(x) wherever both are in the domain | f(i) = f(i + r), i = 0…3 |
 | 0x19 | `QSIMON` | `W0 = 1`, `W3` = s ≠ 0; `W0 = 2`: f is one-to-one | f(x) = f(x ⊕ s) for every x | f(i) = f(i ⊕ s), i = 0…3 |
+| 0x1B | `QCOLLISION` | `W0 = 1`, `W3` = x, `W4` = y; `W0 = 2`: none found | x ≠ y and f(x) = f(y). Brassard–Høyer–Tapp: O(N^1/3) oracle calls for a two-to-one f. `W0 = 2` after three tries, likely when f is one-to-one | x ≠ y, f(x) = f(y) |
 | 0x1A | `QBV` | `W0 = 1`, `W3` = s | f(x) = s·x ⊕ c (mod 2) for a constant c, if f has that form | f agrees at four probe inputs |
 
 ### 6.3 Variational instructions
@@ -331,7 +333,6 @@ takes on the library's obligations: the check and the classical path.
 
 | opcode | name | for |
 |---|---|---|
-| 0x1B | `QCOLLISION` | x ≠ y with f(x) = f(y) (Brassard–Høyer–Tapp) |
 | 0x27 | `QEVOLVE` | native time evolution in the runtime (higher-order product formulas, qDRIFT) |
 | 0x28–0x2F, 0x32–0x3F | — | future variational and circuit instructions |
 | 0x00–0x0F, 0x40–0xFF | — | reserved |
@@ -346,7 +347,7 @@ A runtime states the profiles it implements. Its feature bits must cover them.
 | profile | instructions | feature bits |
 |---|---|---|
 | Core | `QAVAIL`, `QCAPS` | 1024 |
-| Oracle | `QSEARCH`, `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV` | 1 4 8 16 32 64 128 |
+| Oracle | `QSEARCH`, `QMIN`, `QCOUNT`, `QAMPEST`, `QPERIOD`, `QSIMON`, `QBV`, `QCOLLISION` | 1 4 8 16 32 64 128 8192 |
 | Variational | `QVLOAD` … `QVFREE`, `QVSAMPLE` | 2 2048 |
 | Circuit | `QCIRC`, `QRAND` | 256 512 |
 | Async | `QSUBMIT`, `QPOLL`, `QWAIT` | 4096 |
@@ -366,7 +367,7 @@ $ python3 qarm_exec.py -q conformance
 PASS QAVAIL
 PASS unassigned opcode
 ...
-conformance: 14 passed, 0 failed, 0 skipped (features 0x1fff)
+conformance: 15 passed, 0 failed, 0 skipped (features 0x3fff)
 ```
 
 For each test it checks:

@@ -126,6 +126,15 @@ int main(void) {
         double mean = -1, mb = -1; r = qarm_rt_ampest(o, 2, &mean, &mb, report, sizeof report);
         printf("ampest %d %.4f %.4f | %s\n", r, mean, mb, report);
         qarm_rt_oracle_free(o);
+        /* QCOLLISION: f(x) = x mod 4 on 4 bits: x != y with the same low bits; the identity: none */
+        o = qarm_rt_oracle_parse("qarm-oracle 2 mod4 6 0 4 4 2 2\ncx 0 4\ncx 1 5\n", err, sizeof err);
+        int ca = -1, cb = -1; r = qarm_rt_collision(o, &ca, &cb, report, sizeof report);
+        printf("collision %d %d %d | %s\n", r, ca, cb, report);
+        qarm_rt_oracle_free(o);
+        o = qarm_rt_oracle_parse("qarm-oracle 2 identity 4 0 2 2 2 2\ncx 0 2\ncx 1 3\n", err, sizeof err);
+        r = qarm_rt_collision(o, &ca, &cb, report, sizeof report);
+        printf("collision %d | %s\n", r, report);
+        qarm_rt_oracle_free(o);
     }
     return 0;
 }
@@ -266,9 +275,13 @@ def main():
         assert lines[6].startswith("period 1 4 |") and lines[7].startswith("simon 1 3 |") and lines[8].startswith("bv 1 5 |"), lines
         mean, mb = float(lines[9].split()[2]), float(lines[9].split()[3])
         assert lines[9].startswith("ampest 1 ") and abs(mean - 1.5) <= mb, lines
+        c = lines[10].split()
+        assert c[1] == "1" and c[2] != c[3] and int(c[2]) % 4 == int(c[3]) % 4, lines[10]
+        assert lines[11].startswith("collision 2 |"), lines[11]
         print(f"6) QSEARCH's engine: x == 3 found; x & 5 == 5 found ({x}); an oracle that leaves a work qubit set refused;"
               f" no answer reported. QMIN: x xor 5 least at 5. QCOUNT: {n} +- {b:.1f} of 4. QPERIOD: x mod 4 has period 4; "
-              f"QSIMON: x0 xor x1 has shift 3; QBV: x0 xor x2 gives 5; QAMPEST: the mean of x, {mean} +- {mb} of 1.5")
+              f"QSIMON: x0 xor x1 has shift 3; QBV: x0 xor x2 gives 5; QAMPEST: the mean of x, {mean} +- {mb} of 1.5; "
+              f"QCOLLISION: x mod 4 at {c[2]}, {c[3]}, the identity has none")
 
         try:
             import qiskit, qiskit_aer, qiskit_ibm_runtime  # noqa: F401

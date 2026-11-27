@@ -19,6 +19,8 @@
  *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
  *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
  *                               (that is the search's job), so a quantum answer is right with high probability
+ *   qarm_collision(f, bits, &x, &y)  QCOLLISION: x != y with f(x) = f(y): Brassard-Hoyer-Tapp, O(N^(1/3)) oracle
+ *                               calls; checked by calling f; classically f's values sorted (up to 16 bits). 1, or 0
  *   qarm_run(&circuit, shots, samples)  QCIRC: any circuit as a table (qarm_gate: X Y Z H S SDG T TDG SX RX RY RZ
  *                               CX CZ SWAP CCX), every qubit measured at the end; samples[i] bit q = qubit q. 1: run
  *                               by the coprocessor (qarm_caps says whether it is hardware), 0: simulated here (up
@@ -71,6 +73,7 @@
 #ifndef QARM_H_INCLUDED
 #define QARM_H_INCLUDED
 #include <stdint.h>
+#include <stdlib.h>
 
 /* H = constant + sum t[j].c P_j; P_j acts on qubit q as I, X, Z or Y for (x_q, z_q) = 00, 10, 01, 11 */
 typedef struct { uint64_t x, z; double c; } qarm_pauli;
@@ -84,7 +87,7 @@ typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qa
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
        QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024,
-       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096 };
+       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096, QARM_F_COLLISION = 8192 };
 
 /* QSUBMIT, QPOLL, QWAIT: any instruction, asynchronously. The request holds the instruction's input registers;
  * when state becomes 1 it holds its output registers (x[0] = its W0) and its memory outputs are written. The
@@ -111,6 +114,27 @@ static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)
     *x = bx;
     if (value) *value = bv;
     return 1;
+}
+/* QCOLLISION's classical path: f's values sorted (up to 16 bits), equal neighbours. 1: found, 0: one-to-one */
+static int qarm__cmp_pair(const void *a, const void *b)
+{
+    const int64_t *p = (const int64_t *)a, *q = (const int64_t *)b;
+    return *p < *q ? -1 : *p > *q;
+}
+static inline int qarm__collision(int (*f)(int), int bits, int *x, int *y)
+{
+    static int64_t t[1 << 16];                           /* f(v) in the high 32 bits, v in the low 32 */
+    if (bits < 1 || bits > 16) return -1;
+    long N = 1L << bits;
+    for (long v = 0; v < N; v++) t[v] = (int64_t)((uint64_t)(uint32_t)f((int)v) << 32 | (uint64_t)v);
+    qsort(t, (size_t)N, sizeof t[0], qarm__cmp_pair);
+    for (long i = 1; i < N; i++)
+        if ((t[i] >> 32) == (t[i - 1] >> 32)) { *x = (int)(t[i - 1] & 0xFFFFFFFF); *y = (int)(t[i] & 0xFFFFFFFF); return 1; }
+    return 0;
+}
+static inline int qarm__is_collision(int (*f)(int), int bits, int x, int y)
+{
+    return x != y && x >= 0 && y >= 0 && x < (1 << bits) && y < (1 << bits) && f(x) == f(y);
 }
 /* checks of QPERIOD's, QSIMON's and QBV's answers, and their classical paths */
 static inline int qarm__is_period(int (*f)(int), int r)
@@ -178,6 +202,7 @@ static inline long qarm__count(int (*f)(int), int bits, double *err)
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
 static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline int qarm_collision(int (*f)(int), int bits, int *x, int *y) { return qarm__collision(f, bits, x, y); }
 static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
 static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
 static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
@@ -420,6 +445,23 @@ static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value)
     return qarm__min(cost, bits, x, value);
 }
 
+/* QCOLLISION 0x1B: X1 = f, W2 = bits -> W0 = 1, W3 = x, W4 = y; W0 = 2: none found */
+static inline int qarm_collision(int (*f)(int), int bits, int *x, int *y)
+{
+    register long x0 __asm__("x0") = 0;
+    register int (*x1)(int) __asm__("x1") = f;
+    register long x2 __asm__("x2") = bits;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = 0;
+    __asm__ volatile(QARM_PACKET(0x021b0000) : "+r"(x0), "+r"(x3), "+r"(x4) : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1 && qarm__is_collision(f, bits, (int)x3, (int)x4)) {   /* checked by calling f twice */
+        *x = (int)x3;
+        *y = (int)x4;
+        return 1;
+    }
+    return qarm__collision(f, bits, x, y);
+}
+
 /* QPERIOD 0x18, QSIMON 0x19, QBV 0x1A: X1 = f, W2 = bits -> W0 = 1 and W3 = the answer, W0 = 2: none */
 static inline long qarm__structure(unsigned op, int (*f)(int), int bits, int *out)
 {
@@ -616,6 +658,7 @@ static inline void qarm_vqe_free(qarm_vqe *v) { v->quantum = 0; }
 static inline int qarm_available(void) { return 0; }
 static inline int qarm_features(void) { return 0; }
 static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value) { return qarm__min(cost, bits, x, value); }
+static inline int qarm_collision(int (*f)(int), int bits, int *x, int *y) { return qarm__collision(f, bits, x, y); }
 static inline int qarm_period(int (*f)(int), int bits, int *r) { return qarm__period(f, bits, r); }
 static inline double qarm_mean(int (*g)(int), int bits, int k, double *err) { (void)k; return qarm__mean(g, bits, err); }
 static inline int qarm_simon(int (*f)(int), int bits, int *s) { return qarm__simon(f, bits, s); }
