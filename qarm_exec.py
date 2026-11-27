@@ -585,10 +585,51 @@ def _math(fn):
     return call
 
 
+def _strcmp(rt):
+    a, b = rt.cstr(rt.x(0)).encode("utf-8"), rt.cstr(rt.x(1)).encode("utf-8")
+    rt.ret((a > b) - (a < b) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _strncmp(rt):
+    n = rt.x(2)
+    a, b = rt.cstr(rt.x(0)).encode("utf-8")[:n], rt.cstr(rt.x(1)).encode("utf-8")[:n]
+    rt.ret((a > b) - (a < b) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _atoi(rt):
+    import re as _re
+    m = _re.match(r"\s*([+-]?\d+)", rt.cstr(rt.x(0)))
+    rt.ret((int(m.group(1)) if m else 0) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _strtol(rt):
+    """strtol/strtoul(s, endptr, base): base 0 (prefix), 2..36; *endptr after the digits."""
+    import re as _re
+    addr, endp, base = rt.x(0), rt.x(1), rt.x(2) & 0xFFFFFFFF
+    text = rt.cstr(addr)
+    m = _re.match(r"\s*([+-]?)(0[xX])?([0-9a-zA-Z]*)", text)
+    sign, prefix, digits = m.group(1), m.group(2), m.group(3)
+    if base == 0:
+        base = 16 if prefix else (8 if digits.startswith("0") and len(digits) > 1 else 10)
+    elif base != 16 and prefix:
+        digits, prefix = "0", None
+    used = ""
+    for ch in digits:
+        if int(ch, 36) >= base:
+            break
+        used += ch
+    value = int(used, base) if used else 0
+    consumed = (m.start(3) + len(used)) if used else 0
+    if endp:
+        rt.mu.mem_write(endp, struct.pack("<Q", addr + len(text[:consumed].encode("utf-8"))))
+    rt.ret((-value if sign == "-" else value) & 0xFFFFFFFFFFFFFFFF)
+
+
 MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp", "log", "sqrt", "atan", "fabs")}
 
 
-LIBC = {**MATH, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
+LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
+        "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
         "__memset_chk": _memset, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
         "fputs": _fputs, "fwrite": _fwrite, "fflush": _fflush}

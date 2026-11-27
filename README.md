@@ -837,7 +837,8 @@ PySCF before writing. `examples/qarm/molecule_vqe.c` minimizes it with L-BFGS (`
 the energy and its gradient. The gradient is a new instruction, `QGRAD`: adjoint differentiation on exact
 backends, the parameter-shift rule in one job on a QPU. For LiH (10 qubits, 24 parameters) it reaches
 the exact active-space energy, −7.882176 Ha, in 9 iterations. The output is the same on a plain CPU,
-under `qarm_exec.py`, under QEMU and with native libqarm:
+under `qarm_exec.py`, under QEMU and with native libqarm. With measured energies the example switches to
+SPSA (one batch per iteration): with shot noise at 4096 shots, H₂ and LiH come within chemical accuracy.
 
 ```
 $ python3 tools/qarm_molecule.py --name lih --atom "Li 0 0 0; H 0 0 1.5949" --active 2,5 -o examples/qarm/lih.h

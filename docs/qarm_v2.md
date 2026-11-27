@@ -298,10 +298,37 @@ L-BFGS converges in 9 iterations from the Hartree–Fock energy, −7.862027 Ha,
 correlation energy in the active space. With two active electrons UCCSD is exact, so CASCI is
 reachable. More electrons, as in N₂, would leave UCCSD's own small error.
 
-**Limits.** L-BFGS needs exact energies. Shot noise breaks its line search, so a run on a QPU or on a
-noise model needs a noise-tolerant optimizer such as SPSA, which is not yet written. `QGRAD` already works
-on measured backends: on H₂ (12 rotations, 25 energies in one batch), the parameter-shift gradient from
-libqarm's simulator and from Aer matched the exact gradient to within 0.002 at 200,000 shots.
+**Measured energies: SPSA.** L-BFGS needs exact energies, because shot noise breaks its line search.
+For measured energies `qarm_opt.h` has `qarm_spsa()`.
+- **Each iteration** estimates the gradient from E(θ + c·d) − E(θ − c·d) along random directions d of ±1.
+  All of an iteration's evaluations go in one `qarm_expect_n` batch, so on a QPU one iteration is one job.
+- **Step size:** calibrated from a first batch, so the first step moves each parameter about 0.02.
+- **Result:** the mean of the last 25 iterates, measured once more.
+- **Defaults** (`QARM_SPSA_DEFAULTS`): 150 iterations, 2 directions each, probe c = 0.05. A sweep on LiH
+  showed that UCCSD amplitudes need small steps: a first step of 0.05 lands 26–55 mHa away.
+- **Seeded:** the random directions come from a seed, so a run is repeatable.
+
+`molecule_vqe` picks the optimizer itself: SPSA when the first energy comes with a standard error (a
+measured backend), L-BFGS otherwise. `molecule_vqe spsa N` or `lbfgs` overrides that.
+
+| SPSA, 150 iterations | H₂ | LiH (24 parameters) |
+|---|---|---|
+| exact energies (plain CPU, `qarm_exec.py`) | | +0.074 mHa |
+| libqarm's simulator, 4096 shots | −0.62 mHa, 0.3 s | +1.55 mHa, 7 s |
+| libqarm's simulator, 65,536 shots | | −0.44 mHa, 97 s |
+
+All are within chemical accuracy (1.6 mHa). The reported energy is itself one measurement, which is how
+it can fall slightly below the exact value.
+
+**Device noise is another matter.** On the noise model of IBM Fez, H₂'s UCCSD (4 qubits, Jordan–Wigner)
+ended 315 mHa from exact after 30 SPSA iterations. The optimizer is not the problem: after Jordan–Wigner
+and routing, UCCSD's Pauli rotations take dozens of CNOTs, and two-qubit errors dominate. On today's
+hardware, VQE needs shallow ansätze, such as `h2_vqe`'s single-CNOT circuit (10–35 mHa on the same noise
+model). The UCCSD path is for exact and shot-noise runs, and for error-corrected machines later.
+
+`QGRAD` works on measured backends too: on H₂ (12 rotations, 25 energies in one batch), the
+parameter-shift gradient from libqarm's simulator and from Aer matched the exact gradient to within 0.002
+at 200,000 shots.
 
 ### Checks
 
@@ -488,7 +515,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
-- VQE: SPSA for measured energies; `QVSAMPLE`; IBM's error mitigation; larger molecules (N₂ active
+- VQE: `QVSAMPLE`; IBM's error mitigation; larger molecules (N₂ active
   spaces, 16–20 qubits) with a multithreaded state vector.
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.

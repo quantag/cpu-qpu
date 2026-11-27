@@ -10,6 +10,8 @@
   4. The arm64 build under qarm_exec.py: the same output as the plain CPU (QGRAD by adjoint differentiation in Python).
   5. QGRAD by the parameter-shift rule on measured backends, H2: libqarm's simulator and (Qiskit) qarm_exec.py with Aer,
      against the exact gradient.
+  6. SPSA (include/qarm_opt.h): LiH with exact energies on the plain CPU and under qarm_exec.py; H2 and LiH with shot
+     noise on libqarm's simulator (4096 shots), within chemical accuracy and 3 mHa.
 Run: python3 -m tests.test_qarm_molecule"""
 import json, os, re, subprocess, sys, tempfile
 from tests.test_libqarm import compiler, has_curl, sh as host_sh, INC, LIB, EXE
@@ -143,6 +145,31 @@ def main():
         except ImportError as e:
             line += f" (Aer skipped: {e.name} is not installed)"
         print(line)
+
+        sp = host_sh([os.path.join(d, f"vqe_lih{EXE}"), "spsa"]).stdout
+        e, ref = result(sp)
+        assert "optimizer: SPSA, 150 iterations" in sp and abs(e - ref) < 5e-4, sp
+        spsa = f"6) SPSA, 150 iterations: LiH exact energies {(e - ref) * 1000:+.3f} mHa on the plain CPU"
+        if tc:
+            p = sh(EXEC + ["-q", os.path.join(d, "vqe_lih_arm64"), "spsa"])
+            e2 = result(p.stdout)[0]
+            assert abs(e2 - e) < 1e-5, (p.stdout, sp)
+            spsa += ", the same under qarm_exec.py"
+        devs = []
+        for name in ("h2", "lih"):
+            nexe = os.path.join(d, f"vqe_{name}_native{EXE}")
+            host_sh(cc + ["-O2", "-DQARM_RUNTIME"] + ([] if curl else ["-DQARM_NO_CURL"]) + inc
+                    + [f'-DMOLECULE="{name}.h"', os.path.join(EX, "molecule_vqe.c")] + LIB + ["-o", nexe]
+                    + (["-lcurl"] if curl else []) + lm)
+            scfg = os.path.join(d, "sim4096.json")
+            json.dump({"backend": "simulator", "shots": 4096}, open(scfg, "w"))
+            out = host_sh([nexe], {"QARM_CONFIG": scfg, "QARM_SEED": "2", "QARM_QUIET": "1"}).stdout
+            e, ref = result(out)
+            assert "optimizer: SPSA" in out, out
+            devs.append((e - ref) * 1000)
+        assert abs(devs[0]) < 1.6 and abs(devs[1]) < 3, devs
+        print(spsa + f"; with shot noise (libqarm's simulator, 4096 shots, chosen because the energies have a "
+              f"standard error): H2 {devs[0]:+.2f} mHa, LiH {devs[1]:+.2f} mHa")
     print("PASS")
 
 
