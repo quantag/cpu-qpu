@@ -163,13 +163,24 @@ held in two tables in the program's memory.
 | `0x20` | `QVLOAD` | `X1` = Hamiltonian, `X2` = ansatz | `W0` = 1 and `X3` = handle, or 2 (refused) |
 | `0x21` | `QEXPECT` | `X3` = handle, `X1` = θ (doubles), `W2` = shots (0: config.json's) | `W0` = 1, `D0` = E(θ), `D1` = standard error |
 | `0x22` | `QEXPECTN` | `X3` = handle, `X1` = k parameter vectors, `W2` = k, `X4` = k doubles | `W0` = 1, the k energies at `X4` |
+| `0x23` | `QGRAD` | `X3` = handle, `X1` = θ, `X4` = one double per parameter | `W0` = 1, `D0` = E(θ), the gradient at `X4` |
 | `0x24` | `QSESSION` | `W1` = 1 open, 0 close | `W0` = 1 |
 | `0x26` | `QVFREE` | `X3` = handle | `W0` = 1 |
 
 On a plain CPU every packet leaves `W0` = 0, and `include/qarm.h` takes the classical path. That path is
-a state-vector simulation in C, exact up to `QARM_VQE_MAX_QUBITS` qubits (default 12; link with `-lm`).
-Opcodes `0x23` (`QGRAD`, a parameter-shift gradient in one job) and `0x25` (`QVSAMPLE`, the final
-state's bitstrings) are reserved for the next step.
+`include/qarm_sv.h`, an exact state vector in C, up to `QARM_VQE_MAX_QUBITS` qubits (default 12; link
+with `-lm`). libqarm's exact backend uses the same code. Opcode `0x25` (`QVSAMPLE`, the final state's
+bitstrings) is reserved for a next step.
+
+**`QGRAD`** returns the energy and its gradient, computed two ways:
+- **Exact backends:** adjoint differentiation, one forward and one backward pass over the state vector,
+  whatever the number of parameters. Used by the plain CPU path, libqarm and `qarm_exec.py`.
+- **Measured backends:** the parameter-shift rule.
+  - Each rotation is shifted on its own: by ±π/4 for a Pauli rotation, where dE/da = E(a+π/4) − E(a−π/4);
+    by ±π/2 for RY and RZ, where dE/da = (E(a+π/2) − E(a−π/2))/2.
+  - All the shifted energies go out in **one job**: 2R+1 energies for R rotations, so one wait in the
+    queue per gradient.
+  - The gradient is then summed per parameter, weighted by each rotation's `scale`.
 
 ### Tables (include/qarm.h)
 
@@ -193,6 +204,7 @@ qarm_vqe_load(&h, &ansatz, &v);          // 1: coprocessor, 0: classical, -1: re
 qarm_session(1);                          // reserve a QPU for the loop (no-op elsewhere)
 qarm_expect_n(&v, thetas, k, energies);   // a batch: one job
 double e = qarm_expect(&v, theta, &err);  // one energy and its standard error
+e = qarm_grad(&v, theta, gradient);       // the energy and its gradient (QGRAD)
 qarm_session(0);
 qarm_vqe_free(&v);
 ```
@@ -241,6 +253,55 @@ Measured on H₂ (`tests/test_qarm_vqe.py`):
 | noise model of Torino, without / with readout correction | −0.967 / −1.127 Ha | 170 / 11 mHa |
 
 Chemical accuracy is 1.6 mHa. Reaching it on hardware needs more shots and the mitigation above.
+
+### Molecules: `tools/qarm_molecule.py` and `examples/qarm/molecule_vqe.c`
+
+A molecule's tables come from a build-time tool. The program needs no Python:
+
+```
+$ python3 tools/qarm_molecule.py --name lih --atom "Li 0 0 0; H 0 0 1.5949" --basis sto-3g \
+      --active 2,5 -o examples/qarm/lih.h
+lih: 10 qubits, 275 terms, 24 parameters; E(HF) = -7.862027, E(CASCI) = -7.882176 Ha
+$ clang -O1 -iquote include -iquote examples/qarm examples/qarm/molecule_vqe.c -o molecule_vqe -lm
+$ ./molecule_vqe
+...
+VQE:           -7.882175991 Ha
+exact (CASCI): -7.882175991 Ha
+VQE - exact:   0.000000 mHa (chemical accuracy: 1.6 mHa)
+correlation energy recovered: 100.00%
+```
+
+**The generator, step by step:**
+- **Integrals.** PySCF computes them: RHF, then the active space, with `--active ELECTRONS,ORBITALS`
+  and the other orbitals frozen.
+- **Qubits.** The electronic Hamiltonian is mapped with Jordan–Wigner, on the same `(x, z)` bit masks
+  as `qarm.h`, with alpha spin orbitals first, then beta.
+- **Ansatz.** UCCSD from the Hartree–Fock state. Each excitation's T − T† is a sum of commuting Pauli
+  strings, so its exponential is exactly a product of `QARM_PAULI_ROT`s, one parameter per excitation.
+- **Self-checks before writing.** The qubit Hamiltonian's lowest energy, among states with the molecule's
+  electron counts, must equal CASCI's to 1e-8. The Hartree–Fock state's energy must equal RHF's. The
+  Pauli strings of each excitation must commute.
+- **Output.** The header holds `molecule_h`, `molecule_ansatz`, `QARM_MOLECULE_E_HF` and
+  `QARM_MOLECULE_E_REF`. `examples/qarm/h2.h` and `examples/qarm/lih.h` are committed.
+
+**The optimizer.** `include/qarm_opt.h`, `qarm_minimize()`: L-BFGS on `qarm_expect` and `qarm_grad`, with
+an Armijo line search. It is ordinary C with static arrays, so it also runs under `qarm_exec.py`.
+
+| LiH at 1.5949 Å, STO-3G, (2e, 5o): 10 qubits, 24 parameters | time | VQE − CASCI |
+|---|---|---|
+| plain CPU (`qarm_sv.h`) | 0.05 s | 0.000000 mHa |
+| libqarm, native | 0.05 s | the same output |
+| QEMU with the plugin | 0.2 s | the same output |
+| `qarm_exec.py` (QGRAD by adjoint differentiation in numpy) | 0.8 s | the same output |
+
+L-BFGS converges in 9 iterations from the Hartree–Fock energy, −7.862027 Ha, recovering all of the
+correlation energy in the active space. With two active electrons UCCSD is exact, so CASCI is
+reachable. More electrons, as in N₂, would leave UCCSD's own small error.
+
+**Limits.** L-BFGS needs exact energies. Shot noise breaks its line search, so a run on a QPU or on a
+noise model needs a noise-tolerant optimizer such as SPSA, which is not yet written. `QGRAD` already works
+on measured backends: on H₂ (12 rotations, 25 energies in one batch), the parameter-shift gradient from
+libqarm's simulator and from Aer matched the exact gradient to within 0.002 at 200,000 shots.
 
 ### Checks
 
@@ -427,8 +488,8 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
-- VQE: `QGRAD` and `QVSAMPLE`; IBM's error mitigation; a build-time tool that writes the tables of
-  a molecule as a C header (PySCF, Jordan–Wigner or parity mapping).
+- VQE: SPSA for measured energies; `QVSAMPLE`; IBM's error mitigation; larger molecules (N₂ active
+  spaces, 16–20 qubits) with a multithreaded state vector.
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.

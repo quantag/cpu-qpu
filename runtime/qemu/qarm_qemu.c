@@ -12,7 +12,7 @@
  * does on a plain CPU. Needs QEMU 10.1 or newer (plugin API with qemu_plugin_write_register).
  *
  *   QAVAIL    W0 = 1, W1 = QARM_F_VQE
- *   QVLOAD, QEXPECT, QEXPECTN, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
+ *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
  *   QSEARCH   not executed (W0 stays 0): qarm.h takes the classical path; its oracle needs qoracle, which is Python */
 #include <glib.h>
 #include <stdarg.h>
@@ -31,7 +31,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define B_32 0x14000008u
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
-       OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
+       OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVFREE = 0x26 };
 
 static struct qemu_plugin_register *reg_x[31], *reg_v[2];
 static GMutex lock;
@@ -160,6 +160,23 @@ static int qexpect(int many)
     return status;
 }
 
+static int qgrad(void)
+{
+    problem *p = find(x(3));
+    if (!p) return 2;
+    uint64_t P = p->a.params;
+    double *th = g_new0(double, P + 1), *g = g_new0(double, P + 1), e = 0;
+    int status = 2;
+    if (!rd(x(1), th, sizeof(double) * P)) note("QGRAD: the parameters are not readable");
+    else if (qarm_rt_grad(p->rt, th, 0, &e, g) > 0) {
+        if (wr(x(4), g, sizeof(double) * P)) { set_d(0, e); status = 1; }
+        else note("QGRAD: the gradient's array is not writable");
+    }
+    g_free(th);
+    g_free(g);
+    return status;
+}
+
 static void packet(unsigned int vcpu, void *udata)
 {
     (void)vcpu;
@@ -186,6 +203,9 @@ static void packet(unsigned int vcpu, void *udata)
         set_x(0, s);
         break;
     }
+    case OP_QGRAD:
+        set_x(0, qgrad());
+        break;
     case OP_QSESSION:
         qarm_rt_session((uint32_t)x(1) != 0);
         set_x(0, 1);

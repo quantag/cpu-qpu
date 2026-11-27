@@ -33,7 +33,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | Run exported oracles on IBM hardware or its noise models | `qcpu_run.py`, `config.json` | [on a real quantum computer](#on-a-real-quantum-computer-qcpu_runpy) |
 | One arm64 binary with quantum instructions and a classical fallback | `include/qarm.h`, `qarm_exec.py` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
 | Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
-| VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QSESSION` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
+| VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QGRAD`, `QSESSION`; `tools/qarm_molecule.py` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
 
@@ -138,6 +138,7 @@ cell k), `--mem=1,2,3` to initialise user data cells (32-bit), `-v`, `--report P
 | `examples/algorithms.c` | gcd, Fibonacci, primality, popcount, integer square root, modular power, max |
 | `examples/qarm/tiny_search.c` | Q-ARM `QSEARCH` for x = 3 in 2 bits, small enough for a real QPU (`qarm_exec.py`) |
 | `examples/qarm/h2_vqe.c` | Q-ARM VQE: the ground-state energy of H₂, −1.137306 Ha (`qarm_exec.py`, or a plain CPU) |
+| `examples/qarm/molecule_vqe.c` | Q-ARM VQE with UCCSD and L-BFGS: LiH to its exact active-space energy, −7.882176 Ha |
 
 ```
 $ python3 arm_qpu.py algorithms.o
@@ -830,6 +831,19 @@ H₂ at 0.735 Å takes 2 qubits and one CNOT. The exact result is −1.137306 Ha
 Torino give it to within about 10–35 mHa. Each batch of parameter vectors is one job, so an async QPU
 queues once per optimizer round ([`docs/qarm_v2.md`](docs/qarm_v2.md#6-vqe)).
 
+**Molecules.** `tools/qarm_molecule.py` (PySCF, at build time only) writes any small molecule as a C
+header: the Jordan–Wigner Hamiltonian, a UCCSD ansatz and the exact reference energy, checked against
+PySCF before writing. `examples/qarm/molecule_vqe.c` minimizes it with L-BFGS (`include/qarm_opt.h`) on
+the energy and its gradient. The gradient is a new instruction, `QGRAD`: adjoint differentiation on exact
+backends, the parameter-shift rule in one job on a QPU. For LiH (10 qubits, 24 parameters) it reaches
+the exact active-space energy, −7.882176 Ha, in 9 iterations. The output is the same on a plain CPU,
+under `qarm_exec.py`, under QEMU and with native libqarm:
+
+```
+$ python3 tools/qarm_molecule.py --name lih --atom "Li 0 0 0; H 0 0 1.5949" --active 2,5 -o examples/qarm/lih.h
+$ clang -O1 -iquote include -iquote examples/qarm examples/qarm/molecule_vqe.c -o molecule_vqe -lm && ./molecule_vqe
+```
+
 ### Native: libqarm, the Q-ARM runtime in C
 
 The same source also builds natively, on any CPU, with no emulator and no Python at run time. libqarm
@@ -1212,6 +1226,7 @@ python3 -m tests.test_qarm_exec                  # Q-ARM v2: one arm64 binary on
 python3 -m tests.test_qarm_vqe                   # Q-ARM v2 VQE: H2 on a CPU, the runtime, Aer, IBM noise models
 python3 -m tests.test_libqarm                    # libqarm, native: exact, simulator, ibm against a mock of IBM's API
 QARM_QEMU=~/qemu/bin/qemu-aarch64 python3 -m tests.test_qarm_qemu   # Q-ARM in QEMU 10.1+ (the plugin of runtime/qemu)
+python3 -m tests.test_qarm_molecule              # molecules: the generator (PySCF), QGRAD, L-BFGS to LiH's exact energy
 python3 -m tests.test_qcpu_run                   # qcpu_run.py: Bernstein-Vazirani and Grover on simulators and IBM device models
 python3 -m tests.test_qcpucc                     # __qcpu__ programs: Code Breaker, pruning, several files, exactness, data models
 python3 -m tests.test_fingerprint        # no circuit changed by accident (AArch64 as before the ISA layer)

@@ -25,6 +25,7 @@ int qarm_rt_expect_n(qarm_rt *r, const double *thetas, int k, int shots, double 
 qarm_job *qarm_rt_submit(qarm_rt *r, const double *thetas, int k, int shots);       /* NULL: failed (stderr) */
 int qarm_rt_poll(qarm_job *j);                                                     /* 1 done, 0 not yet, -1 failed */
 int qarm_rt_wait(qarm_job *j, double *e, double *err);                             /* frees j: 1, or -1 */
+int qarm_rt_grad(qarm_rt *r, const double *theta, int shots, double *e, double *grad);      /* 1, or -1 */
 int qarm_rt_session(int open);
 void qarm_rt_free(qarm_rt *r);
 const char *qarm_rt_where(const qarm_rt *r);                                       /* "ibm: ibm_aachen", ... */
