@@ -170,37 +170,45 @@ def scan(binary):
             if ins and not any(i.mnemonic in ("bl", "blr", "svc") for i in ins)
             and not any(r in i.op_str for i in ins for r in (" v", " q", " d0", " s0"))}
     found = []
+    reg = lambda r: r.strip().lstrip("wx")                # w19 and x19 are one register
     for a, ins in insns.items():
         name = funcs[a][0].lstrip("_")
-        bound = None
-        for k, i in enumerate(ins):                     # cmp wR, #2^k (lsl #12 allowed), a backward b.cond after
-            m = i.mnemonic
-            if m == "cmp" and i.op_str.startswith("w"):
-                parts = [p.strip() for p in i.op_str.split(",")]
-                if len(parts) >= 2 and parts[1].startswith("#"):
-                    v = int(parts[1][1:], 0) << (12 if len(parts) == 3 and parts[2] == "lsl #12" else 0)
-                    nxt = ins[k + 1] if k + 1 < len(ins) else None
-                    back = nxt is not None and nxt.mnemonic.startswith("b.") and int(nxt.op_str.lstrip("#"), 16) < nxt.address
-                    for bits in range(1, 32):
-                        if back and v in ((1 << bits), (1 << bits) - 1):
-                            bound = (parts[0], bits)
-        if not bound:
-            continue
-        reg, bits = bound
-        for k, i in enumerate(ins[:-2]):                # mov w0, wR; bl P (a leaf); then the test of w0
-            if i.mnemonic == "mov" and i.op_str == f"w0, {reg}" and ins[k + 1].mnemonic == "bl":
+        bounds = []
+        for k, i in enumerate(ins[:-1]):                # cmp R, #2^k or 2^k - 1 (lsl #12 allowed), a backward b.cond
+            if i.mnemonic != "cmp":
+                continue
+            parts = [p.strip() for p in i.op_str.split(",")]
+            if len(parts) < 2 or not parts[1].startswith("#") or parts[0][0] not in "wx":
+                continue
+            v = int(parts[1][1:], 0) << (12 if len(parts) == 3 and parts[2] == "lsl #12" else 0)
+            nxt = ins[k + 1]
+            if not (nxt.mnemonic.startswith("b.") and int(nxt.op_str.lstrip("#"), 16) < nxt.address):
+                continue
+            for bits in range(1, 32):
+                if v in ((1 << bits), (1 << bits) - 1):
+                    bounds.append((reg(parts[0]), bits))
+        for r, bits in bounds:
+            hit = None
+            for k, i in enumerate(ins[:-2]):            # mov w0, wR (or x0, xR); bl P (a leaf); the test of w0
+                if not (i.mnemonic == "mov" and [reg(t) for t in i.op_str.split(",")] == ["0", r]
+                        and ins[k + 1].mnemonic == "bl"):
+                    continue
                 callee = int(ins[k + 1].op_str.lstrip("#"), 16)
                 if callee not in leaf or callee not in funcs:
                     continue
-                after = ins[k + 2]
-                pname = funcs[callee][0].lstrip("_")
-                if after.mnemonic in ("cbnz", "cbz") and after.op_str.startswith("w0") or \
-                        after.mnemonic in ("tbnz", "tbz") and after.op_str.startswith("w0, #0"):
-                    found.append((QSEARCH, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, "
-                                  f"the loop left when it returns nonzero ({after.mnemonic})"))
-                elif after.mnemonic == "cmp" and after.op_str.startswith("w0, w"):
-                    found.append((QMIN, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, its "
-                                  "result compared with the best so far"))
+                after, pname = ins[k + 2], funcs[callee][0].lstrip("_")
+                ops = [t.strip() for t in after.op_str.split(",")]
+                if after.mnemonic in ("cbnz", "cbz", "tbnz", "tbz") and reg(ops[0]) == "0":
+                    hit = (QSEARCH, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, the loop left "
+                           f"when it returns nonzero ({after.mnemonic})")
+                elif after.mnemonic == "cmp" and len(ops) == 2 and "0" in (reg(ops[0]), reg(ops[1])) \
+                        and ops[1][0] in "wx":
+                    hit = (QMIN, name, pname, bits, f"a counter to {1 << bits} passed to {pname}, its result "
+                           "compared with the best so far")
+                if hit:
+                    break
+            if hit:
+                found.append(hit)
                 break
     return found
 
