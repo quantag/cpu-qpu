@@ -10,6 +10,8 @@
   7. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c (a GHZ state, a Toffoli truth table) in the plain and the native
      build; circuits with a qubit out of range or a CX on one qubit refused. With 5: ghz.c on the ibm mock, its
      samples a device's, QRAND's bytes measured, QCAPS flags hardware.
+  8. QVSAMPLE: examples/qarm/maxcut_qaoa.c finds the largest cut natively; RY CX sampled on exact (0: here),
+     simulator and, with 5, the ibm mock (1: the coprocessor): only 00 and 11.
   6. QSEARCH's engine (qarm_search.c) on hand-written oracles: x == 3 in 2 bits; x & 5 == 5 in 4 bits (four answers);
      a predicate with no answer; an oracle that leaves a work qubit set (refused).
   5. (libcurl, qiskit, qiskit-aer) backend ibm against tests/ibm_mock.py, a local stand-in for IBM's REST API that
@@ -18,7 +20,7 @@
      refusal of sessions; the async program polling while the job is queued.
 Run: python3 -m tests.test_libqarm"""
 import json, os, re, shutil, subprocess, sys, tempfile
-from tests.test_qarm_vqe import ALL_OPS, EXACT
+from tests.test_qarm_vqe import ALL_OPS, EXACT, MAXCUT, VSAMPLE
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INC = os.path.join(ROOT, "include")
@@ -176,10 +178,11 @@ def main():
         curl = has_curl(cc, d)
         env = {"QARM_CONFIG": os.path.join(d, "none.json")}             # no config: the exact backend
         exe = {}
-        for name, src in (("h2", H2), ("all", None), ("async", None), ("ghz", GHZ), ("badcirc", None)):
+        for name, src in (("h2", H2), ("all", None), ("async", None), ("ghz", GHZ), ("badcirc", None),
+                          ("maxcut", MAXCUT), ("vsample", None)):
             if src is None:
                 src = os.path.join(d, name + ".c")
-                open(src, "w").write({"all": ALL_OPS, "async": ASYNC, "badcirc": BADCIRC}[name])
+                open(src, "w").write({"all": ALL_OPS, "async": ASYNC, "badcirc": BADCIRC, "vsample": VSAMPLE}[name])
             for native in (False, True):
                 exe[name, native] = os.path.join(d, f"{name}_{'native' if native else 'plain'}{EXE}")
                 build(cc, src, exe[name, native], native, curl)
@@ -230,6 +233,16 @@ def main():
         assert sh([exe["badcirc", False]]).stdout.split() == ["-1", "-1"]
         print("7) QCIRC, QRAND, QCAPS: ghz.c in the plain and the native build (GHZ: only 00000 and 11111; Toffoli's "
               "truth table); a qubit out of range and a CX on one qubit refused by both")
+
+        p = sh([exe["maxcut", True]], env)
+        assert "best cut 10" in p.stdout and "QVSAMPLE: 8 qubits, 1000 shots" in p.stderr, (p.stdout, p.stderr)
+        assert "best cut 10" in sh([exe["maxcut", False]]).stdout
+        sim = os.path.join(d, "sim1.json")
+        json.dump({"backend": "simulator", "shots": 1000}, open(sim, "w"))
+        for cfgfile, want in ((env["QARM_CONFIG"], 0), (sim, 1)):
+            w, *c = (int(v) for v in sh([exe["vsample", True]], {"QARM_CONFIG": cfgfile}).stdout.split())
+            assert w == want and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, (w, c)
+        print("8) QVSAMPLE: maxcut_qaoa natively finds the largest cut, 10; RY CX on exact and simulator: only 00 and 11")
 
         src = os.path.join(d, "search.c")
         open(src, "w").write(SEARCH)
@@ -283,6 +296,9 @@ def main():
         assert g and int(g[3]) < 100 and "quantum hardware" in p.stdout and "flags 7 (hardware)" in p.stdout, p.stdout
         assert len(re.findall(r"QCIRC: .* shots on ibm_fez \(job mock-", p.stderr)) == 5 and "QRAND: 16 bytes" in p.stderr
         print(f"5d) ghz.c on ibm (mock): GHZ {g[1]}/{g[2]}/{g[3]}, Toffoli's table, QRAND measured, QCAPS: hardware")
+        w, *c = (int(v) for v in sh([exe["vsample", True]], {"QARM_CONFIG": cfg}).stdout.split())
+        assert w == 1 and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, (w, c)
+        print(f"5e) QVSAMPLE on ibm (mock): 00 {c[0]}, 11 {c[3]}")
         p = sh([exe["async", True]], {"QARM_CONFIG": cfg})
         polls = int(p.stdout.split()[1])
         assert polls >= 2, p.stdout

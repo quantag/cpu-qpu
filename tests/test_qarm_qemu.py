@@ -18,11 +18,13 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
   8. QPERIOD, QSIMON, QBV: examples/qarm/shor.c factors 15 and 21, hidden.c finds its two secrets.
   9. QCIRC, QRAND, QCAPS: examples/qarm/ghz.c, its gate tables read from guest memory; with 5, on the ibm mock
      (the device's samples, QRAND measured, QCAPS: hardware).
+ 10. QVSAMPLE: examples/qarm/maxcut_qaoa.c, the same output as under qarm_exec.py's exact simulator up to the
+     samples: the largest cut, 10; RY CX: only 00 and 11 (and on the ibm mock with 5).
 Needs QEMU 10.1 or newer built with plugins: QARM_QEMU = its qemu-aarch64, QARM_QEMU_INCLUDE = the directory with
 qemu-plugin.h (else qemu-aarch64 on PATH and ../include next to it). Run: python3 -m tests.test_qarm_qemu"""
 import json, os, re, shutil, subprocess, sys, tempfile
 from tests.test_qarm_exec import ROOT, EXEC, toolchain, sh
-from tests.test_qarm_vqe import ALL_OPS, EXACT
+from tests.test_qarm_vqe import ALL_OPS, EXACT, VSAMPLE
 
 EX = os.path.join(ROOT, "examples", "qarm")
 
@@ -61,7 +63,9 @@ def main():
         qemu = lambda opts="": [q] + sysroot + ["-plugin", plugin + opts]
 
         exe = {}
-        for name, src in (("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
+        vsrc = os.path.join(d, "vsample.c")
+        open(vsrc, "w").write(VSAMPLE)
+        for name, src in (("maxcut", os.path.join(EX, "maxcut_qaoa.c")), ("vsample", vsrc), ("ghz", os.path.join(EX, "ghz.c")), ("pi", os.path.join(EX, "pi.c")), ("shor", os.path.join(EX, "shor.c")), ("hidden", os.path.join(EX, "hidden.c")),
                           ("part", os.path.join(EX, "partition.c")), ("cb", os.path.join(EX, "codebreaker_search.c")),
                           ("lih", os.path.join(EX, "molecule_vqe.c")), ("h2", os.path.join(EX, "h2_vqe.c")), ("all", None), ("tiny", os.path.join(EX, "tiny_search.c")),
                           ("file", os.path.join(EX, "vqe_from_file.c"))):
@@ -136,6 +140,8 @@ def main():
             p = sh(qemu(f",config={cfg}") + [exe["ghz"]])
             assert "quantum hardware" in p.stdout and "qemu libqarm: ibm" in p.stdout and "(hardware)" in p.stdout, p.stdout
             assert len(re.findall(r"QCIRC: .* shots on ibm_fez \(job mock-", p.stderr)) == 5, p.stderr
+            w, *c = (int(v) for v in sh(qemu(f",config={cfg}") + [exe["vsample"]]).stdout.split())
+            assert w == 1 and c[1] == c[2] == 0 and abs(c[0] - 1000) < 150, (w, c)
             mock.close()
             print(f"5) ibm via the mock of IBM's REST API: 3 qubits, {len(jobs)} jobs, within {worst / m[5]:.1f} "
                   "standard errors")
@@ -165,6 +171,13 @@ def main():
         assert "11->1 100%" in p.stdout and "device: qemu libqarm: exact" in p.stdout, p.stdout
         print("9) ghz: QCIRC (GHZ on 5 qubits, Toffoli's truth table), QRAND, QCAPS through the plugin and libqarm"
               + ("; on the ibm mock: the device's samples, QRAND measured" if curl else ""))
+        p = sh(qemu(",quiet=on") + [exe["maxcut"]])
+        assert "best cut 10" in p.stdout and "largest cut is 10" in p.stdout and "coprocessor's" in p.stdout, p.stdout
+        assert p.stdout.splitlines()[0] == sh(EXEC + ["-q", exe["maxcut"]]).stdout.splitlines()[0]
+        w, *c = (int(v) for v in sh(qemu(",quiet=on") + [exe["vsample"]]).stdout.split())
+        assert w == 1 and c[1] == c[2] == 0, c
+        print("10) QVSAMPLE: maxcut_qaoa under QEMU, the same QAOA energy as under qarm_exec.py, the largest cut 10 "
+              f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}")
     print("PASS")
 
 

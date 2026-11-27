@@ -44,8 +44,9 @@ OP_QRAND, OP_QCIRC, OP_QCAPS = 0x1C, 0x30, 0x31
 GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: "sx", 10: "rx", 11: "ry", 12: "rz",
          13: "cx", 14: "cz", 15: "swap", 16: "ccx"}
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
+OP_QVSAMPLE = 0x25
 OPS = (OP_QAVAIL, OP_QSEARCH, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
-       OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE)
+       OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE)
 
 
 class QarmError(Exception):
@@ -331,7 +332,8 @@ class Runtime:
         op = (w2 >> 16) & 0xFF
         if op == OP_QAVAIL:
             self.set_x(0, 1)
-            self.set_x(1, 2047)                    # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS
+            self.set_x(1, 4095)                    # W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS
+                                                   #     QVSAMPLE
         elif op == OP_QSEARCH:
             self.qsearch(self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op == OP_QMIN:
@@ -348,7 +350,7 @@ class Runtime:
             self.qampest(self.x(1), self.x(2) & 0xFFFFFFFF, self.x(3) & 0xFFFFFFFF)
         elif op in (OP_QPERIOD, OP_QSIMON, OP_QBV):
             self.qstructure(op, self.x(1), self.x(2) & 0xFFFFFFFF)
-        elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE):
+        elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
         mu.reg_write(self.A.UC_ARM64_REG_PC, address + 32)
 
@@ -423,6 +425,25 @@ class Runtime:
                   f"{MEDIAN_OF} runs), {calls} controlled Grover iterations, the {circuit['qubits']}-qubit oracle from {name}'s machine code: about {est} "
                   f"(error bound {bound:.1f}; simulated)")
 
+    def qvsample(self, problem, measured):
+        """QVSAMPLE: X1 = theta, W2 = shots, X3 = the handle, X4 = shots uint64 outcomes of |psi(theta)> in the Z
+        basis (bit q = qubit q). Exact: the state vector, sampled; on a backend: the ansatz circuit, measured."""
+        import numpy as np
+        shots = self.x(2) & 0xFFFFFFFF
+        if not 1 <= shots <= 1 << 22:
+            raise QarmError(f"QVSAMPLE: {shots} shots")
+        theta = self.doubles(self.x(1), problem.params)
+        if measured is None:
+            p = np.abs(problem._prepare(theta)) ** 2
+            rng = np.random.default_rng(int(os.environ["QCPU_SEED"]) if os.environ.get("QCPU_SEED") else None)
+            out, where = [int(v) for v in rng.choice(len(p), size=shots, p=p / p.sum())], "the exact simulator"
+        else:
+            out, job, sec = measured.sample(problem.angles(theta), shots)
+            where = f"{measured.where.split(';')[0]} (job {job}, {sec} s)"
+        self.mu.mem_write(self.x(4), struct.pack(f"<{shots}Q", *out))
+        self.set_x(0, 1)
+        self.note(f"QVSAMPLE: {problem.n} qubits, {shots} shots of the ansatz state on {where}")
+
     def read_circuit(self, addr):
         """A qarm_circuit {u32 qubits, gates; qarm_gate *g} and its gates {u8 kind, q0, q1, q2; u32; double angle}."""
         n, count, gp = struct.unpack("<IIQ", bytes(self.mu.mem_read(addr, 16)))
@@ -482,7 +503,7 @@ class Runtime:
             b = self.qpu["backend"]
             name = f"qarm_exec.py: {b}" + (f" {self.qpu['ibm'].get('backend')}" if b == "ibm" else "")
             qubits, flags = (156 if b in ("ibm", "preview") else 30), (1 if b == "ibm" else 0) | 2 | (4 if b == "ibm" else 0)
-        self.mu.mem_write(addr, struct.pack("<IIII48s", 1, 2047, qubits, flags, name.encode()[:47]))
+        self.mu.mem_write(addr, struct.pack("<IIII48s", 1, 4095, qubits, flags, name.encode()[:47]))
         self.set_x(0, 1)
 
     def qampest(self, fn, bits, vbits):
@@ -604,6 +625,9 @@ class Runtime:
                 problem, measured = entry
                 if op == OP_QGRAD:
                     self.qgrad(problem, measured)
+                    return
+                if op == OP_QVSAMPLE:
+                    self.qvsample(problem, measured)
                     return
                 k = 1 if op == OP_QEXPECT else self.x(2) & 0xFFFFFFFF
                 if not 1 <= k <= 4096:

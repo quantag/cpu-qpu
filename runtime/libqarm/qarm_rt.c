@@ -651,10 +651,11 @@ static int sample_local(const qcirc *c, int shots, uint64_t *samples, char *err,
 }
 
 /* one circuit on the configured device, waited for; samples in logical bits */
-static int sample_ibm(const qcirc *c, int shots, uint64_t *samples, const char *what, char *where, size_t wlen)
+static int sample_ibm(qibm *open, const qcirc *c, int shots, uint64_t *samples, const char *what, char *where,
+                      size_t wlen)
 {
     char err[400], id[128];
-    qibm *b = qibm_open(cfg.opts, c->qubits, err, sizeof err);
+    qibm *b = open ? open : qibm_open(cfg.opts, c->qubits, err, sizeof err);
     if (!b) { qarm_note("%s refused: ibm: %s", what, err); return -1; }
     int *final = malloc(sizeof *final * (size_t)c->qubits), twoq = 0, rc = -1;
     char *qasm = qibm_qasm(b, c, final, &twoq);
@@ -680,7 +681,7 @@ static int sample_ibm(const qcirc *c, int shots, uint64_t *samples, const char *
 done:
     free(qasm);
     free(final);
-    qibm_close(b);
+    if (!open) qibm_close(b);
     return rc;
 }
 
@@ -695,7 +696,7 @@ int qarm_rt_circuit(const qarm_circuit *c, int shots, uint64_t *samples)
     int twoq = 0;
     for (uint32_t i = 0; i < c->gates; i++) twoq += c->g[i].kind >= QARM_G_CX;
     if (cfg.backend == B_IBM) {
-        rc = sample_ibm(&q, shots, samples, "QCIRC", where, sizeof where);
+        rc = sample_ibm(NULL, &q, shots, samples, "QCIRC", where, sizeof where);
     } else {
         if (sample_local(&q, shots, samples, err, sizeof err) < 0) { qarm_note("QCIRC refused: %s", err); goto done; }
         snprintf(where, sizeof where, "the state vector");
@@ -719,7 +720,7 @@ int qarm_rt_rand(void *buf, int n)
         for (int i = 0; i < 8; i++) qc_add(&q, G_H, i, 0, 0);
         uint64_t *s = malloc(sizeof *s * (size_t)n);
         char where[300];
-        int rc = sample_ibm(&q, n, s, "QRAND", where, sizeof where);
+        int rc = sample_ibm(NULL, &q, n, s, "QRAND", where, sizeof where);
         qc_free(&q);
         if (rc > 0) {
             for (int i = 0; i < n; i++) out[i] = (uint8_t)s[i];
@@ -742,7 +743,7 @@ int qarm_rt_caps(qarm_capabilities *caps)
     if (!caps) return -1;
     memset(caps, 0, sizeof *caps);
     caps->version = 1;
-    caps->features = 2047;
+    caps->features = 4095;
     caps->qubits = MAX_QUBITS;
     const char *name = cfg.backend == B_EXACT ? "exact" : cfg.backend == B_SIMULATOR ? "simulator" : "ibm";
     if (cfg.backend == B_IBM) {
@@ -754,5 +755,32 @@ int qarm_rt_caps(qarm_capabilities *caps)
         caps->flags = cfg.backend == B_SIMULATOR ? QARM_CAPS_MEASURED : 0;
         snprintf(caps->backend, sizeof caps->backend, "libqarm: %s", name);
     }
+    return 1;
+}
+
+int qarm_rt_vsample(qarm_rt *r, const double *theta, int shots, uint64_t *samples)
+{
+    if (!r || shots < 1 || !samples) { qarm_note("QVSAMPLE refused: %d shots", shots); return -1; }
+    char where[300];
+    if (r->backend == B_IBM) {
+        qcirc c = {0};
+        circuit(r, theta, -1, 0, NULL, &c);
+        int rc = sample_ibm(r->ibm, &c, shots, samples, "QVSAMPLE", where, sizeof where);
+        qc_free(&c);
+        if (rc < 0) return -1;
+    } else {
+        prepare(r, theta, -1, 0);
+        long N = 1L << r->n;
+        double *p = r->sv.tr;
+        for (long b = 0; b < N; b++) p[b] = (b ? p[b - 1] : 0) + r->sv.re[b] * r->sv.re[b] + r->sv.im[b] * r->sv.im[b];
+        for (int s = 0; s < shots; s++) {
+            double u = uniform() * p[N - 1];
+            long lo = 0, hi = N - 1;
+            while (lo < hi) { long mid = (lo + hi) / 2; if (u < p[mid]) hi = mid; else lo = mid + 1; }
+            samples[s] = (uint64_t)lo;
+        }
+        snprintf(where, sizeof where, "the state vector");
+    }
+    qarm_note("QVSAMPLE: %d qubits, %d shots of the ansatz state on %s", r->n, shots, where);
     return 1;
 }
