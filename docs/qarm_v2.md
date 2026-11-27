@@ -320,6 +320,12 @@ measured backend), L-BFGS otherwise. `molecule_vqe spsa N` or `lbfgs` overrides 
 All are within chemical accuracy (1.6 mHa). The reported energy is itself one measurement, which is how
 it can fall slightly below the exact value.
 
+**Device noise is another matter.** On the noise model of IBM Fez, H₂'s UCCSD (4 qubits, Jordan–Wigner)
+ended 315 mHa from exact after 30 SPSA iterations. The optimizer is not the problem: after Jordan–Wigner
+and routing, UCCSD's Pauli rotations take dozens of CNOTs, and two-qubit errors dominate. On today's
+hardware, VQE needs shallow ansätze, such as `h2_vqe`'s single-CNOT circuit (10–35 mHa on the same noise
+model). The UCCSD path is for exact and shot-noise runs, and for error-corrected machines later.
+
 `QGRAD` works on measured backends too: on H₂ (12 rotations, 25 energies in one batch), the
 parameter-shift gradient from libqarm's simulator and from Aer matched the exact gradient to within 0.002
 at 200,000 shots.
