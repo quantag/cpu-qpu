@@ -24,6 +24,17 @@ every run is checked.
 `cpu_qpu.py` is the command; `arm_qpu.py` is the same tool under its original name. Most of this
 README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what differs.
 
+**Beyond whole programs on the quantum CPU:**
+
+| what | how | section |
+|---|---|---|
+| Mark single C functions to run on the quantum CPU or as their own circuit | `__qcpu__`, `qcpucc` | [`__qcpu__`](#one-program-some-functions-on-the-quantum-cpu-__qcpu__), [two modes](#two-modes-qcpu-or-qoracle) |
+| Grover's search with a C function as the oracle | `qcpu_search()` | [quantum search from C](#quantum-search-from-c-qcpu_search) |
+| Run exported oracles on IBM hardware or its noise models | `qcpu_run.py`, `config.json` | [on a real quantum computer](#on-a-real-quantum-computer-qcpu_runpy) |
+| One arm64 binary with quantum instructions and a classical fallback | `include/qarm.h`, `qarm_exec.py` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| Q-ARM v2 on a real QPU: `QSEARCH` in one async job | `qarm_exec.py --qpu` | [Q-ARM v2](#q-arm-v2-one-binary-quantum-instructions-with-a-classical-fallback) |
+| VQE: a molecule's ground-state energy, the optimizer in C | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QSESSION` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
+
 ## Quick start
 
 `examples/hello.c` is plain C:
@@ -123,6 +134,8 @@ cell k), `--mem=1,2,3` to initialise user data cells (32-bit), `-v`, `--report P
 | `examples/hello.c` | a greeting and the factorization of 84 |
 | `examples/factor.c` | prime factorizations of 84, 91 and 97 |
 | `examples/algorithms.c` | gcd, Fibonacci, primality, popcount, integer square root, modular power, max |
+| `examples/qarm/tiny_search.c` | Q-ARM `QSEARCH` for x = 3 in 2 bits, small enough for a real QPU (`qarm_exec.py`) |
+| `examples/qarm/h2_vqe.c` | Q-ARM VQE: the ground-state energy of H₂, −1.137306 Ha (`qarm_exec.py`, or a plain CPU) |
 
 ```
 $ python3 arm_qpu.py algorithms.o
