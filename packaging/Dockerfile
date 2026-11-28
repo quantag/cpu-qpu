@@ -21,10 +21,10 @@ COPY dist/ /tmp/dist/
 RUN arch=$(uname -m) && mkdir /opt/qarm \
     && tar -C /opt/qarm --strip-components=1 -xzf /tmp/dist/qarm-*-linux-$arch.tar.gz && rm -rf /tmp/dist \
     && ln -s /usr/bin/clang-18 /usr/local/bin/clang \
-    && apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends llvm-18-dev cmake g++ \
+    && apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends llvm-18-dev cmake make g++ \
     && cmake -S /opt/qarm/share/qarm/compiler -B /tmp/auto -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
     && cmake --build /tmp/auto && cp /tmp/auto/QArmAuto.so /opt/qarm/lib/qarm/QArmAuto-llvm18.so && rm -rf /tmp/auto \
-    && apt-get purge -y -q llvm-18-dev cmake g++ && apt-get autoremove -y -q && rm -rf /var/lib/apt/lists/*
+    && apt-get purge -y -q llvm-18-dev cmake make g++ && apt-get autoremove -y -q && rm -rf /var/lib/apt/lists/*
 ENV PATH=/opt/qarm/bin:$PATH
 WORKDIR /work
 CMD ["qarm-run", "--info"]
