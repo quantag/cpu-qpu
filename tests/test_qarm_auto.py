@@ -1,19 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Quantag IT Solutions GmbH
-"""QArmAuto, the compiler pass that gives search and minimum loops to the coprocessor (compiler/, docs/qarm_auto.md).
+"""QArmAuto, the compiler pass that gives search, minimum, count and sum loops to the coprocessor (compiler/,
+docs/qarm_auto.md).
 
   1. The plugin builds for this clang's LLVM (cmake, llvm-config of the same major version).
-  2. tests/qarm_auto_cases.c: every loop gets the remark its comment expects: QSEARCH or QMIN (rewritten), missed
-     (marked, but not a search or minimum: a counter, side effects, a bound over 65536, a start of 1, a step of 2,
-     a maximum, an inverted update, a store), candidate (unmarked). The IR verifies.
+  2. tests/qarm_auto_cases.c: every loop gets the remark its comment expects: QSEARCH, QMIN, QCOUNT or QAMPEST
+     (rewritten), missed (marked, but not a loop the mark allows: side effects, a bound over 65536, a start of 1, a
+     step of 2, a maximum, an inverted update, a store; a sum of values of no known width, a signed char, a capped
+     count, a product), candidate (unmarked, or a count in a QARM_AUTO function). The IR verifies;
+     -qarm-auto=all-estimate rewrites the unmarked count and sum too.
   3. The rewritten loops keep their promises, on this CPU with a stand-in coprocessor (tests/qarm_auto_fake.c)
      that answers differently from the loops (the largest solution, the last minimizer), the same way, or not at
      all: on 40 seeded tables, every search answer is a solution and "none" only when there is none, every minimum
-     the least with an argument that has it. When it declines, and with the real runtime side on a CPU without a
-     coprocessor, the output is byte for byte the program's without the pass.
+     the least with an argument that has it, every count and sum within qarm_auto_error() (exact when the stand-in
+     is: so the functions the pass builds give the loops' own values). When it declines, and with the real runtime
+     side on a CPU without a coprocessor, the output is byte for byte the program's without the pass.
   4. examples/qarm/auto.c, plain C with QARM_AUTO: on this CPU the same output with and without the pass; under
      qarm_exec.py (arm64) and the QEMU plugin (arm64, and x86-64 on an x86-64 host; QARM_QEMU as for
      test_qarm_qemu) the same answers, from QSEARCH and QMIN.
+  5. examples/qarm/estimate.c, plain C with QARM_ESTIMATE: exact, bound 0, on this CPU; under qarm_exec.py and QEMU
+     (seeded) estimates from QCOUNT and QAMPEST within the bounds they print.
 Run: python3 -m tests.test_qarm_auto"""
 import os, re, shutil, subprocess, sys, tempfile
 from tests.test_qarm_exec import ROOT, sh
@@ -23,6 +29,21 @@ CASES = os.path.join(ROOT, "tests", "qarm_auto_cases.c")
 FAKE = os.path.join(ROOT, "tests", "qarm_auto_fake.c")
 RUNTIME = os.path.join(ROOT, "compiler", "qarm_auto.c")
 DEMO = os.path.join(ROOT, "examples", "qarm", "auto.c")
+ESTIMATE = os.path.join(ROOT, "examples", "qarm", "estimate.c")
+KINDS = ("QSEARCH", "QMIN", "QCOUNT", "QAMPEST")
+
+
+def estimates(out):
+    """examples/qarm/estimate.c's two lines: [(value, bound), (value, bound)]"""
+    m = re.findall(r"(-?[\d.]+) (?:on average )?\(bound ([\d.]+)\)", out)
+    assert len(m) == 2, out
+    return [(float(a), float(b)) for a, b in m]
+
+
+def within(got, exact, integral):
+    for (v, b), (x, _) in zip(got, exact):
+        slack = b + (0.5 if integral else 0) + 0.0015 + 1e-9    # the printed rounding
+        assert abs(v - x) <= slack, (got, exact)
 
 
 def llvm_config(v):
@@ -63,8 +84,8 @@ def main():
             m = re.match(r".*qarm_auto_cases\.c:(\d+):\d+: remark: (.*)", line)
             if m:
                 text = m.group(2)
-                k = ("QSEARCH" if ": QSEARCH (" in text else "QMIN" if ": QMIN (" in text else
-                     "missed" if text.startswith("not a search") else "candidate" if "mark the function" in text else "?")
+                k = next((q for q in KINDS if f": {q} (" in text), None) or (
+                    "missed" if text.startswith("not a search") else "candidate" if "mark the function" in text else "?")
                 kinds.setdefault(int(m.group(1)), []).append(k)
         src = open(CASES).read().splitlines()
         checked = 0
@@ -73,15 +94,20 @@ def main():
             if m and "for (" in line and not line.rstrip().endswith("\\"):   # a macro's lines: by count below
                 assert kinds.get(n) == [m.group(1)], (n, line, kinds.get(n))
                 checked += 1
-        total = {k: sum(v.count(k) for v in kinds.values()) for k in ("QSEARCH", "QMIN", "missed", "candidate", "?")}
-        assert total == {"QSEARCH": 6, "QMIN": 5, "missed": 8, "candidate": 11, "?": 0}, total
+        total = {k: sum(v.count(k) for v in kinds.values()) for k in KINDS + ("missed", "candidate", "?")}
+        assert total == {"QSEARCH": 7, "QMIN": 5, "QCOUNT": 5, "QAMPEST": 5, "missed": 11, "candidate": 23, "?": 0}, total
+        p = sh(cc + ["-Xclang", "-load", "-Xclang", plugin, "-mllvm", "-qarm-auto=all-estimate", "-Rpass=qarm-auto", "-c", CASES, "-o", os.path.join(d, "c.o")])
+        for line, kind in (("long unmarked_sum", "QAMPEST"), ("int unmarked(void)", "QSEARCH"), ("QARM_AUTO int count", "QCOUNT")):
+            n = next(i for i, l in enumerate(src, 1) if l.startswith(line))
+            assert f"qarm_auto_cases.c:{n}:" in p.stderr and f": {kind} (" in p.stderr, (line, p.stderr[-2000:])
         bc = os.path.join(d, "c.bc")
         sh(cc + ["-emit-llvm", "-c", CASES, "-o", bc])
         opt = os.path.join(os.path.dirname(cfg), "opt")
         if os.path.exists(opt):
             sh([opt, "-passes=verify", bc, "-o", os.devnull])
-        print(f"2) {total['QSEARCH']} searches and {total['QMIN']} minimums rewritten, {total['missed']} marked loops left "
-              f"alone with the reason, {total['candidate']} unmarked candidates reported ({checked} by line); the IR verifies")
+        print(f"2) {total['QSEARCH']} searches, {total['QMIN']} minimums, {total['QCOUNT']} counts and {total['QAMPEST']} sums "
+              f"rewritten, {total['missed']} marked loops left alone with the reason, {total['candidate']} candidates "
+              f"reported ({checked} by line); the IR verifies; -qarm-auto=all-estimate takes the unmarked ones")
 
         # 3. the promises, with a stand-in coprocessor
         plain = os.path.join(d, "plain")
@@ -100,8 +126,9 @@ def main():
         sh(cc + [CASES, RUNTIME, "-o", real])
         assert sh([real, "40"]).stdout == ref
         print("3) 40 seeded tables: with a coprocessor that answers differently, the same way, or not at all, every "
-              "search answer is a solution, \"none\" only when there is none, every minimum the least; declined, and "
-              "with the real runtime side on this CPU, byte for byte the program without the pass")
+              "search answer is a solution, \"none\" only when there is none, every minimum the least, every count and "
+              "sum within its bound; declined, and with the real runtime side on this CPU, byte for byte the program "
+              "without the pass")
 
         # 4. examples/qarm/auto.c
         host = os.path.join(d, "auto_host")
@@ -139,6 +166,48 @@ def main():
                     assert p.stdout == want and "QMIN imbalance" in p.stderr, p.stdout + p.stderr
                     ran.append("QEMU (x86-64)")
         print("4) examples/qarm/auto.c: the same answers on " + ", ".join(ran) + "; QSEARCH and QMIN under the runtimes")
+
+        # 5. examples/qarm/estimate.c
+        host = os.path.join(d, "est_host")
+        sh(cc + [ESTIMATE, RUNTIME, "-o", host])
+        sh([clang, "-O1", "-iquote", INC, ESTIMATE, "-o", plain])
+        want = sh([plain]).stdout
+        exact = estimates(want)
+        assert sh([host]).stdout == want and all(b == 0 for _, b in exact) and exact[0][0] == 56, want
+        ran = ["this CPU (exact)"]
+        seeded = dict(os.environ, QCPU_SEED="1", QARM_SEED="1")
+        if sys.platform == "linux" and shutil.which("aarch64-linux-gnu-gcc"):
+            a64 = os.path.join(d, "est.a64")
+            sh(cc + ["--target=aarch64-linux-gnu", ESTIMATE, RUNTIME, "-o", a64])
+            try:
+                import unicorn  # noqa: F401
+                p = sh([sys.executable, os.path.join(ROOT, "qarm_exec.py"), a64], env=seeded)
+                got = estimates(p.stdout)
+                assert "QCOUNT" in p.stderr and "QAMPEST" in p.stderr and all(b > 0 for _, b in got), p.stdout + p.stderr
+                within(got, exact, True)
+                ran.append("qarm_exec.py")
+            except ImportError:
+                pass
+            from tests.test_qarm_qemu import find_qemu
+            q, inc, why = find_qemu()
+            if not why:
+                plug = os.path.join(d, "qemu", "libqarm-qemu.so") + ",helper=" + os.path.join(ROOT, "tools", "qarm_oracle.py")
+                sysroot = [] if os.uname().machine == "aarch64" else ["-L", "/usr/aarch64-linux-gnu"]
+                p = sh([q] + sysroot + ["-plugin", plug, a64], env=seeded)
+                got = estimates(p.stdout)
+                assert "QCOUNT" in p.stderr and "QAMPEST" in p.stderr and all(b > 0 for _, b in got), p.stdout + p.stderr
+                within(got, exact, True)
+                ran.append("QEMU (arm64)")
+                q86 = os.path.join(os.path.dirname(q), "qemu-x86_64")
+                if os.uname().machine == "x86_64" and os.path.exists(q86):
+                    x64 = os.path.join(d, "est.x64")
+                    sh(cc + [ESTIMATE, RUNTIME, "-o", x64])
+                    p = sh([q86, "-plugin", plug, x64], env=seeded)
+                    got = estimates(p.stdout)
+                    assert "QAMPEST" in p.stderr and got[1][1] > 0, p.stdout + p.stderr     # the count: estimated or exact
+                    within(got, exact, True)
+                    ran.append("QEMU (x86-64)")
+        print("5) examples/qarm/estimate.c: " + ", ".join(ran) + "; QCOUNT and QAMPEST within their bounds")
     print("PASS")
 
 

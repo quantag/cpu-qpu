@@ -279,9 +279,9 @@ static qarm_oracle *oracle_for(uint64_t fn, unsigned bits, int compute)
         gint64 t0 = g_get_monotonic_time();
         int status = run(argv, &out, &err);
         if (status < 0) {
-            note("QSEARCH: cannot run %s %s", python, helper);
+            note("the oracle: cannot run %s %s", python, helper);
         } else if (status != 0) {
-            note("QSEARCH: no oracle for the function at %s: %s", func, err && *err ? g_strstrip(err) : "the helper failed");
+            note("the oracle: no oracle for the function at %s: %s", func, err && *err ? g_strstrip(err) : "the helper failed");
         } else {
             char perr[300];
             qarm_oracle *p = qarm_rt_oracle_parse(out, perr, sizeof perr);
