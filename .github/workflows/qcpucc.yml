@@ -59,6 +59,8 @@ jobs:
         run: python -m tests.test_packaging
       - name: test_qarm_evolve (QEVOLVE's error bounds hold; both planners agree)
         run: python -m tests.test_qarm_evolve
+      - name: test_qarm_lindblad (QLINDBLAD's error bounds hold; both planners agree)
+        run: python -m tests.test_qarm_lindblad
       - name: test_qarm_sv (the state vector against dense matrices; OpenMP threads)
         run: python -m tests.test_qarm_sv
       - name: test_qarm_patch (Q-ARM put into an ELF binary built without qarm.h)
@@ -119,6 +121,8 @@ jobs:
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_isa
       - name: test_qarm_evolve with QEMU (quench.c on the plugin, exact and simulator)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_evolve
+      - name: test_qarm_lindblad with QEMU (decoherence.c on the plugin; qDRIFT on the simulator backend)
+        run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_lindblad
       - name: test_packaging (install.sh with QEMU bundled; qarm-run and qarm-cc)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_packaging
       - name: test_qarm_auto with QEMU (examples/qarm/auto.c under the plugin, arm64 and x86-64)

@@ -30,7 +30,7 @@ jobs:
         run: |
           v=${{ github.ref_name }}
           cat > notes.md <<EOT
-          Q-ARM $v: run AArch64 and x86-64 programs with quantum instructions (Q-ARM ISA 1.1).
+          Q-ARM $v: run AArch64 and x86-64 programs with quantum instructions (Q-ARM ISA 1.2).
 
           **Linux** (Ubuntu 22.04+, Debian 12+; needs libglib2.0-0, libcurl4, libgomp1):
           \`\`\`

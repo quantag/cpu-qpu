@@ -889,6 +889,33 @@ static inline long qarm_ev_steps_table(const qarm_hamiltonian *h, int p, uint64_
     return t.full ? -1 : (long)t.n;
 }
 
+static uint64_t qarm_ev_next(uint64_t *st);
+/* one qDRIFT sequence as an ansatz table: n terms drawn with probability |c_j| / lambda, each a Pauli rotation with
+ * scale sgn(c_j) lambda, param 0 (theta[0] = t / n), adjacent equal terms merged; for a measured backend, where
+ * each sequence is one circuit for all the times. The number of operations, or -1 when cap is too small */
+static inline long qarm_ev_qdrift_table(const qarm_hamiltonian *h, uint64_t n, uint64_t *seed, qarm_op *ops, uint32_t cap)
+{
+    double lam = qarm_ev_norm(h), *cum = (double *)malloc(sizeof *cum * (h->terms + 1));
+    uint32_t *idx = (uint32_t *)malloc(sizeof *idx * (h->terms + 1)), L = 0;
+    qarm_ev_table t = {ops, 0, cap, 0};
+    if (!cum || !idx) { free(cum); free(idx); return -1; }
+    for (uint32_t i = 0; i < h->terms; i++)
+        if ((h->t[i].x || h->t[i].z) && h->t[i].c != 0) {
+            cum[L] = (L ? cum[L - 1] : 0) + fabs(h->t[i].c);
+            idx[L++] = i;
+        }
+    for (uint64_t s = 0; L && s < n && !t.full; s++) {
+        double u = (double)(qarm_ev_next(seed) >> 11) / 9007199254740992.0 * cum[L - 1];
+        uint32_t lo = 0, hi = L - 1;
+        while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (u < cum[mid]) hi = mid; else lo = mid + 1; }
+        const qarm_pauli *p = &h->t[idx[lo]];
+        qarm_ev_table_add(&t, p->x, p->z, p->c > 0 ? lam : -lam);
+    }
+    free(cum);
+    free(idx);
+    return t.full ? -1 : (long)t.n;
+}
+
 /* on the state vector: one pending rotation, merged with an equal neighbour */
 typedef struct { qarm_sv *s; uint64_t x, z; double a, dt; int have; } qarm_ev_run;
 static void qarm_ev_flush(qarm_ev_run *w)
@@ -1019,6 +1046,331 @@ static int qarm_sv_evolve(qarm_sv *s, const qarm_evolution *e, const qarm_ev_pla
         free(idx);
     }
     free(ts);
+    return 0;
+}
+
+/* ---------------------------------------------------------------- open systems (QLINDBLAD, docs/qarm_isa.md 6.7)
+ * d rho/dt = L rho = -i [H, rho] + sum_k gamma_k (P_k rho P_k - rho), Tr(O rho(t)) for times t >= 0.
+ * In the diamond norm ||-i[cP, .]|| <= 2|c| and ||gamma (P . P - .)|| <= 2 gamma, so ||L|| <= Lambda = 2 lambda
+ * + 2 Gamma (Gamma = sum gamma_k), and every e^{sL_j} with s >= 0 is a channel: a contraction. Then:
+ *   exact       the Taylor series of e^{dt L} on the density matrix (at most QARM_LB_DM_QUBITS qubits), as for
+ *               QEVOLVE: d_m = (1 + tau)^m - 1, tau = tail_40(Lambda dt)
+ *   product     Lie-Trotter (1) or Strang (2) over the generators, the unitary ones first: r steps give
+ *               ||e^{tL} - S_p(t/r)^r|| <= 2 r tail_p(Lambda t / r), and for p = 1 also t^2/(2r) sum over the
+ *               pairs that do not commute of 2 ||A|| ||B|| (H terms that anticommute; an H term and a jump that
+ *               anticommute; jumps always commute). Orders 4 and 6 have negative stages, which are not channels.
+ *               On the density matrix, or, above QARM_LB_DM_QUBITS, by trajectories on the state vector: each jump
+ *               factor e^{x D[P]} = (1 - q) id + q P . P, q = (1 - e^{-2x}) / 2, applies P with probability q, so
+ *               the mean over R trajectories is unbiased for S_p's <O>, and se is its standard error.
+ * |Tr(O' (rho~ - rho))| <= omega ||rho~ - rho||_1 <= omega d: D0 = omega d (at most 2 omega); every term of the
+ * series and every factor keeps the trace, so O's identity part adds no error. */
+#ifndef QARM_LB_DM_QUBITS
+#define QARM_LB_DM_QUBITS 10                     /* the density matrix: 4^n complex entries, eight arrays */
+#endif
+#define QARM_LB_TRAJECTORIES 100                 /* R when shots = 0 */
+
+static const char *qarm_lb_check(const qarm_lindblad *l)
+{
+    const qarm_evolution *e = &l->e;
+    const char *why = qarm_ev_check(e);
+    if (why) return why;
+    if (!l->jumps) return "no jump operators";
+    if (l->jumps->qubits != e->h->qubits) return "the jump operators' qubits differ from the generator's";
+    if ((why = qarm_ev_check_h(l->jumps, e->h->qubits, "jumps"))) return why;
+    if (l->jumps->constant != 0) return "the jump operators' constant must be 0";
+    for (uint32_t i = 0; i < l->jumps->terms; i++)
+        if (!(l->jumps->t[i].c >= 0)) return "a rate is negative";
+    if (e->method == QARM_EV_QDRIFT) return "qDRIFT is for closed systems (QEVOLVE)";
+    if (e->method == QARM_EV_PRODUCT && e->order > 2) return "orders 4 and 6 are not channels: order 1, 2 or 0";
+    for (uint32_t i = 0; i < e->k; i++)
+        if (e->t[i] < 0) return "a time is negative: open systems evolve forward";
+    return 0;
+}
+
+static double qarm_lb_rates(const qarm_hamiltonian *j)
+{
+    double g = 0;
+    for (uint32_t i = 0; i < j->terms; i++)
+        if (j->t[i].x || j->t[i].z) g += j->t[i].c;
+    return g;
+}
+
+/* sum over the generator pairs that do not commute of 2 ||A|| ||B||; infinite above 4096 generators */
+static double qarm_lb_comm(const qarm_hamiltonian *h, const qarm_hamiltonian *j)
+{
+    if (h->terms + j->terms > 4096) return INFINITY;
+    double c = 0;
+    for (uint32_t a = 0; a < h->terms; a++) {
+        const qarm_pauli *p = &h->t[a];
+        for (uint32_t b = a + 1; b < h->terms; b++)
+            if (qarm_ev_anti(p->x, p->z, h->t[b].x, h->t[b].z)) c += 2 * (2 * fabs(p->c)) * (2 * fabs(h->t[b].c));
+        for (uint32_t b = 0; b < j->terms; b++)
+            if (qarm_ev_anti(p->x, p->z, j->t[b].x, j->t[b].z)) c += 2 * (2 * fabs(p->c)) * (2 * j->t[b].c);
+    }
+    return c;
+}
+
+static double qarm_lb_product_d(double Lam, double comm, int p, double t, double r)
+{
+    if (Lam == 0 || t == 0) return 0;
+    double d = 2 * r * qarm_ev_tail(Lam * t / r, p);
+    if (p == 1 && comm < INFINITY) {
+        double c = t * t / (2 * r) * comm * (1 + 1e-12);
+        if (c < d) d = c;
+    }
+    return d;
+}
+/* arg: omega, Lambda, comm, p, tmax */
+static double qarm_lb_pb(const double *a, double r)
+{
+    double d = qarm_lb_product_d(a[1], a[2], (int)a[3], a[4], r);
+    return d >= 2 ? 2 * a[0] : a[0] * d;
+}
+
+typedef struct {
+    uint32_t method, order;                       /* QARM_EV_EXACT or _PRODUCT; 1 or 2 */
+    uint64_t steps;                               /* r, or the exact segments to the latest time */
+    uint32_t trajectories, dm;                    /* R (0 on the density matrix); dm: on the density matrix */
+    double bound, work;
+    uint64_t seed;
+    const char *why;
+} qarm_lb_plan_t;
+
+/* what QLINDBLAD runs: 0, or -1 with p->why. sim: a simulator (the density matrix, trajectories) */
+static int qarm_lb_plan(const qarm_lindblad *l, int sim, double limit, qarm_lb_plan_t *p)
+{
+    const qarm_evolution *e = &l->e;
+    const qarm_hamiltonian *h = e->h, *j = l->jumps;
+    uint32_t n = h->qubits;
+    double N = ldexp(1, (int)n), lam = qarm_ev_norm(h), gam = qarm_lb_rates(j), Lam = 2 * lam + 2 * gam,
+           omega = qarm_ev_norm(e->o), tmax = 0, eps = e->eps > 0 ? e->eps : QARM_EV_EPS, G = 0;
+    memset(p, 0, sizeof *p);
+    if (!limit) limit = QARM_EV_WORK;
+    if (!sim) { p->why = "QLINDBLAD runs on a simulator in this runtime"; return -1; }
+    for (uint32_t i = 0; i < h->terms; i++) G += h->t[i].x || h->t[i].z;
+    for (uint32_t i = 0; i < j->terms; i++) G += j->t[i].x || j->t[i].z;
+    for (uint32_t i = 0; i < e->k; i++) if (e->t[i] > tmax) tmax = e->t[i];
+    p->dm = n <= QARM_LB_DM_QUBITS;
+    p->method = e->method == QARM_EV_AUTO ? (p->dm ? QARM_EV_EXACT : QARM_EV_PRODUCT) : e->method;
+    if (p->method == QARM_EV_EXACT) {
+        if (!p->dm) { p->why = "exact open-system evolution needs the density matrix: at most 10 qubits"; return -1; }
+        double m = Lam * tmax > 0 ? ceil(Lam * tmax / 2) : 0;
+        if (m > QARM_EV_MAX_STEPS) { p->why = "the evolution would take more work than this runtime allows"; return -1; }
+        double d = m ? expm1(m * log1p(qarm_ev_tail(Lam * tmax / m, QARM_EV_TAYLOR))) * (1 + 1e-12) : 0;
+        p->steps = (uint64_t)m;
+        p->bound = d >= 2 ? 2 * omega : omega * d;
+        p->work = (m * QARM_EV_TAYLOR * (G + 1) * 2 + e->k * (e->o->terms + 1.0)) * N * N;
+    } else {
+        double comm = qarm_lb_comm(h, j), best = INFINITY;
+        for (int q = 1; q <= 2; q++) {
+            if (e->order && (int)e->order != q) continue;
+            double arg[5] = {omega, Lam, q == 1 ? comm : INFINITY, q, tmax};
+            uint64_t r = e->steps ? e->steps : qarm_ev_least(qarm_lb_pb, arg, eps);
+            if (!r) continue;
+            double cost = (double)r * q * (G > 0 ? G : 1);
+            if (cost < best) { best = cost; p->order = (uint32_t)q; p->steps = r; p->bound = qarm_lb_pb(arg, (double)r); }
+        }
+        if (!p->steps) { p->why = "no product formula meets eps within 10^12 steps"; return -1; }
+        if (!p->dm) p->trajectories = e->shots ? e->shots : QARM_LB_TRAJECTORIES;
+        p->work = best * e->k * (p->dm ? 4 * N * N : p->trajectories * N);
+    }
+    if (p->work > limit) { p->why = "the evolution would take more work than this runtime allows"; return -1; }
+    return 0;
+}
+
+/* the density matrix: rho[u * N + v], and scratch */
+typedef struct { int n; double *re, *im, *br, *bi, *ar, *ai, *tr, *ti; } qarm_dm;
+
+static double qarm_lb_ik_re(int k) { return k == 0 ? 1 : k == 2 ? -1 : 0; }   /* i^k */
+static double qarm_lb_ik_im(int k) { return k == 1 ? 1 : k == 3 ? -1 : 0; }
+
+/* (br, bi) += f * (-i)(c P T - T c P) + g * (P T P - T), for T = (tr, ti) */
+static void qarm_dm_gen(qarm_dm *m, const double *tr, const double *ti, double *br, double *bi, uint64_t x, uint64_t z,
+                        double c, double g)
+{
+    long N = 1L << m->n;
+    int k = qarm_sv_popcount(x & z) & 3;
+    double kr = qarm_lb_ik_re(k), ki = qarm_lb_ik_im(k), pp = (k & 1) ? -1 : 1;    /* i^k, (i^k)^2 */
+    QARM_SV_PAR(N * N)
+    for (long u = 0; u < N; u++) {
+        double su = qarm_sv_odd((uint64_t)(u ^ x) & z) ? -1 : 1;
+        for (long v = 0; v < N; v++) {
+            double sv = qarm_sv_odd((uint64_t)v & z) ? -1 : 1;
+            long uv = u * N + v, a = (u ^ (long)x) * N + v, b = u * N + (v ^ (long)x), ab = (u ^ (long)x) * N + (v ^ (long)x);
+            if (c != 0) {
+                /* P T [u][v] = i^k su T[u^x][v]; T P [u][v] = i^k sv T[u][v^x]; d = P T - T P */
+                double dr = su * tr[a] - sv * tr[b], di = su * ti[a] - sv * ti[b];
+                double er = kr * dr - ki * di, ei = kr * di + ki * dr;          /* i^k d */
+                br[uv] += c * ei;                                                /* -i c (er + i ei) */
+                bi[uv] -= c * er;
+            }
+            if (g != 0) {
+                double w = pp * su * sv;                                         /* P T P [u][v] = w T[u^x][v^x] */
+                br[uv] += g * (w * tr[ab] - tr[uv]);
+                bi[uv] += g * (w * ti[ab] - ti[uv]);
+            }
+        }
+    }
+}
+
+static void qarm_dm_basis(qarm_dm *m, uint64_t init)
+{
+    long N = 1L << m->n;
+    memset(m->re, 0, sizeof(double) * N * N);
+    memset(m->im, 0, sizeof(double) * N * N);
+    m->re[init * N + init] = 1;
+}
+
+static double qarm_dm_expect(qarm_dm *m, const qarm_hamiltonian *o)
+{
+    long N = 1L << m->n;
+    double v = 0, tr = 0;
+    for (long u = 0; u < N; u++) tr += m->re[u * N + u];
+    for (uint32_t i = 0; i < o->terms; i++) {
+        const qarm_pauli *p = &o->t[i];
+        int k = qarm_sv_popcount(p->x & p->z) & 3;
+        double kr = qarm_lb_ik_re(k), ki = qarm_lb_ik_im(k), s = 0;
+        for (long u = 0; u < N; u++) {                 /* Tr(P rho) = sum_u i^k s(u^x) rho[u^x][u] */
+            long w = u ^ (long)p->x;
+            double su = qarm_sv_odd((uint64_t)w & p->z) ? -1 : 1;
+            s += su * (kr * m->re[w * N + u] - ki * m->im[w * N + u]);
+        }
+        v += p->c * s;
+    }
+    return v + o->constant * tr;
+}
+
+/* rho <- e^{-iaP} rho e^{iaP} (jump = 0), or (1 - q) rho + q P rho P with q = (1 - e^{-2a}) / 2 (jump = 1) */
+static void qarm_dm_factor(qarm_dm *m, int jump, uint64_t x, uint64_t z, double a)
+{
+    long N = 1L << m->n, NN = N * N;
+    if (a == 0) return;
+    memset(m->br, 0, sizeof(double) * NN);
+    memset(m->bi, 0, sizeof(double) * NN);
+    if (jump) {
+        double q = -expm1(-2 * a) / 2;                 /* B = q (P rho P - rho); rho += B */
+        qarm_dm_gen(m, m->re, m->im, m->br, m->bi, x, z, 0, q);
+    } else {
+        /* U rho U^dag = rho + s c (-i)[P, rho] + s^2 (P rho P - rho) */
+        double sn = sin(a), cs = cos(a);
+        qarm_dm_gen(m, m->re, m->im, m->br, m->bi, x, z, sn * cs, sn * sn);
+    }
+    for (long i = 0; i < NN; i++) { m->re[i] += m->br[i]; m->im[i] += m->bi[i]; }
+}
+
+/* the generators of S_p(f dt) in order: H's terms then the jumps, Strang's halves palindromic */
+typedef void (*qarm_lb_emit_fn)(void *ctx, int jump, uint64_t x, uint64_t z, double a);
+static void qarm_lb_formula(const qarm_hamiltonian *h, const qarm_hamiltonian *j, int p, double dt, qarm_lb_emit_fn emit, void *ctx)
+{
+    double f = p == 2 ? dt / 2 : dt;
+    for (uint32_t i = 0; i < h->terms; i++) if (h->t[i].x || h->t[i].z) emit(ctx, 0, h->t[i].x, h->t[i].z, f * h->t[i].c);
+    for (uint32_t i = 0; i < j->terms; i++) if (j->t[i].x || j->t[i].z) emit(ctx, 1, j->t[i].x, j->t[i].z, f * j->t[i].c);
+    if (p != 2) return;
+    for (uint32_t i = j->terms; i-- > 0;) if (j->t[i].x || j->t[i].z) emit(ctx, 1, j->t[i].x, j->t[i].z, f * j->t[i].c);
+    for (uint32_t i = h->terms; i-- > 0;) if (h->t[i].x || h->t[i].z) emit(ctx, 0, h->t[i].x, h->t[i].z, f * h->t[i].c);
+}
+static void qarm_lb_dm_emit(void *ctx, int jump, uint64_t x, uint64_t z, double a) { qarm_dm_factor((qarm_dm *)ctx, jump, x, z, a); }
+
+typedef struct { qarm_sv *s; uint64_t *st; } qarm_lb_traj;
+static void qarm_lb_sv_emit(void *ctx, int jump, uint64_t x, uint64_t z, double a)
+{
+    qarm_lb_traj *w = (qarm_lb_traj *)ctx;
+    if (!jump) { if (a != 0) qarm_sv_pauli_rot(w->s, w->s->re, w->s->im, x, z, a); return; }
+    double q = -expm1(-2 * a) / 2;
+    if ((double)(qarm_ev_next(w->st) >> 11) / 9007199254740992.0 < q)
+        qarm_sv_pauli_rot(w->s, w->s->re, w->s->im, x, z, 1.5707963267948966);   /* -i P: P up to a phase */
+}
+
+/* runs the plan: out[i] = Tr(O rho(t_i)); *se: the trajectories' largest standard error, else 0. dm (density
+ * matrix) or s (trajectories) as the plan says. out may be the times. 0, or -1 (no memory) */
+static int qarm_lb_run(qarm_dm *dm, qarm_sv *s, const qarm_lindblad *l, const qarm_lb_plan_t *p, double *out, double *se)
+{
+    const qarm_evolution *e = &l->e;
+    const qarm_hamiltonian *h = e->h, *j = l->jumps;
+    uint32_t k = e->k;
+    qarm_ev_time *ts = (qarm_ev_time *)malloc(sizeof *ts * k);
+    if (!ts) return -1;
+    for (uint32_t i = 0; i < k; i++) { ts[i].t = e->t[i]; ts[i].i = i; }
+    *se = 0;
+    if (p->method == QARM_EV_EXACT) {
+        long N = 1L << dm->n, NN = N * N;
+        double Lam = 2 * qarm_ev_norm(h) + 2 * qarm_lb_rates(j), cur = 0;
+        qsort(ts, k, sizeof *ts, qarm_ev_cmp_time);
+        qarm_dm_basis(dm, e->init);
+        for (uint32_t q = 0; q < k; q++) {
+            double T = ts[q].t - cur;
+            if (Lam > 0 && T > 0) {
+                double m = ceil(Lam * T / 2), dt = T / m;
+                for (double seg = 0; seg < m; seg++) {
+                    memcpy(dm->ar, dm->re, sizeof(double) * NN); memcpy(dm->ai, dm->im, sizeof(double) * NN);
+                    memcpy(dm->tr, dm->re, sizeof(double) * NN); memcpy(dm->ti, dm->im, sizeof(double) * NN);
+                    for (int n = 1; n <= QARM_EV_TAYLOR; n++) {
+                        memset(dm->br, 0, sizeof(double) * NN); memset(dm->bi, 0, sizeof(double) * NN);
+                        for (uint32_t i = 0; i < h->terms; i++)
+                            if (h->t[i].x || h->t[i].z) qarm_dm_gen(dm, dm->tr, dm->ti, dm->br, dm->bi, h->t[i].x, h->t[i].z, h->t[i].c, 0);
+                        for (uint32_t i = 0; i < j->terms; i++)
+                            if (j->t[i].x || j->t[i].z) qarm_dm_gen(dm, dm->tr, dm->ti, dm->br, dm->bi, j->t[i].x, j->t[i].z, 0, j->t[i].c);
+                        double f = dt / n;
+                        for (long i = 0; i < NN; i++) {
+                            dm->tr[i] = f * dm->br[i]; dm->ti[i] = f * dm->bi[i];
+                            dm->ar[i] += dm->tr[i]; dm->ai[i] += dm->ti[i];
+                        }
+                    }
+                    memcpy(dm->re, dm->ar, sizeof(double) * NN); memcpy(dm->im, dm->ai, sizeof(double) * NN);
+                }
+            }
+            cur = ts[q].t;
+            out[ts[q].i] = qarm_dm_expect(dm, e->o);
+        }
+    } else if (p->dm) {
+        for (uint32_t q = 0; q < k; q++) {
+            qarm_dm_basis(dm, e->init);
+            if (ts[q].t > 0)
+                for (uint64_t r = 0; r < p->steps; r++)
+                    qarm_lb_formula(h, j, (int)p->order, ts[q].t / (double)p->steps, qarm_lb_dm_emit, dm);
+            out[ts[q].i] = qarm_dm_expect(dm, e->o);
+        }
+    } else {
+        uint64_t st = p->seed;
+        qarm_lb_traj w = {s, &st};
+        for (uint32_t q = 0; q < k; q++) {
+            double mean = 0, m2 = 0;
+            for (uint32_t c = 0; c < p->trajectories; c++) {
+                qarm_ev_basis(s, e->init);
+                if (ts[q].t > 0)
+                    for (uint64_t r = 0; r < p->steps; r++)
+                        qarm_lb_formula(h, j, (int)p->order, ts[q].t / (double)p->steps, qarm_lb_sv_emit, &w);
+                double v = qarm_sv_energy(s, e->o), d = v - mean;
+                mean += d / (c + 1);
+                m2 += d * (v - mean);
+            }
+            out[ts[q].i] = mean;
+            if (p->trajectories > 1) {
+                double sd = sqrt(m2 / (p->trajectories - 1) / p->trajectories);
+                if (sd > *se) *se = sd;
+            }
+        }
+    }
+    free(ts);
+    return 0;
+}
+
+/* a density matrix or a state vector for the plan, in one allocation: free(*mem) after */
+static int qarm_lb_alloc(const qarm_lindblad *l, const qarm_lb_plan_t *p, qarm_dm *dm, qarm_sv *s, double **mem)
+{
+    int n = (int)l->e.h->qubits;
+    size_t N = (size_t)1 << n, cells = p->dm ? 8 * N * N : 6 * N;
+    double *b = (double *)malloc(sizeof *b * cells);
+    *mem = b;
+    if (!b) return -1;
+    if (p->dm) {
+        size_t NN = N * N;
+        qarm_dm d = {n, b, b + NN, b + 2 * NN, b + 3 * NN, b + 4 * NN, b + 5 * NN, b + 6 * NN, b + 7 * NN};
+        *dm = d;
+    } else {
+        qarm_sv v = {n, b, b + N, b + 2 * N, b + 3 * N, b + 4 * N, b + 5 * N};
+        *s = v;
+    }
     return 0;
 }
 #endif

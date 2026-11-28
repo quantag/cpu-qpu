@@ -33,8 +33,8 @@ S=$Q/../share/qarm
 for a in aarch64 x86-64; do
     "$Q/qarm-cc" --$a "$S/conformance/qarm_conformance.c" -o conf-$a
     "$Q/qarm-run" -q ./conf-$a > out-$a.txt || { cat out-$a.txt; exit 1; }
-    grep -q "Core passed; Oracle not claimed; Variational passed; Circuit passed; Async passed; Dynamics passed" out-$a.txt \
-        && grep -q "8 passed, 0 failed, 8 skipped" out-$a.txt || { cat out-$a.txt; exit 1; }
+    grep -q "Core passed; Oracle not claimed; Variational passed; Circuit passed; Async passed; Dynamics passed; Open passed" out-$a.txt \
+        && grep -q "9 passed, 0 failed, 8 skipped" out-$a.txt || { cat out-$a.txt; exit 1; }
     echo "conformance on $a: $(tail -n 1 out-$a.txt)"
 done
 "$Q/qarm-run" --cpu ./conf-aarch64 | grep -q "no runtime"

@@ -39,6 +39,8 @@ int qarm_rt_caps(qarm_capabilities *caps);
 /* QEVOLVE: out[i] = <O(t_i)> within *bound (*err: the standard error on a measured backend or of qDRIFT); *how =
  * method | order << 8, *steps: the plan's. 0 exact, 1 measured, -1 refused (the reason on stderr) */
 int qarm_rt_evolve(const qarm_evolution *e, double *out, double *bound, double *err, uint32_t *how, uint64_t *steps);
+/* QLINDBLAD: as qarm_rt_evolve, for an open system; the exact backend only. 0, or -1 refused */
+int qarm_rt_lindblad(const qarm_lindblad *l, double *out, double *bound, double *err, uint32_t *how, uint64_t *steps);
 
 /* QSEARCH: a phase oracle as tools/qarm_oracle.py writes it; Grover simulated on the search register's amplitudes */
 typedef struct qarm_oracle qarm_oracle;

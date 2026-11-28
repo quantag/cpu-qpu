@@ -744,7 +744,7 @@ int qarm_rt_caps(qarm_capabilities *caps)
     memset(caps, 0, sizeof *caps);
     caps->version = 1;
     caps->features = QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC
-                     | QARM_F_EVOLVE;   /* natively */
+                     | QARM_F_EVOLVE | QARM_F_LINDBLAD;   /* natively */
     caps->qubits = MAX_QUBITS;
     const char *name = cfg.backend == B_EXACT ? "exact" : cfg.backend == B_SIMULATOR ? "simulator" : "ibm";
     if (cfg.backend == B_IBM) {
@@ -791,6 +791,7 @@ int qarm_rt_vsample(qarm_rt *r, const double *theta, int shots, uint64_t *sample
  * product formula as one ansatz table of r steps with theta[0] = t / r, so that every time is one QEXPECTN batch
  * (one job on a QPU); the observable's measurement bases as for QEXPECT */
 #define EVOLVE_MAX_OPS 1000000
+#define EVOLVE_MEASURED_SEQUENCES 16             /* qDRIFT's circuits on a measured backend when shots = 0 */
 static const char *method_name(uint32_t m)
 {
     return m == QARM_EV_EXACT ? "exact (Taylor series)" : m == QARM_EV_PRODUCT ? "product formula" : "qDRIFT";
@@ -805,7 +806,6 @@ int qarm_rt_evolve(const qarm_evolution *e, double *out, double *bound, double *
     int exact = cfg.backend == B_EXACT;
     qarm_ev_plan_t p;
     if (qarm_ev_plan(e, exact, exact ? 0 : 1e300, &p) < 0) { qarm_note("QEVOLVE refused: %s", p.why); return -1; }
-    if (!exact && p.method == QARM_EV_QDRIFT) { qarm_note("QEVOLVE refused: qDRIFT runs on the exact backend"); return -1; }
     double se = 0;
     int rc;
     uint32_t k = e->k;
@@ -819,6 +819,41 @@ int qarm_rt_evolve(const qarm_evolution *e, double *out, double *bound, double *
         rc = qarm_sv_evolve(&s, e, &p, out, &se) < 0 ? -1 : 0;
         free(buf);
         if (rc < 0) { qarm_note("QEVOLVE refused: no memory"); return -1; }
+    } else if (p.method == QARM_EV_QDRIFT) {
+        /* R random sequences, each one circuit with theta[0] = t / N for every time: one QEXPECTN batch each. The
+         * mean over the sequences estimates the qDRIFT channel's <O>; their spread, with the shot noise in it,
+         * gives the standard error */
+        uint32_t R = e->shots ? e->shots : EVOLVE_MEASURED_SEQUENCES;
+        if (p.steps > EVOLVE_MAX_OPS || R > 1000) {
+            qarm_note("QEVOLVE refused: qDRIFT with %llu samples and %u sequences: more than %d operations or 1000 circuits",
+                      (unsigned long long)p.steps, R, EVOLVE_MAX_OPS);
+            return -1;
+        }
+        const char *seed = getenv("QCPU_SEED");
+        uint64_t st = seed ? strtoull(seed, NULL, 10) : (uint64_t)(qarm_now() * 1e6);
+        qarm_op *ops = malloc(sizeof *ops * (p.steps + 1));
+        double *th = malloc(sizeof *th * k), *errs = malloc(sizeof *errs * k), *v = malloc(sizeof *v * k),
+               *sum = calloc(k, sizeof *sum), *sum2 = calloc(k, sizeof *sum2);
+        rc = ops && th && errs && v && sum && sum2 ? 1 : -1;
+        for (uint32_t i = 0; rc > 0 && i < k; i++) th[i] = e->t[i] / (double)p.steps;   /* read before out is written */
+        for (uint32_t q = 0; rc > 0 && q < R; q++) {
+            long n = qarm_ev_qdrift_table(e->h, p.steps, &st, ops, (uint32_t)p.steps + 1);
+            qarm_ansatz a = {e->h->qubits, 1, (uint32_t)(n > 0 ? n : 0), 0, e->init, ops};
+            qarm_rt *r = NULL;
+            if (n < 0 || qarm_rt_load(e->o, &a, &r) < 0 || qarm_rt_expect_n(r, th, (int)k, 0, v, errs) <= 0) rc = -1;
+            for (uint32_t i = 0; rc > 0 && i < k; i++) { sum[i] += v[i]; sum2[i] += v[i] * v[i]; if (R == 1 && errs[i] > se) se = errs[i]; }
+            qarm_rt_free(r);
+        }
+        for (uint32_t i = 0; rc > 0 && i < k; i++) {
+            out[i] = sum[i] / R;
+            if (R > 1) {
+                double var = (sum2[i] - sum[i] * sum[i] / R) / (R - 1), s1 = var > 0 ? sqrt(var / R) : 0;
+                if (s1 > se) se = s1;
+            }
+        }
+        free(ops); free(th); free(errs); free(v); free(sum); free(sum2);
+        if (rc < 0) { qarm_note("QEVOLVE refused: the backend did not run the evolution"); return -1; }
+        p.sequences = R;
     } else {
         if ((double)p.steps * p.ops > EVOLVE_MAX_OPS) {
             qarm_note("QEVOLVE refused: %llu steps of %.0f rotations: deeper than %d operations",
@@ -849,9 +884,48 @@ int qarm_rt_evolve(const qarm_evolution *e, double *out, double *bound, double *
               k, k == 1 ? "" : "s", method_name(p.method), ord, (unsigned long long)p.steps,
               p.method == QARM_EV_EXACT ? "segments" : p.method == QARM_EV_PRODUCT ? "steps" : "samples per sequence",
               p.bound, exact ? "" : " (on a measured backend, plus shot noise)");
+    if (p.method == QARM_EV_QDRIFT)
+        qarm_note("QEVOLVE: qDRIFT's %u random sequences%s; standard error %.3g", p.sequences,
+                  exact ? "" : ", one circuit each, every time in its batch", se);
     *bound = p.bound;
     *err = se;
     *how = p.method | p.order << 8;
     *steps = p.steps;
     return rc;
+}
+
+/* ---------------------------------------------------------------- QLINDBLAD (docs/qarm_isa.md 6.7)
+ * on the exact backend: the density matrix (exact, or a product formula) up to 10 qubits, trajectories above */
+int qarm_rt_lindblad(const qarm_lindblad *l, double *out, double *bound, double *err, uint32_t *how, uint64_t *steps)
+{
+    config();
+    const char *why = qarm_lb_check(l);
+    if (why) { qarm_note("QLINDBLAD refused: %s", why); return -1; }
+    if (l->e.h->qubits > MAX_QUBITS) { qarm_note("QLINDBLAD refused: %u qubits, at most %d", l->e.h->qubits, MAX_QUBITS); return -1; }
+    qarm_lb_plan_t p;
+    if (qarm_lb_plan(l, cfg.backend == B_EXACT, 0, &p) < 0) { qarm_note("QLINDBLAD refused: %s", p.why); return -1; }
+    const char *seed = getenv("QCPU_SEED");
+    p.seed = seed ? strtoull(seed, NULL, 10) : (uint64_t)(qarm_now() * 1e6);
+    qarm_dm dm;
+    qarm_sv s;
+    double *mem = NULL, se = 0;
+    if (qarm_lb_alloc(l, &p, &dm, &s, &mem) < 0 || qarm_lb_run(&dm, &s, l, &p, out, &se) < 0) {
+        free(mem);
+        qarm_note("QLINDBLAD refused: no memory for %u qubits", l->e.h->qubits);
+        return -1;
+    }
+    free(mem);
+    char ord[48] = "";
+    if (p.method == QARM_EV_PRODUCT)
+        snprintf(ord, sizeof ord, " %s, %llu steps", p.order == 1 ? "Lie-Trotter" : "Strang", (unsigned long long)p.steps);
+    qarm_note("QLINDBLAD: %u qubits, %u terms, %u jump operators, %u time%s: %s%s%s; error bound %.3g", l->e.h->qubits,
+              l->e.h->terms, l->jumps->terms, l->e.k, l->e.k == 1 ? "" : "s",
+              p.method == QARM_EV_EXACT ? "exact (the density matrix)" : p.dm ? "on the density matrix," : "by trajectories,", ord,
+              p.dm ? "" : "", p.bound);
+    if (!p.dm) qarm_note("QLINDBLAD: %u trajectories; standard error %.3g", p.trajectories, se);
+    *bound = p.bound;
+    *err = se;
+    *how = p.method | p.order << 8;
+    *steps = p.steps;
+    return 0;
 }

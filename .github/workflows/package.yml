@@ -70,7 +70,7 @@ jobs:
           docker run --rm qarm:test qarm-run --info
           for a in aarch64 x86-64; do
             docker run --rm qarm:test sh -c "qarm-cc --$a /opt/qarm/share/qarm/conformance/qarm_conformance.c -o /tmp/c && qarm-run -q /tmp/c" | tee out.txt
-            grep -q "16 passed, 0 failed, 0 skipped" out.txt
+            grep -q "17 passed, 0 failed, 0 skipped" out.txt
           done
           docker run --rm qarm:test sh -c "qarm-cc --auto /opt/qarm/share/qarm/examples/auto.c -o /tmp/a && qarm-run /tmp/a" > auto.txt 2>&1 || { cat auto.txt; exit 1; }
           cat auto.txt

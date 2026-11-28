@@ -68,8 +68,8 @@ static char why[200];
 
 /* 8. Profiles: each test belongs to one; a profile passes when all its tests pass, and is not claimed when all
  * are skipped */
-enum { P_CORE, P_ORACLE, P_VARIATIONAL, P_CIRCUIT, P_ASYNC, P_DYNAMICS, NPROFILES };
-static const char *profile_name[NPROFILES] = {"Core", "Oracle", "Variational", "Circuit", "Async", "Dynamics"};
+enum { P_CORE, P_ORACLE, P_VARIATIONAL, P_CIRCUIT, P_ASYNC, P_DYNAMICS, P_OPEN, NPROFILES };
+static const char *profile_name[NPROFILES] = {"Core", "Oracle", "Variational", "Circuit", "Async", "Dynamics", "Open"};
 static int prof_pass[NPROFILES], prof_fail[NPROFILES], prof_skip[NPROFILES], current = P_CORE;
 
 static void result(const char *name, int ok)
@@ -129,7 +129,7 @@ static int t_qavail(void)
     PRESERVED();
     features = (uint32_t)r.x[1];
     REQUIRE(features != 0, "W1 = 0: no features");
-    REQUIRE((features >> 15) == 0, "W1 = %#x: bits above QARM_F_EVOLVE are reserved", features);
+    REQUIRE((features >> 16) == 0, "W1 = %#x: bits above QARM_F_LINDBLAD are reserved", features);
     return 1;
 }
 
@@ -612,6 +612,153 @@ static int t_qevolve(void)
     return 1;
 }
 
+/* ---------------------------------------------------------------- QLINDBLAD (1.2) */
+/* the reference: rho(t) on at most 2 qubits by small Taylor steps of the Lindblad generator, dense 4x4 matrices in
+ * complex doubles, independent of any runtime */
+#define RN 4
+typedef struct { double r[RN][RN], i[RN][RN]; } cm;
+static void cm_pauli(cm *m, const qarm_pauli *p)             /* P[u][b] = i^k s(b) when b = u ^ x */
+{
+    int k = __builtin_popcountll(p->x & p->z) & 3;
+    memset(m, 0, sizeof *m);
+    for (int u = 0; u < RN; u++) {
+        int b = u ^ (int)p->x;
+        double s = __builtin_parityll((uint64_t)b & p->z) ? -1 : 1;
+        m->r[u][b] = s * (k == 0 ? 1 : k == 2 ? -1 : 0);
+        m->i[u][b] = s * (k == 1 ? 1 : k == 3 ? -1 : 0);
+    }
+}
+static void cm_mul(const cm *a, const cm *b, cm *c)
+{
+    for (int u = 0; u < RN; u++)
+        for (int v = 0; v < RN; v++) {
+            double r = 0, i = 0;
+            for (int w = 0; w < RN; w++) { r += a->r[u][w] * b->r[w][v] - a->i[u][w] * b->i[w][v]; i += a->r[u][w] * b->i[w][v] + a->i[u][w] * b->r[w][v]; }
+            c->r[u][v] = r; c->i[u][v] = i;
+        }
+}
+static void lb_gen(const qarm_hamiltonian *h, const qarm_hamiltonian *j, const cm *rho, cm *out)
+{
+    cm p, a, b;
+    memset(out, 0, sizeof *out);
+    for (uint32_t q = 0; q < h->terms; q++) {                   /* -i c (P rho - rho P) */
+        cm_pauli(&p, &h->t[q]); cm_mul(&p, rho, &a); cm_mul(rho, &p, &b);
+        for (int u = 0; u < RN; u++) for (int v = 0; v < RN; v++) {
+            out->r[u][v] += h->t[q].c * (a.i[u][v] - b.i[u][v]);
+            out->i[u][v] -= h->t[q].c * (a.r[u][v] - b.r[u][v]);
+        }
+    }
+    for (uint32_t q = 0; q < j->terms; q++) {                   /* gamma (P rho P - rho) */
+        cm_pauli(&p, &j->t[q]); cm_mul(&p, rho, &a); cm_mul(&a, &p, &b);
+        for (int u = 0; u < RN; u++) for (int v = 0; v < RN; v++) {
+            out->r[u][v] += j->t[q].c * (b.r[u][v] - rho->r[u][v]);
+            out->i[u][v] += j->t[q].c * (b.i[u][v] - rho->i[u][v]);
+        }
+    }
+}
+static double lb_ref(const qarm_hamiltonian *h, const qarm_hamiltonian *j, const qarm_hamiltonian *o, int init, double t)
+{
+    cm rho, term, acc, g, p, a;
+    memset(&rho, 0, sizeof rho);
+    rho.r[init][init] = 1;
+    int steps = 2000;
+    double dt = t / steps, v = 0;
+    for (int s = 0; s < steps; s++) {
+        term = rho; acc = rho;
+        for (int n = 1; n <= 16; n++) {
+            lb_gen(h, j, &term, &g);
+            for (int u = 0; u < RN; u++) for (int w = 0; w < RN; w++) {
+                term.r[u][w] = dt / n * g.r[u][w]; term.i[u][w] = dt / n * g.i[u][w];
+                acc.r[u][w] += term.r[u][w]; acc.i[u][w] += term.i[u][w];
+            }
+        }
+        rho = acc;
+    }
+    for (uint32_t q = 0; q < o->terms; q++) {
+        cm_pauli(&p, &o->t[q]); cm_mul(&p, &rho, &a);
+        for (int u = 0; u < RN; u++) v += o->t[q].c * a.r[u][u];
+    }
+    for (int u = 0; u < RN; u++) v += o->constant * rho.r[u][u];
+    return v;
+}
+
+static int lindblad(qarm_lindblad *l, double *ref, regs *out)
+{
+    double *v = guarded(8 * l->e.k);
+    regs r = {{0, (uint64_t)(uintptr_t)l, (uint64_t)(uintptr_t)v}, {0}};
+    CLEAN();
+    PACKET(0x02280000, &r);
+    PRESERVED();
+    *out = r;
+    if (r.x[0] == 2) return -1;
+    REQUIRE(r.x[0] == 1, "W0 = %llu", (unsigned long long)r.x[0]);
+    REQUIRE(guards_ok(8 * l->e.k), "wrote outside the k values");
+    REQUIRE(r.d[0] >= 0 && r.d[1] >= 0, "D0 = %g, D1 = %g", r.d[0], r.d[1]);
+    uint32_t m = (uint32_t)r.x[3] & 0xff, ord = (uint32_t)r.x[3] >> 8 & 0xff;
+    REQUIRE((m == 1 && ord == 0) || (m == 2 && (ord == 1 || ord == 2)), "W3 = %#llx", (unsigned long long)r.x[3]);
+    for (uint32_t i = 0; i < l->e.k; i++)
+        REQUIRE(fabs(v[i] - ref[i]) <= r.d[0] + 5 * r.d[1] + 1e-8, "t = %g: %.9g, exactly %.9g; bound %g, error %g",
+                l->e.t[i], v[i], ref[i], r.d[0], r.d[1]);
+    return 1;
+}
+
+static int t_qlindblad(void)
+{
+    if (!have(QARM_F_LINDBLAD, "QLINDBLAD")) return -1;
+    static const qarm_pauli x1[1] = {{1, 0, 1.0}}, z1[1] = {{0, 1, 1.0}}, zr[1] = {{0, 1, 0.3}};
+    static const qarm_hamiltonian hx = {1, 1, 0, x1}, oz = {1, 1, 0, z1}, jz = {1, 1, 0, zr};
+    static const double t1[5] = {0, 0.4, 1.0, 1.7, 3.0}, t2[3] = {0.5, 1.2, 2.0};
+    double ref1[5], ref2[3];
+    regs r;
+    /* H = X, dephasing Z at 0.3: <Z(t)> = e^{-0.3t} (cos wt + 0.3/w sin wt), w = sqrt(4 - 0.09) */
+    double w = sqrt(4 - 0.09);
+    for (int i = 0; i < 5; i++) ref1[i] = exp(-0.3 * t1[i]) * (cos(w * t1[i]) + 0.3 / w * sin(w * t1[i]));
+    qarm_lindblad a = {{&hx, &oz, t1, 5, QARM_EV_AUTO, 0, 0, 0, 1e-4, 0, 0}, &jz};
+    int s = lindblad(&a, ref1, &r);
+    if (s <= 0) { if (s < 0) snprintf(why, sizeof why, "the runtime's choice: refused"); return 0; }
+    REQUIRE(r.d[0] <= 1e-4, "the runtime's choice: D0 = %g, eps 1e-4", r.d[0]);
+    /* two qubits: an Ising pair with depolarizing noise on qubit 0 and dephasing on qubit 1 */
+    static const qarm_pauli it[3] = {{0, 3, 0.7}, {1, 0, 0.5}, {2, 0, 0.4}}, mt[2] = {{0, 1, 1.0}, {2, 2, 0.5}},
+                            jt[4] = {{1, 0, 0.1}, {1, 1, 0.1}, {0, 1, 0.1}, {0, 2, 0.25}};
+    static const qarm_hamiltonian ih = {2, 3, 0.2, it}, mh = {2, 2, 0.3, mt}, jh = {2, 4, 0, jt};
+    for (int i = 0; i < 3; i++) ref2[i] = lb_ref(&ih, &jh, &mh, 1, t2[i]);
+    qarm_lindblad b = {{&ih, &mh, t2, 3, QARM_EV_PRODUCT, 0, 0, 1, 1e-2, 0, 0}, &jh};
+    if ((s = lindblad(&b, ref2, &r)) <= 0) { if (s < 0) snprintf(why, sizeof why, "a product formula, eps 1e-2: refused"); return 0; }
+    REQUIRE(r.d[0] <= 1e-2 && (r.x[3] & 0xff) == 2, "a product formula: D0 = %g, W3 = %#llx", r.d[0], (unsigned long long)r.x[3]);
+    qarm_lindblad c = {{&ih, &mh, t2, 3, QARM_EV_PRODUCT, 1, 0, 1, 0, 5, 0}, &jh};
+    if ((s = lindblad(&c, ref2, &r)) <= 0) { if (s < 0) snprintf(why, sizeof why, "Lie-Trotter, 5 steps: refused"); return 0; }
+    REQUIRE(r.x[3] == (2 | 1 << 8) && r.x[4] == 5, "Lie-Trotter, 5 steps: W3 = %#llx, X4 = %llu", (unsigned long long)r.x[3],
+            (unsigned long long)r.x[4]);
+    qarm_lindblad d = {{&ih, &mh, t2, 3, QARM_EV_EXACT, 0, 0, 1, 0, 0, 0}, &jh};
+    if (!lindblad(&d, ref2, &r)) return 0;                     /* exact: optional, right when done */
+    /* what MUST be refused */
+    static const qarm_pauli neg[1] = {{0, 1, -0.1}}, nanr[1] = {{0, 1, NAN}};
+    static const qarm_hamiltonian jneg = {1, 1, 0, neg}, jnan = {1, 1, 0, nanr}, jconst = {1, 1, 0.5, zr}, j2 = {2, 1, 0, zr};
+    static const double tneg[1] = {-1};
+    struct { qarm_lindblad l; const char *what; } bad[] = {
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 0}, &jneg}, "a negative rate"},
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 0}, &jnan}, "a NaN rate"},
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 0}, &jconst}, "a constant in the jump operators"},
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 0}, &j2}, "jump operators on 2 qubits, H on 1"},
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 0}, 0}, "no jump operators"},
+        {{{&hx, &oz, t1, 1, QARM_EV_PRODUCT, 4, 0, 0, 0, 0, 0}, &jz}, "order 4"},
+        {{{&hx, &oz, t1, 1, QARM_EV_QDRIFT, 0, 0, 0, 0, 0, 0}, &jz}, "qDRIFT"},
+        {{{&hx, &oz, tneg, 1, 0, 0, 0, 0, 0, 0, 0}, &jz}, "a negative time"},
+        {{{&hx, &oz, t1, 0, 0, 0, 0, 0, 0, 0, 0}, &jz}, "k = 0"},
+        {{{&hx, &oz, t1, 1, 0, 0, 0, 0, 0, 0, 1}, &jz}, "reserved = 1"},
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        unsigned char *o = guarded(8);
+        regs rb = {{0, (uint64_t)(uintptr_t)&bad[i].l, (uint64_t)(uintptr_t)o}, {0}};
+        CLEAN();
+        PACKET(0x02280000, &rb);
+        PRESERVED();
+        REQUIRE(rb.x[0] == 2, "%s: W0 = %llu, must be 2", bad[i].what, (unsigned long long)rb.x[0]);
+        for (int q = 0; q < 8; q++) REQUIRE(o[q] == 0xA5 && guards_ok(8), "%s: refused, but the output was written", bad[i].what);
+    }
+    return 1;
+}
+
 int main(void)
 {
     printf("Q-ARM ISA %d.%d conformance (docs/qarm_isa.md, section 9)\n", QARM_ISA_VERSION_MAJOR,
@@ -642,6 +789,8 @@ int main(void)
     result("QSUBMIT QPOLL QWAIT", t_async());
     current = P_DYNAMICS;
     result("QEVOLVE", t_qevolve());
+    current = P_OPEN;
+    result("QLINDBLAD", t_qlindblad());
     printf("profiles:");
     for (int p = 0; p < NPROFILES; p++)
         printf(" %s %s%s", profile_name[p],
