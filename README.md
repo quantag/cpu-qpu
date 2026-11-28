@@ -867,8 +867,11 @@ $ python3 qarm_exec.py --qpu tiny_search               # config.json's backend, 
 ```
 
 A QPU is asynchronous, so `QSEARCH` sends one job with all of Grover's iteration counts and waits for it.
-Every answer is still checked by running the program's own function, and an oracle larger than the device
-is refused before anything is submitted ([`docs/qarm_v2.md`](docs/qarm_v2.md#5-on-a-real-qpu)).
+Every answer is still checked by running the program's own function (f(x) = 1), and an oracle larger
+than the device is refused before anything is submitted. A search that finds nothing reports "none found
+within the search budget": a solution may still exist. What each instruction's check establishes, and what
+remains probabilistic (a minimum's optimality, a period or shift probed on four inputs), is in
+[docs/qarm_v2.md](docs/qarm_v2.md#what-the-checks-establish) ([`docs/qarm_v2.md`](docs/qarm_v2.md#5-on-a-real-qpu)).
 
 ### VQE: the molecule's energy from a C optimizer
 

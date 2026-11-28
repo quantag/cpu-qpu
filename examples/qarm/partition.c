@@ -2,8 +2,9 @@
 // Copyright 2026 Quantag IT Solutions GmbH
 //
 // Number partitioning, an NP-hard problem (the classic QUBO behind many QAOA demos), as ordinary C: split eight
-// weights into two groups with sums as equal as possible. QMIN finds the best split, QCOUNT how many splits are
-// nearly balanced; the quantum coprocessor builds both oracles from these functions' machine code
+// weights into two groups with sums as equal as possible. QMIN finds a split of least imbalance (the library
+// checks the reported difference; that no split is better holds with high probability, not with certainty: see
+// docs/qarm_v2.md, "What the checks establish"), QCOUNT how many splits are nearly balanced; the quantum coprocessor builds both oracles from these functions' machine code
 // (docs/qarm_v2.md, section 3). On a plain CPU every split is tried in turn.
 //
 //   clang -O1 -iquote include examples/qarm/partition.c -o partition
@@ -34,7 +35,7 @@ int main(void)
     qarm_min(imbalance, 8, &mask, &d);
     printf("weights 13 7 9 4 11 6 3 8 (sum 61), %s\n",
            f & QARM_F_MIN ? "QMIN on the quantum coprocessor (Q-ARM)" : "every split tried on this CPU");
-    printf("best split: {");
+    printf(f & QARM_F_MIN ? "best split found (the least difference with high probability): {" : "best split: {");
     for (int i = 0, first = 1; i < 8; i++)
         if (mask >> i & 1) { printf(first ? "%d" : " %d", weight[i]); first = 0; }
     printf("} vs {");

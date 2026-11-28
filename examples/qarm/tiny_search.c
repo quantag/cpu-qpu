@@ -22,6 +22,6 @@ int main(void)
     if (r)
         printf("%s: x = %d\n", qarm_features() & QARM_F_SEARCH ? "Q-ARM QSEARCH" : "classical search", x);
     else
-        printf("none\n");
+        printf(qarm_features() & QARM_F_SEARCH ? "none found within the search budget\n" : "none\n");
     return r ? 0 : 1;
 }

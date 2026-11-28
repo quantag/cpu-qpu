@@ -582,12 +582,28 @@ static int t_qevolve(void)
         {{&ising_h, 0, t2, 1, 0, 0, 0, 0, 0, 0, 0}, "no observable"},
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
-        regs rb = {{0, (uint64_t)(uintptr_t)&bad[i].e, (uint64_t)(uintptr_t)guarded(8)}, {0}};
+        unsigned char *out = guarded(8);
+        regs rb = {{0, (uint64_t)(uintptr_t)&bad[i].e, (uint64_t)(uintptr_t)out}, {0}};
         CLEAN();
         PACKET(0x02270000, &rb);
         PRESERVED();
         REQUIRE(rb.x[0] == 2, "%s: W0 = %llu, must be 2", bad[i].what, (unsigned long long)rb.x[0]);
+        for (int j = 0; j < 8; j++) REQUIRE(out[j] == 0xA5 && guards_ok(8), "%s: refused, but the output was written", bad[i].what);
     }
+    /* far more work than a runtime can do (qDRIFT for t = 400 at eps 1e-3: about 10^9 samples per sequence):
+     * refused, the output untouched; or done, within eps */
+    static const double t400[1] = {400};
+    static const qarm_pauli x_t[1] = {{1, 0, 1.0}};
+    static const qarm_hamiltonian x1_h = {1, 1, 0, x_t};
+    qarm_evolution big = {&x1_h, &z1_h, t400, 1, QARM_EV_QDRIFT, 0, 0, 0, 1e-3, 0, 0};
+    unsigned char *bo = guarded(8);
+    regs rg = {{0, (uint64_t)(uintptr_t)&big, (uint64_t)(uintptr_t)bo}, {0}};
+    CLEAN();
+    PACKET(0x02270000, &rg);
+    PRESERVED();
+    REQUIRE(rg.x[0] == 2 || (rg.x[0] == 1 && rg.d[0] <= 1e-3), "qDRIFT, t = 400: W0 = %llu, D0 = %g",
+            (unsigned long long)rg.x[0], rg.d[0]);
+    for (int j = 0; rg.x[0] == 2 && j < 8; j++) REQUIRE(bo[j] == 0xA5 && guards_ok(8), "qDRIFT, t = 400: refused, but the output was written");
     /* an accuracy no product formula reaches: refused, never a weaker answer */
     qarm_evolution hard = {&ising_h, &mag_h, t2, 4, QARM_EV_PRODUCT, 1, 0, 1, 1e-300, 0, 0};
     s = evolve(&hard, ref2, &r, QARM_EV_PRODUCT);

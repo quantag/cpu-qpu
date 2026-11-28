@@ -3,7 +3,8 @@
  *
  * tests/test_qarm_evolve.py's driver: a qarm_evolution from stdin, planned and run by include/qarm_sv.h on this
  * CPU. Input: n, H's terms (count, then x z c each, then the constant), O's the same, init, k, the k times, method,
- * order, steps, eps, shots, exact_ok. Output: "plan method order steps bound" or "refused <reason>", then
+ * order, steps, eps, shots, exact_ok, and optionally plan_only (1: the plan, no run). Output: "plan method order
+ * steps bound" or "refused <reason>", then
  * "se <value>" and one value per time. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +34,9 @@ int main(void)
     if (scanf("%u", &n) != 1 || !read_h(&h, n) || !read_h(&o, n) || scanf("%llu %u", &init, &k) != 2) return 2;
     double *t = calloc(k + 1, sizeof *t);
     for (unsigned i = 0; i < k; i++) if (scanf("%lf", &t[i]) != 1) return 2;
+    int plan_only = 0;
     if (scanf("%u %u %u %lf %u %d", &method, &order, &steps, &eps, &shots, &exact_ok) != 6) return 2;
+    if (scanf("%d", &plan_only) != 1) plan_only = 0;
     qarm_evolution e = {&h, &o, t, k, method, order, shots, init, eps, steps, 0};
     const char *why = qarm_ev_check(&e);
     if (why) { printf("refused %s\n", why); return 0; }
@@ -41,6 +44,7 @@ int main(void)
     if (qarm_ev_plan(&e, exact_ok, 0, &p) < 0) { printf("refused %s\n", p.why); return 0; }
     p.seed = 12345;
     printf("plan %u %u %llu %.17g\n", p.method, p.order, (unsigned long long)p.steps, p.bound);
+    if (plan_only) return 0;
     long N = 1L << n;
     double *buf = malloc(sizeof *buf * 6 * (size_t)N), se;
     qarm_sv s = {(int)n, buf, buf + N, buf + 2 * N, buf + 3 * N, buf + 4 * N, buf + 5 * N};

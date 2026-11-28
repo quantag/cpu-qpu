@@ -9,8 +9,10 @@ x86_machine.py implements the same parse with gates. The kind table lists exact 
 opcode byte and the byte that follows it; a byte sequence that matches no pattern, or that fails one
 of the validity rules in decode(), traps in the circuit.
 
-Subset: 8-, 32- and 64-bit integer instructions as compilers emit them for C code. Not implemented:
-16-bit operand size and all other prefixes, byte or word memory operands, ADC/SBB, rotates, one-operand
+Subset: 8-, 32- and 64-bit integer instructions as compilers emit them for C code. Prefixes: only the
+alignment NOPs that assemblers pad code with, up to 6 operand-size bytes 66 and one CS segment byte 2E before
+NOP (90) or the multi-byte NOP (0F 1F /0), e.g. GCC 14's 66 66 2E 0F 1F 84 00 00 00 00 00. Not implemented:
+the 16-bit operand size and every other prefix on any other instruction, byte or word memory operands, ADC/SBB, rotates, one-operand
 MUL/IMUL, string instructions, x87/SSE/AVX, system instructions.
 
 Flags: ZF, SF, CF, OF (in this order). The machine does not model the flags that x86 leaves undefined
@@ -23,6 +25,8 @@ REG = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i 
 RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI = range(8)
 HLT = 0xF4
 WINDOW = 11                    # bytes the circuit fetches: enough for the low 16 bits of every field
+MAX66 = 6                      # operand-size prefixes of an alignment NOP (then an optional 2E): at most 7 bytes
+PREFIXES = (0x66, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65, 0xF0)
 ZF, SF, CF, OF = range(4)
 
 # kind -> patterns (escape 0F present, mask, value, required REX.W or None); the 16-bit key is
@@ -89,6 +93,11 @@ def decode(b):
     """Parse one instruction from the byte sequence b (at least 15 bytes; shorter input is zero-padded).
     Returns a dict; d['ok'] is False for anything the machine does not implement (d['why'] says why)."""
     b = list(b[:15]) + [0] * 24
+    pre = 0                                                  # alignment-NOP prefixes: 66 ... 66 [2E]
+    while pre < MAX66 and b[pre] == 0x66:
+        pre += 1
+    pre += b[pre] == 0x2E
+    b = b[pre:] + [0] * pre
     i = hasrex = rex = 0
     if b[0] & 0xF0 == 0x40:
         rex, hasrex, i = b[0] & 15, 1, 1
@@ -98,10 +107,13 @@ def decode(b):
     w, rr, rx, rb = rex >> 3 & 1, rex >> 2 & 1, rex >> 1 & 1, rex & 1
     key = op | r[0] << 8
     kind = next((n for n, ps in KINDS.items() if any(e == esc and key & m == v and (q is None or q == w) for e, m, v, q in ps)), None)
-    d = dict(kind=kind, ok=kind is not None, why="instruction not implemented", op=op, esc=esc, hasrex=hasrex, w=w, length=1)
+    d = dict(kind=kind, ok=kind is not None, why="instruction not implemented", op=op, esc=esc, hasrex=hasrex, w=w, length=1,
+             pre=pre)
+    if (pre and (kind not in ("nop", "nopm") or hasrex)) or (kind is None and b[0] in PREFIXES):
+        d.update(ok=False, why="prefix byte (16-bit operand size, REP, segment, LOCK) not implemented"
+                 + (" (alignment NOPs only)" if pre else ""))
+        return d
     if kind is None:
-        if b[0] in (0x66, 0x67, 0xF2, 0xF3, 0x2E, 0x3E, 0x26, 0x36, 0x64, 0x65, 0xF0):
-            d["why"] = "prefix byte (16-bit operand size, REP, segment, LOCK) not implemented"
         return d
     modrm = kind in MODRM
     s8 = (kind in S8_OP0 and not op & 1) or (kind == "alu_imm" and op == 0x80) or (kind == "mov_ri" and not op & 8)
@@ -123,7 +135,7 @@ def decode(b):
              scale=scale if sib else 0, index=index | rx << 3, base=(base if sib else rm) | rb << 3, dsz=dsz, disp=disp, imm=imm,
              opreg=op & 7 | rb << 3, riprel=bool(mem and mod == 0 and not sib and rm == 5),
              nobase=bool(mem and mod == 0 and sib and base == 5), noindex=not sib or (index | rx << 3) == 4,
-             digit=reg, cc=op & 15, length=hasrex + esc + 1 + int(modrm) + sib + dsz + isz)
+             digit=reg, cc=op & 15, length=pre + hasrex + esc + 1 + int(modrm) + sib + dsz + isz)
     d["port"] = d["base"] if modrm else d["opreg"]           # register selected by the "base" read port
     bad = None
     if s8 and modrm and mem:

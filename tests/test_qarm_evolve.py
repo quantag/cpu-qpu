@@ -7,7 +7,10 @@
      eps, qDRIFT within its bound plus 5 standard errors. With steps = 0 the bound meets eps. The commutator bounds
      at small t, where they are tightest.
   2. qarm_evolve.py (qarm_exec.py's) plans the same: method, order, steps, and the bound to 1e-9.
-  3. The refusals of section 5.7, and an eps no formula reaches: refused, never a weaker answer.
+  3. The refusals of section 5.7, and an eps no formula reaches: refused, never a weaker answer. Extreme requests
+     (times up to 1.7e308, eps from 1e-12 to 1e300, fixed steps up to 1e9, every method): both planners refuse or
+     plan the same, without an exception; qDRIFT for t = 400 at eps 1e-3 is refused for its work, and a feasible
+     qDRIFT request gets a finite bound within eps.
   4. examples/qarm/quench.c on this CPU (the library's classical path); under qarm_exec.py (arm64 compiler and
      Unicorn); under the QEMU plugin (QARM_QEMU as for test_qarm_qemu) on libqarm's exact backend, and on its
      simulator backend, where the product formula is one QEXPECTN batch.
@@ -49,15 +52,17 @@ class Driver:
     def __init__(self, exe):
         self.exe = exe
 
-    def __call__(self, n, H, O, init, ts, method, order=0, steps=0, eps=0.0, shots=0, exact_ok=1):
+    def __call__(self, n, H, O, init, ts, method, order=0, steps=0, eps=0.0, shots=0, exact_ok=1, plan_only=0):
         lines = [str(n)]
         for terms, c in (H, O):
             lines += [str(len(terms))] + [f"{x} {z} {cc!r}" for x, z, cc in terms] + [repr(c)]
-        lines += [f"{init} {len(ts)}", " ".join(map(repr, ts)), f"{method} {order} {steps} {eps!r} {shots} {exact_ok}"]
+        lines += [f"{init} {len(ts)}", " ".join(map(repr, ts)), f"{method} {order} {steps} {eps!r} {shots} {exact_ok} {plan_only}"]
         out = sh([self.exe], input="\n".join(lines) + "\n").stdout.split("\n")
         if out[0].startswith("refused"):
             return out[0][8:], None, None, None
         _, m, o, st, b = out[0].split()
+        if plan_only:
+            return (int(m), int(o), int(st), float(b)), None, [], None
         return (int(m), int(o), int(st), float(b)), float(out[1].split()[1]), [float(v) for v in out[2:2 + len(ts)]], None
 
 
@@ -151,8 +156,34 @@ def main():
             assert vals is None, (what, why)
             p = python_plan(*args)
             assert isinstance(p, str), (what, p)
+        # extreme requests: the same disposition from both planners, and no exception
+        two, z1 = ([(1, 0, 1.0), (0, 3, 2.0)], 0.0), ([(0, 1, 1.0)], 0.0)
+        extreme = 0
+        for m in range(4):
+            for t in (1e-3, 1.0, 400.0, 1e8, 1e150, 1e300, 1.7e308):
+                for eps in (0.0, 1e-3, 1e-12, 1e300):
+                    for st in (0, 1, 10 ** 9):
+                        for ok in (1, 0):
+                            plan, _, _, _ = run(2, two, z1, 0, [t, -t], m, 0, st, eps, 0, ok, 1)
+                            p = python_plan(2, two, z1, 0, [t, -t], m, 0, st, eps, 0, ok)
+                            if isinstance(plan, str):
+                                assert isinstance(p, str), (m, t, eps, st, ok, plan, p)
+                            else:
+                                assert not isinstance(p, str) and p[:3] == plan[:3], (m, t, eps, st, ok, plan, p)
+                                assert p[3] == plan[3] or abs(p[3] - plan[3]) <= 1e-9 * max(1.0, plan[3]), (plan, p)
+                            extreme += 1
+        x1 = ([(1, 0, 1.0)], 0.0)
+        why, _, _, _ = run(1, x1, z1, 0, [400.0], 3, 0, 0, 1e-3)
+        p = python_plan(1, x1, z1, 0, [400.0], 3, 0, 0, 1e-3)
+        assert isinstance(why, str) and "work" in why and isinstance(p, str) and "work" in p, (why, p)
+        plan, se, vals, _ = run(1, x1, z1, 0, [1.0], 3, 0, 0, 1e-2)
+        assert plan[0] == 3 and 0 < plan[3] <= 1e-2, plan
+        p = python_plan(1, x1, z1, 0, [1.0], 3, 0, 0, 1e-2)
+        assert p[:3] == plan[:3] and abs(p[3] - plan[3]) <= 1e-12, (p, plan)
         print(f"3) {len(bad)} tables refused, by both planners: bad masks, init, method, order, eps, a NaN time; an eps "
-              "no formula reaches in 10^12 steps; exact evolution where only measurements exist")
+              f"no formula reaches in 10^12 steps; exact evolution where only measurements exist. {extreme} extreme "
+              "requests: the same disposition from both, no exception; qDRIFT for t = 400 refused for its work, for "
+              f"t = 1 planned with {plan[2]} samples, bound {plan[3]:.4g} <= eps 1e-2")
 
         # 4. quench.c on every runtime here
         src = os.path.join(ROOT, "examples", "qarm", "quench.c")

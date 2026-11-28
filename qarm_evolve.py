@@ -160,8 +160,13 @@ def product_d(lam, comm, p, t, r):
         return 0.0
     d = 2 * r * tail(upsilon(p) * lam * t / r, p)
     if comm < math.inf and p in (1, 2):
-        d = min(d, (t * t / (2 * r) if p == 1 else t ** 3 / (r * r)) * comm * (1 + 1e-12))
+        d = min(d, (t * t / (2 * r) if p == 1 else t * t * t / (r * r)) * comm * (1 + 1e-12))
     return d
+
+
+def _exp(x):
+    """e^x, infinite instead of OverflowError: a bound that large only means more steps are needed"""
+    return math.exp(x) if x < 709 else math.inf
 
 
 def qdrift_d(lam, t, n):
@@ -169,18 +174,19 @@ def qdrift_d(lam, t, n):
     if lam == 0 or t == 0:
         return 0.0
     x = lam * t / n
-    return 4 * x * x * n * math.exp(2 * x) * (1 + 1e-12)
+    return 4 * x * x * n * _exp(2 * x) * (1 + 1e-12)
 
 
 def exact_d(lam, t):
     t = abs(t)
     if lam == 0 or t == 0:
         return 0.0, 0
-    m = math.ceil(lam * t / 2)
-    if m > MAX_STEPS:
+    if lam * t / 2 > MAX_STEPS:                       # also when it overflows to infinity
         return math.inf, int(MAX_STEPS)
+    m = math.ceil(lam * t / 2)
     tau = tail(lam * t / m, TAYLOR)
-    return math.expm1(m * math.log1p(tau)) * (1 + 1e-12), m
+    y = m * math.log1p(tau)
+    return (math.expm1(y) if y < 709 else math.inf) * (1 + 1e-12), m
 
 
 def least(bound, eps):

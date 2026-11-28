@@ -78,6 +78,28 @@ The operands are in fixed registers, so the packet itself has none:
 Each algorithm family is one instruction. Its input is an ordinary C function or table. Each has a
 classical path in `qarm.h`, a check of the answer where one exists, and a `QAVAIL` feature bit.
 
+### What the checks establish
+
+Before returning a quantum answer, `qarm.h` checks it by calling the program's own function. When the check
+fails, the library takes the classical path. A check establishes only what it tests. The rest of an answer
+rests on the runtime's guarantee (docs/qarm_isa.md 6.2), which holds with the probability stated there.
+
+| instruction | the library's check | established by the check | left to the runtime's guarantee | `W0 = 2`, the library returns 0 |
+|---|---|---|---|---|
+| `QSEARCH` | f(x) = 1 | x is a solution | — | none found **within the search budget** (about 4.5·√N oracle calls). A solution may still exist; with small probability one does |
+| `QMIN` | cost(x) = the reported cost | the cost is x's own | that no x costs less: probability ≥ 1/2 per Dürr–Høyer run | — |
+| `QCOLLISION` | x ≠ y, f(x) = f(y) | a collision | — | none found in three tries. Likely f is one-to-one, but a collision may exist |
+| `QPERIOD` | f(i) = f(i + r) for i = 0…3 | r agrees with f on four inputs | that r is a period on the whole domain, and the least | none found |
+| `QSIMON` | f(i) = f(i ⊕ s) for i = 0…3 | s agrees with f on four inputs | that f(x) = f(x ⊕ s) for every x (the reference runtimes verify every input) | no shift found |
+| `QBV` | f agrees with s·x ⊕ c at four inputs | s agrees with f there | that f has that form everywhere | — |
+| `QCOUNT`, `QAMPEST` | none | — | the error bound, with probability ≥ 8/π² | — |
+| `QEVOLVE` | none | — | the error bound, which is proven (6.6) | refused |
+
+On a plain CPU, each classical path is exhaustive. There, a 0 from `qarm_search`, `qarm_collision`,
+`qarm_period` or `qarm_simon` means that no answer exists, and `qarm_min` returns the true minimum. Under a
+runtime, the same 0 means only that none was found. Programs that need a definite "none" should say so or
+search classically themselves: `qarm_features()` tells which instructions the runtime executes.
+
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
 instructions.
 
@@ -116,8 +138,9 @@ in the same binary: every input in turn.
     unsigned.
   - From a random x, Grover searches (BBHT) look for an x cheaper than the best so far. This stops when
     a search fails, or after 22.5·√N + 1.4·log₂²N oracle calls.
-  - `qarm.h` checks the answer's cost by calling `cost`. That it is the least cannot be checked cheaply;
-    that is the search's job. The answer is right with high probability.
+  - `qarm.h` checks the answer's cost by calling `cost`: the returned cost is x's own. That it is the least
+    cannot be checked cheaply. It holds with probability at least 1/2 per Dürr–Høyer run (docs/qarm_isa.md
+    6.2), not with certainty.
   - On a QPU each search's oracle is "cost(x) < t", for a threshold t: the compute oracle, a comparator
     with a constant, and uncomputation. The runtimes simulate it today.
 - **`QCOUNT`** (Brassard–Høyer–Tapp 1998) takes a predicate and estimates its number of solutions M:
@@ -769,7 +792,9 @@ plugin API has `qemu_plugin_write_register`.
    sign, checking that each work qubit returns to 0. It then simulates Grover's search (BBHT, for an
    unknown number of answers) on the 2^bits amplitudes of the search register alone. So a 1120-qubit
    oracle costs no more than its 2^bits inputs.
-4. `qarm.h` checks every answer by calling `f` in the guest. A wrong answer leads to the classical search.
+4. `qarm.h` checks every answer by calling `f` in the guest: f(x) = 1. A wrong answer leads to the
+   classical search. "None found" (`W0 = 2`) is returned as 0 after the search budget, without a classical
+   search, so a solution may still exist.
 
 Oracles are cached per function. The helper is spawned with `posix_spawn`: a `fork` from a vCPU callback
 deadlocks on QEMU's RCU lock.

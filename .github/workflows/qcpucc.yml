@@ -41,6 +41,12 @@ jobs:
         run: python -m tests.test_qcpu_search
       - name: test_qarm_exec (Q-ARM v2)
         run: python -m tests.test_qarm_exec
+      - name: test_c_programs with GCC on x86-64 (13, and 14 with its prefixed alignment NOPs)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          sudo apt-get install -y -q gcc-14
+          python -m tests.test_c_programs gcc x86_64
+          python -m tests.test_c_programs gcc-14 x86_64
       - name: test_qarm_isa (the specification, qarm_isa.h and the implementations agree)
         run: python -m tests.test_qarm_isa
       - name: test_packaging (the scripts parse; more in the export job)

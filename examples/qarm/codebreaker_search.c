@@ -50,6 +50,7 @@ int main(void)
         printf("the secret code: %c%c%c%c\n", colours[peg(secret, 0)], colours[peg(secret, 1)],
                colours[peg(secret, 2)], colours[peg(secret, 3)]);
     else
-        printf("no code fits these answers\n");
+        printf(qarm_features() & QARM_F_SEARCH ? "no code found within the search budget (one may still fit)\n"
+                                               : "no code fits these answers\n");
     return 0;
 }

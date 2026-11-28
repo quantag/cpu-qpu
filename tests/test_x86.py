@@ -10,7 +10,9 @@
      same registers, flags, memory cells and next PC for a valid instruction; trap and no change for
      anything else. This covers encodings no assembler emits (redundant prefixes, both operand
      orders, every ModRM / SIB form) and the whole space of invalid ones.
-  3. Trap: a named list of unsupported instructions traps in the circuit and changes nothing.
+  3. Trap: a named list of unsupported instructions traps in the circuit and changes nothing; prefixes on
+     anything but an alignment NOP among them. Alignment NOPs (every length assemblers pad with, 1 to 15 bytes,
+     GCC 14's 66 66 2E 0F 1F 84 00 00 00 00 00 included): the PC advances by the length, nothing else changes.
   4. Superposition of a valid and an invalid instruction: the valid branch computes, the other traps.
      Superposition of two instructions of different lengths (2 and 5 bytes): each branch parses its
      own instruction, continues at its own address, and returns.
@@ -92,9 +94,17 @@ def decoder_table():
 
 # ------------------------------------------------------------------ 2. circuit == model, one cycle
 def random_instruction(r):
-    """15 bytes: usually a plausible instruction of a randomly chosen kind (not necessarily a valid one)."""
+    """15 bytes: usually a plausible instruction of a randomly chosen kind (not necessarily a valid one); sometimes
+    after alignment-NOP prefixes (66 ... 66, 2E), which only NOPs may carry."""
     if r.random() < 0.05:
         return [r.getrandbits(8) for _ in range(15)]
+    if r.random() < 0.15:
+        pre = [0x66] * r.randrange(x86.MAX66 + 2) + ([0x2E] if r.random() < 0.5 else [])
+        if r.random() < 0.6:
+            body = r.choice([[0x90], [0x0F, 0x1F, r.choice([0x00, 0x40, 0x44, 0x80, 0x84, 0xC0]), r.choice([0x00, 0x20])]])
+        else:
+            body = random_instruction(r)
+        return (pre + body + [r.getrandbits(8) for _ in range(15)])[:15]
     e, m, v, q = r.choice(x86.KINDS[r.choice(list(x86.KINDS))])
     key = (r.getrandbits(16) & ~m | v) if r.random() < 0.95 else r.getrandbits(16)
     b = []
@@ -164,7 +174,36 @@ BAD = {"adc eax, esi": "11f0", "sbb eax, esi": "19f0", "mul ecx (one operand)": 
        "bt eax, ecx": "0fa3c8", "bswap eax": "0fc8", "movzx eax, cx (16-bit source)": "0fb7c1", "mov eax, fs:[0]": "648b042500000000",
        "two REX prefixes": "484801f0", "test /1 (undefined)": "f7c800000000", "mov /1 (C7 /1, undefined)": "c7c800000000",
        "shl /6 (undefined alias)": "c1f003", "fld st(0)": "d9c0", "ud2": "0f0b", "all zero + invalid modrm: add [rax], al": "0000",
-       "enter": "c8100000", "ret imm16": "c20800", "jmp far": "ea", "loop": "e2fe", "address-size prefix": "678b07"}
+       "enter": "c8100000", "ret imm16": "c20800", "jmp far": "ea", "loop": "e2fe", "address-size prefix": "678b07",
+       "16-bit after NOP prefixes: 66 66 2e add ax, si": "66662e01f0", "REX after a NOP prefix": "66480f1f00",
+       "pause (F3 90)": "f390", "seven 66 before a NOP (more than MAX66)": "666666666666660f1f00",
+       "2E then 66 (wrong order)": "2e660f1f00"}
+
+# every alignment NOP that GNU as or LLVM pads code with
+NOPS = ["90", "6690", "0f1f00", "0f1f4000", "0f1f440000", "660f1f440000", "0f1f8000000000", "0f1f840000000000",
+        "660f1f840000000000", "662e0f1f840000000000", "66662e0f1f840000000000", "6666662e0f1f840000000000",
+        "666666662e0f1f840000000000", "66666666662e0f1f840000000000", "6666666666662e0f1f840000000000"]
+
+
+def alignment_nops():
+    """Each NOP, then HLT: the PC moves by the NOP's length, then halts; registers, flags and memory unchanged."""
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    m = QuantumX86(X86Config(W=8, SLOTS=32, STEPS=3, MEM=4), defer=True)
+    for hx in NOPS:
+        code = list(bytes.fromhex(hx))
+        d = x86.decode(code)
+        ins = next(md.disasm(bytes(code), 0, 1))
+        assert d["ok"] and d["length"] == len(code) == ins.size and "nop" in ins.mnemonic, (hx, d, ins.mnemonic, ins.size)
+        init = {k: 3 + 5 * k for k in range(16)}
+        out = m.run_fast(m.load_bits(code + [x86.HLT] + [0] * (31 - len(code)), init, [1, 2, 3, 4], nzcv=0b1010))
+        st = out["state"]
+        assert not out["trap"] and out["run"] == 0, hx                             # halted, not trapped
+        assert out["trace"][:2] == [0, len(code)], (hx, out["trace"])              # one NOP, its whole length
+        assert all(value(st, m.X[k]) == init[k] for k in m.X), hx
+        assert [value(st, c) for c in m.ram] == [1, 2, 3, 4], hx
+        assert [st[x] for x in m.nzcv] == [0, 1, 0, 1], hx
+    return len(NOPS)
 
 
 def traps():
@@ -453,6 +492,8 @@ if __name__ == "__main__":
     for W in widths:
         print(f"2) circuit == model, one cycle, W={W}: {20 * N} random byte strings {circuit_vs_model(W, 20 * N, seed + W)}")
     print(f"3) trap: {traps()} unsupported instructions trap in the circuit and change no register, flag, memory cell or PC")
+    print(f"3b) alignment NOPs: {alignment_nops()} encodings of 1 to 15 bytes (GCC 14's 11-byte one included) advance the PC by "
+          "their length and change nothing else")
     print(f"4) superposition of a valid and an invalid instruction: {superposed_valid_and_invalid()}")
     print(f"   superposition of a 2-byte and a 5-byte instruction: {superposed_lengths()}")
     total = 0

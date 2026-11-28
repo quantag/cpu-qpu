@@ -13,14 +13,18 @@
  *                               CPU. The QEMU plugin reports QARM_F_SEARCH when its oracle helper is there
  *   qarm_search(f, bits, &x)    an x in 0 .. 2^bits - 1 with f(x) == 1: Grover's search on the coprocessor (QSEARCH),
  *                               with f's oracle built from f's own machine code; on a plain CPU, every x in turn.
- *                               Returns 1 and stores x, or 0 if there is none. f returns 0 or 1, calls no other
- *                               function and writes no memory; bits <= 16. Every answer is checked by calling f.
+ *                               Returns 1 and stores x, checked by calling f: f(x) == 1. Returns 0 for none found:
+ *                               on a plain CPU every x was tried, so there is none; on the coprocessor the search
+ *                               stopped at its budget (about 4.5 sqrt(N) oracle calls), so one may still exist. f
+ *                               returns 0 or 1, calls no other function and writes no memory; bits <= 16.
  *   qarm_min(cost, bits, &x, &v)  QMIN: an x with the least cost(x) (signed), and v = cost(x): Durr-Hoyer, Grover
  *                               searches for a cheaper x, cost's oracle from its machine code; on a plain CPU every x
- *                               in turn. The answer's cost is checked by calling cost; that it is the least is not
- *                               (that is the search's job), so a quantum answer is right with high probability
+ *                               in turn. The answer's cost is checked by calling cost (v is x's own cost); that it
+ *                               is the least is not checked: on the coprocessor it holds with probability >= 1/2
+ *                               per Durr-Hoyer run, on a plain CPU always
  *   qarm_collision(f, bits, &x, &y)  QCOLLISION: x != y with f(x) = f(y): Brassard-Hoyer-Tapp, O(N^(1/3)) oracle
- *                               calls; checked by calling f; classically f's values sorted (up to 16 bits). 1, or 0
+ *                               calls; checked by calling f (a real collision); classically f's values sorted (up
+ *                               to 16 bits). 1, or 0: none found (on the coprocessor: in three tries; one may exist)
  *   qarm_run(&circuit, shots, samples)  QCIRC: any circuit as a table (qarm_gate: X Y Z H S SDG T TDG SX RX RY RZ
  *                               CX CZ SWAP CCX), every qubit measured at the end; samples[i] bit q = qubit q. 1: run
  *                               by the coprocessor (qarm_caps says whether it is hardware), 0: simulated here (up
@@ -31,10 +35,12 @@
  *   qarm_mean(g, bits, k, &err) QAMPEST: the mean of g(x) over all x, g(x) in 0 .. 2^k - 1: amplitude estimation;
  *                               err: its error bound (probability >= 8/pi^2), 0 when computed classically
  *   qarm_period(f, bits, &r)    QPERIOD: the least r > 0 with f(x + r) = f(x): Shor's period finding (quantum Fourier
- *                               transform, continued fractions); checked on f(0..3). 0 if none is found
- *   qarm_simon(f, bits, &s)     QSIMON: s != 0 with f(x) = f(x ^ s) for all x (Simon); checked on f(0..3). 0: none
+ *                               transform, continued fractions); checked on f(0..3) only, a probe: that r is a
+ *                               period everywhere, and the least, is the runtime's guarantee. 0: none found
+ *   qarm_simon(f, bits, &s)     QSIMON: s != 0 with f(x) = f(x ^ s) for all x (Simon); checked on f(0..3) only, a
+ *                               probe (all x: the runtime's guarantee). 0: no shift found
  *   qarm_bv(f, bits, &s)        QBV: s with f(x) = s.x mod 2 (+ a constant): one query (Bernstein-Vazirani); checked
- *                               on four inputs
+ *                               on four inputs only, a probe
  *   qarm_count(f, bits, &err)   QCOUNT: the number of x with f(x) = 1: quantum counting; err: its error bound, which
  *                               holds with probability >= 8/pi^2 (0 when
  *                               counted classically)
@@ -383,7 +389,7 @@ static inline int qarm_search(int (*f)(int), int bits, int *x)
     register long x3 __asm__(QARM_X3) = 0;
     __asm__ volatile(QARM_PACKET(0x02110000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1 && f((int)x3) == 1) { *x = (int)x3; return 1; }   /* every answer checked by f itself */
-    if (x0 == 2) return 0;
+    if (x0 == 2) return 0;                                  /* none found within the search budget */
     for (long v = 0; v < (1L << bits); v++)                 /* the classical path, also after a wrong answer */
         if (f((int)v)) { *x = (int)v; return 1; }
     return 0;
