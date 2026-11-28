@@ -1,7 +1,9 @@
 # Q-ARM v2: quantum instructions with a classical fallback, in one ARM binary
 
-> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.0),
-> with a conformance program in `tests/conformance`. This document is the reference implementation's.
+> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.0,
+> constants in `include/qarm_isa.h`), with a conformance program in `tests/conformance` and a guide to writing
+> a runtime in [`docs/qarm_runtime_guide.md`](qarm_runtime_guide.md). This document is the reference
+> implementation's.
 
 Status: *proof of concept*. Two instructions, a runtime with the exact simulator as the quantum
 coprocessor, tested on Linux (arm64, and x86 with qemu) and macOS on Apple Silicon. Not an official Arm

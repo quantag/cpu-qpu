@@ -1,13 +1,19 @@
 # The Q-ARM instruction set, version 1.0
 
-**Status:** draft for review, 2026-11-27. Quantag IT Solutions GmbH. The specification is under Apache-2.0,
-like the rest of this repository.
+**Status:** version 1.0, published 2026-11-28 (release `isa-v1.0` of github.com/quantag/cpu-qpu). Quantag
+IT Solutions GmbH. The specification is under Apache-2.0, like the rest of this repository.
 
-Q-ARM is a vendor-neutral way to put quantum work into ordinary ARM64 programs. A program compiled once
-runs everywhere:
+**With it:**
+- `include/qarm_isa.h`: the constants and layouts, normative and self-contained (C99);
+- `tests/conformance`: the conformance program;
+- `docs/qarm_runtime_guide.md`: a guide to writing a runtime, with `runtime/minimal`, a conforming runtime
+  of about 200 lines.
 
-- on any ARM64 CPU, where every quantum instruction is skipped and the program computes the answer
-  classically;
+Q-ARM is a vendor-neutral way to put quantum work into ordinary ARM64 and x86-64 programs. A program
+compiled once runs everywhere:
+
+- on any AArch64 or x86-64 CPU, where every quantum instruction is skipped and the program computes the
+  answer classically;
 - under a **Q-ARM runtime**, where the same instructions run on a quantum computer or a simulator.
 
 The program's own C functions and tables are the instructions' operands. No OpenQASM or other circuit
@@ -210,7 +216,7 @@ typedef struct { uint32_t qubits, gates; const qarm_gate *g; } qarm_circuit;    
 ### 5.5 Function operands (oracles)
 
 Several instructions take the address of a function of the program, `int f(int x)` (AAPCS64: x in
-`W0`, the result in `W0`). The runtime builds the quantum oracle from the function's **machine code**,
+`W0`, the result in `W0`; System V on x86-64: x in `EDI`, the result in `EAX`). The runtime builds the quantum oracle from the function's **machine code**,
 for x in 0 … 2^bits − 1. For the operand to be valid:
 
 - f MUST be a leaf function: no calls, no system calls.
@@ -270,8 +276,8 @@ All take `X1` = the address of f and `W2` = bits (1 ≤ bits ≤ 31).
 | 0x17 | `QAMPEST` | in: `W3` = k (value bits). `W0 = 1`, `D0` = μ̃, `D1` = ε | \|μ̃ − μ\| ≤ ε with probability ≥ 8/π², where μ = 2^−bits Σₓ f(x), f(x) ∈ [0, 2ᵏ) | — |
 | 0x18 | `QPERIOD` | `W0 = 1`, `W3` = r; `W0 = 2`: none | r > 0 is the least period: f(x + r) = f(x) wherever both are in the domain | f(i) = f(i + r), i = 0…3 |
 | 0x19 | `QSIMON` | `W0 = 1`, `W3` = s ≠ 0; `W0 = 2`: f is one-to-one | f(x) = f(x ⊕ s) for every x | f(i) = f(i ⊕ s), i = 0…3 |
-| 0x1B | `QCOLLISION` | `W0 = 1`, `W3` = x, `W4` = y; `W0 = 2`: none found | x ≠ y and f(x) = f(y). Brassard–Høyer–Tapp: O(N^1/3) oracle calls for a two-to-one f. `W0 = 2` after three tries, likely when f is one-to-one | x ≠ y, f(x) = f(y) |
 | 0x1A | `QBV` | `W0 = 1`, `W3` = s | f(x) = s·x ⊕ c (mod 2) for a constant c, if f has that form | f agrees at four probe inputs |
+| 0x1B | `QCOLLISION` | `W0 = 1`, `W3` = x, `W4` = y; `W0 = 2`: none found | x ≠ y and f(x) = f(y). Brassard–Høyer–Tapp: O(N^1/3) oracle calls for a two-to-one f. `W0 = 2` after three tries, likely when f is one-to-one | x ≠ y, f(x) = f(y) |
 
 ### 6.3 Variational instructions
 
@@ -336,8 +342,8 @@ typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ti
 
 For every instruction, the library provides a classical implementation with the same contract: an
 exhaustive search, a state vector, a direct sum. When `W0 = 0`, or a check fails, the program computes
-the answer classically. A conforming program therefore gives correct results on every AArch64 CPU,
-only slower.
+the answer classically. A conforming program therefore gives correct results on every AArch64 or x86-64
+CPU, only slower.
 
 ### 7.2 Library functions on top of the instructions
 
@@ -382,24 +388,35 @@ the program runs. Without its oracle helper, the plugin implements Core, Variati
 
 ## 9. Conformance
 
-`tests/conformance/qarm_conformance.c` is an AArch64 program that emits the raw packets. It does not use
-the library's fallbacks, so it tests the runtime alone. Build it at `-O1` and run it under the runtime:
+`tests/conformance/qarm_conformance.c` is an AArch64 or x86-64 program that emits the raw packets. It
+does not use the library's fallbacks, so it tests the runtime alone. Build it at `-O1` and run it under
+the runtime:
 
 ```
 $ aarch64-linux-gnu-gcc -O1 -iquote include tests/conformance/qarm_conformance.c -o conformance -lm
 $ python3 qarm_exec.py -q conformance
+Q-ARM ISA 1.0 conformance (docs/qarm_isa.md, section 9)
 PASS QAVAIL
 PASS unassigned opcode
 ...
+profiles: Core passed; Oracle passed; Variational passed; Circuit passed; Async passed
 conformance: 15 passed, 0 failed, 0 skipped (features 0x3fff)
 ```
+
+Each profile of section 8 is reported in one of three ways:
+- **passed:** all its tests passed;
+- **not claimed:** its feature bits are absent, so its tests were skipped;
+- **FAILED:** a test failed.
+
+A runtime conforms to the profiles it reports as passed. For example, `runtime/minimal` reports Core and
+Circuit.
 
 For each test it checks:
 
 - **the status protocol:** for example, an unassigned opcode MUST leave `W0 = 0`;
 - **the refusal cases** of 5.3 and 5.4;
-- **side effects:** registers `X5` and `X9`–`X15` are unchanged after every packet, and guard bytes
-  around every output buffer are intact;
+- **side effects:** registers `X5` and `X9`–`X15` (on x86-64, `R8` and `RBX`, `R9`–`R14`) are unchanged after
+  every packet, and guard bytes around every output buffer are intact;
 - **the answers:** exact ones where defined, otherwise within the stated bounds, with up to three tries
   for probabilistic instructions;
 - **the feature bits:** QAVAIL and QCAPS agree, and an instruction that is not claimed is skipped.
@@ -416,3 +433,12 @@ This is version 1.0, packet format 2, `QCAPS.version` 1.
   in reserved words. A program discovers additions through the feature bits. Programs and runtimes of
   different minor versions work together, because unknown opcodes are not executed.
 - **Major versions** change the packet format byte.
+
+`include/qarm_isa.h` gives the version as `QARM_ISA_VERSION_MAJOR`, `QARM_ISA_VERSION_MINOR` and
+`QARM_ISA_PACKET_FORMAT`.
+
+## Revision history
+
+| version | date | changes |
+|---|---|---|
+| 1.0 | 2026-11-28 | First publication. 23 instructions in five profiles; packets for AArch64 and x86-64; `qarm_isa.h`; the conformance program with per-profile results. |

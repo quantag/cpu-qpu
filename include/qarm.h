@@ -75,33 +75,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* H = constant + sum t[j].c P_j; P_j acts on qubit q as I, X, Z or Y for (x_q, z_q) = 00, 10, 01, 11 */
-typedef struct { uint64_t x, z; double c; } qarm_pauli;
-typedef struct { uint32_t qubits, terms; double constant; const qarm_pauli *t; } qarm_hamiltonian;
+#include "qarm_isa.h"                          /* the ISA's constants and layouts (docs/qarm_isa.md) */
 
-/* the ansatz: the basis state init, then the operations in order. RY, RZ: angle = scale * theta[param];
- * QARM_PAULI_ROT: exp(-i * scale * theta[param] * P(x, z)), for UCC excitations */
-enum { QARM_X = 1, QARM_H, QARM_CX, QARM_CZ, QARM_RY, QARM_RZ, QARM_PAULI_ROT };
-typedef struct { uint8_t kind, q0, q1, param; uint32_t reserved; double scale; uint64_t x, z; } qarm_op;
-typedef struct { uint32_t qubits, params, ops, reserved; uint64_t init; const qarm_op *op; } qarm_ansatz;
 typedef struct { const qarm_hamiltonian *h; const qarm_ansatz *a; intptr_t handle; int quantum; } qarm_vqe;
-enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
-       QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024,
-       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096, QARM_F_COLLISION = 8192 };
-
-/* QSUBMIT, QPOLL, QWAIT: any instruction, asynchronously. The request holds the instruction's input registers;
- * when state becomes 1 it holds its output registers (x[0] = its W0) and its memory outputs are written. The
- * runtime reads every input at QSUBMIT; the program must not use the outputs, or change the request, before then. */
-typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ticket; } qarm_request;   /* 80 bytes */
-
-/* QCIRC's circuits: gates in order on qubits that start at 0; every qubit measured at the end */
-enum { QARM_G_X = 1, QARM_G_Y, QARM_G_Z, QARM_G_H, QARM_G_S, QARM_G_SDG, QARM_G_T, QARM_G_TDG, QARM_G_SX, QARM_G_RX,
-       QARM_G_RY, QARM_G_RZ, QARM_G_CX, QARM_G_CZ, QARM_G_SWAP, QARM_G_CCX, QARM_G_LAST = QARM_G_CCX };
-typedef struct { uint8_t kind, q0, q1, q2; uint32_t reserved; double angle; } qarm_gate;   /* CX: q0 control */
-typedef struct { uint32_t qubits, gates; const qarm_gate *g; } qarm_circuit;
-/* QCAPS */
-enum { QARM_CAPS_HARDWARE = 1, QARM_CAPS_MEASURED = 2, QARM_CAPS_ASYNC = 4 };
-typedef struct { uint32_t version, features, qubits, flags; char backend[48]; } qarm_capabilities;
 
 /* the classical paths of QMIN and QCOUNT */
 static inline int qarm__min(int (*cost)(int), int bits, int *x, int *value)

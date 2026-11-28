@@ -66,8 +66,15 @@ static int passed, failed, skipped;
 static uint32_t features;
 static char why[200];
 
+/* 8. Profiles: each test belongs to one; a profile passes when all its tests pass, and is not claimed when all
+ * are skipped */
+enum { P_CORE, P_ORACLE, P_VARIATIONAL, P_CIRCUIT, P_ASYNC, NPROFILES };
+static const char *profile_name[NPROFILES] = {"Core", "Oracle", "Variational", "Circuit", "Async"};
+static int prof_pass[NPROFILES], prof_fail[NPROFILES], prof_skip[NPROFILES], current = P_CORE;
+
 static void result(const char *name, int ok)
 {
+    (ok == 1 ? prof_pass : ok == 0 ? prof_fail : prof_skip)[current]++;
     if (ok == 1) { printf("PASS %s\n", name); passed++; }
     else if (ok == 0) { printf("FAIL %s: %s\n", name, why); failed++; }
     else { printf("SKIP %s: %s\n", name, why); skipped++; }
@@ -439,6 +446,8 @@ static int t_async(void)
 
 int main(void)
 {
+    printf("Q-ARM ISA %d.%d conformance (docs/qarm_isa.md, section 9)\n", QARM_ISA_VERSION_MAJOR,
+           QARM_ISA_VERSION_MINOR);
     int rt = t_qavail();
     result("QAVAIL", rt);
     if (rt != 1) {
@@ -447,6 +456,7 @@ int main(void)
     }
     result("unassigned opcode", unknown_opcode());
     result("QCAPS", t_qcaps());
+    current = P_ORACLE;
     result("QSEARCH", t_qsearch());
     result("QMIN", t_qmin());
     result("QCOUNT", t_qcount());
@@ -455,10 +465,18 @@ int main(void)
     result("QSIMON", t_structure(QARM_F_SIMON, "QSIMON", 0x19));
     result("QBV", t_structure(QARM_F_BV, "QBV", 0x1a));
     result("QCOLLISION", t_qcollision());
+    current = P_CIRCUIT;
     result("QCIRC", t_qcirc());
     result("QRAND", t_qrand());
+    current = P_VARIATIONAL;
     result("VQE (QVLOAD QEXPECT QEXPECTN QGRAD QVSAMPLE QSESSION QVFREE)", t_vqe());
+    current = P_ASYNC;
     result("QSUBMIT QPOLL QWAIT", t_async());
+    printf("profiles:");
+    for (int p = 0; p < NPROFILES; p++)
+        printf(" %s %s%s", profile_name[p],
+               prof_fail[p] ? "FAILED" : !prof_pass[p] ? "not claimed" : prof_skip[p] ? "partly claimed" : "passed",
+               p + 1 < NPROFILES ? ";" : "\n");
     printf("conformance: %d passed, %d failed, %d skipped (features %#x)\n", passed, failed, skipped, features);
     return failed;
 }

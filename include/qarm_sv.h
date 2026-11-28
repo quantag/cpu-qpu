@@ -11,13 +11,14 @@
  * a sum over those pairs; the terms of H that share an X mask share one pass (H psi and <psi|H|psi> together).
  * Built with OpenMP (-fopenmp; libqarm does it when the compiler has it), the passes over 2^n amplitudes run on all
  * cores from QARM_SV_PAR_MIN amplitudes on; without it the pragmas are ignored and the code is the same, serial.
- * OMP_NUM_THREADS sets the threads. Included by qarm.h; needs qarm_hamiltonian, qarm_ansatz, qarm_op.
+ * OMP_NUM_THREADS sets the threads. Included by qarm.h; the tables are qarm_isa.h's.
  * Link with -lm. */
 #ifndef QARM_SV_H
 #define QARM_SV_H
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "qarm_isa.h"
 
 #ifndef QARM_SV_PAR_MIN
 #define QARM_SV_PAR_MIN 32768                    /* smaller vectors stay on one thread: the overhead would dominate */
