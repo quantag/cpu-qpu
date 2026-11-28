@@ -1051,6 +1051,14 @@ def _sincos(rt):
     rt.ret(None)
 
 
+def _sincos_stret(rt):
+    """Apple's __sincos_stret(x): sin(x) in D0 and cos(x) in D1"""
+    v = struct.unpack("<d", struct.pack("<Q", rt.mu.reg_read(rt.A.UC_ARM64_REG_D0)))[0]
+    rt.set_d(0, math.sin(v))
+    rt.set_d(1, math.cos(v))
+    rt.ret(None)
+
+
 def _strcmp(rt):
     a, b = rt.cstr(rt.x(0)).encode("utf-8"), rt.cstr(rt.x(1)).encode("utf-8")
     rt.ret((a > b) - (a < b) & 0xFFFFFFFFFFFFFFFF)
@@ -1094,7 +1102,7 @@ def _strtol(rt):
 MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp", "log", "sqrt", "atan", "fabs")}
 
 
-LIBC = {**MATH, "sincos": _sincos, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
+LIBC = {**MATH, "sincos": _sincos, "__sincos_stret": _sincos_stret, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
         "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "snprintf": _snprintf, "__snprintf_chk": _snprintf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
         "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__chkstk_darwin": lambda rt: rt.ret(rt.x(0)), "malloc": _malloc, "calloc": _calloc,
