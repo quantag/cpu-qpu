@@ -23,7 +23,7 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
 | Specification | the CUDA-Q language specification (a C++ and Python API) | `docs/qarm_isa.md`: a binary ISA (packet, register ABI, tables, guarantees), a conformance program, profiles |
 | Runtimes | NVIDIA's simulators and the hardware back ends of its targets | any program that executes packets: `qarm_exec.py` (Unicorn), a QEMU plugin, libqarm (native C); in future, a CPU extension or a hypervisor |
 | Asynchrony | `sample_async`, `observe_async`, `run_async`, `get_state_async` | `QSUBMIT`, `QPOLL`, `QWAIT` on any instruction; QPU jobs stay queued while the program runs |
-| Simulation scale | GPU state vectors and tensor networks, multi-GPU and multi-node | a CPU state vector: about 20 qubits for VQE, and 2^bits amplitudes for oracle searches (the oracle itself is evaluated classically) |
+| Simulation scale | GPU state vectors and tensor networks, multi-GPU and multi-node | a CPU state vector on all cores (OpenMP), with UCC excitations and Hamiltonian groups fused into single passes: up to 24 qubits for VQE (an 18-qubit LiH energy and gradient in 0.6 s on 2 cores), and 2^bits amplitudes for oracle searches (the oracle itself is evaluated classically) |
 | Hardware | many vendors through targets (IonQ, IQM, OQC, Quantinuum, …) | IBM Quantum (REST, from C or from Python) |
 | Algorithms as library calls | VQE, optimizers, gradients, dynamics (CUDA-Q libraries) | Grover, Dürr–Høyer, counting, amplitude estimation, period finding, Simon, Bernstein–Vazirani, Brassard–Høyer–Tapp, VQE with QGRAD, QAOA, Trotter evolution |
 

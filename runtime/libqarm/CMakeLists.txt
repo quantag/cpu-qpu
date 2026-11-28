@@ -26,6 +26,17 @@ endif()
 if(NOT WIN32)
   target_link_libraries(qarm PUBLIC m)
 endif()
+# the state vector's passes on all cores (include/qarm_sv.h): OpenMP when the compiler has it, else serial
+option(QARM_OPENMP "Use OpenMP for the state vector" ON)
+if(QARM_OPENMP)
+  find_package(OpenMP COMPONENTS C QUIET)
+  if(OpenMP_C_FOUND AND OpenMP_C_VERSION VERSION_GREATER_EQUAL 3.0)   # MSVC's OpenMP 2.0 lacks C99 loop forms
+    target_link_libraries(qarm PUBLIC OpenMP::OpenMP_C)
+    message(STATUS "libqarm: OpenMP ${OpenMP_C_VERSION}: the state vector runs on all cores")
+  else()
+    message(STATUS "libqarm: no OpenMP 3.0 or newer: the state vector runs on one core")
+  endif()
+endif()
 
 option(QARM_EXAMPLES "Build examples/qarm/h2_vqe.c against libqarm" ON)
 if(QARM_EXAMPLES)
