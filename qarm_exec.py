@@ -46,12 +46,13 @@ GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: 
          13: "cx", 14: "cz", 15: "swap", 16: "ccx"}
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
 OP_QVSAMPLE = 0x25
+OP_QEVOLVE = 0x27          # ISA 1.1
 OP_QSUBMIT, OP_QPOLL, OP_QWAIT = 0x12, 0x13, 0x14
-FEATURES = 16383          # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
-                          #              QCOLLISION
+FEATURES = 32767          # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
+                          #              QCOLLISION EVOLVE
 OPS = (OP_QAVAIL, OP_QSEARCH, OP_QCOLLISION, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
        OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE, OP_QSUBMIT, OP_QPOLL,
-       OP_QWAIT)
+       OP_QWAIT, OP_QEVOLVE)
 
 
 class QarmError(Exception):
@@ -408,6 +409,8 @@ class Runtime:
             self.qstructure(op, self.x(1), self.x(2) & 0xFFFFFFFF)
         elif op in (OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE):
             self.vqe_op(op)
+        elif op == OP_QEVOLVE:
+            self.qevolve(self.x(1), self.x(2))
 
     def call(self, fn, arg):
         """Call a function of the program: f(arg) -> W0 (used to check answers)."""
@@ -746,6 +749,59 @@ class Runtime:
         except UcError as e:
             raise QarmError(f"VQE: a table or an array is not readable or writable: {e}")
 
+    def qevolve(self, addr, out):
+        """QEVOLVE (ISA 1.1): X1 = a qarm_evolution, X2 = k doubles out. W0 = 1, D0 = the error bound, D1 = the standard
+        error, W3 = method | order << 8, X4 = steps; W0 = 2: refused. The exact simulator runs every plan (exact by
+        default); a configured backend runs the plan's product formula as an ansatz on QEXPECTN's path, one batch."""
+        from unicorn import UcError
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import qarm_evolve as qe
+        import qarm_vqe
+
+        def refuse(why):
+            self.set_x(0, 2)
+            self.note(f"QEVOLVE refused: {why}")
+        try:
+            e = qe.read_evolution(lambda a, n: bytes(self.mu.mem_read(a, n)), addr)
+        except (ValueError, struct.error, UcError) as err:
+            return refuse(f"the table is not readable ({err})")
+        why = qe.check(e)
+        if why:
+            return refuse(why)
+        exact = self.qpu is None
+        if exact and e.h.qubits > qarm_vqe.MAX_EXACT_QUBITS:
+            return refuse(f"{e.h.qubits} qubits: the exact simulator takes up to {qarm_vqe.MAX_EXACT_QUBITS}")
+        p = qe.plan(e, exact, qe.WORK if exact else math.inf)
+        if isinstance(p, str):
+            return refuse(p)
+        if exact:
+            seed = os.environ.get("QCPU_SEED")
+            values, se = qe.run(e, p, int(seed) if seed else None)
+            where = "the exact simulator"
+        else:
+            if p.method != qe.PRODUCT:
+                return refuse("a measured backend runs product formulas")
+            if p.steps * p.ops > 100000:
+                return refuse(f"{p.steps} steps of {p.ops:.0f} rotations: deeper than 100000 operations")
+            read, ha, aa, nops = qe.ansatz_tables(e, p)
+            problem = qarm_vqe.Problem(read, ha, aa)
+            measured = (qarm_vqe.Cudaq if self.qpu["backend"] == "cudaq" else qarm_vqe.Measured)(problem, self.qpu, self.note)
+            values, errs, job, sec = measured.energies([problem.angles([t / p.steps]) for t in e.t], e.shots)
+            se, where = max(errs), f"{measured.where.split(';')[0]}, job {job}, {sec} s"
+        try:
+            self.mu.mem_write(out, struct.pack(f"<{len(values)}d", *values))
+        except UcError:
+            return refuse("the output is not writable")
+        self.set_d(0, p.bound)
+        self.set_d(1, se)
+        self.set_x(3, p.method | p.order << 8)
+        self.set_x(4, p.steps)
+        self.set_x(0, 1)
+        name = {qe.EXACT: "exact (Taylor series)", qe.PRODUCT: f"product formula of order {p.order}", qe.QDRIFT: "qDRIFT"}
+        unit = {qe.EXACT: "segments", qe.PRODUCT: "steps", qe.QDRIFT: "samples per sequence"}
+        self.note(f"QEVOLVE: {e.h.qubits} qubits, {len(e.h.terms)} terms, {len(e.t)} times: {name[p.method]}, "
+                  f"{p.steps} {unit[p.method]}; error bound {p.bound:.3g} ({where})")
+
     def qgrad(self, problem, measured):
         """QGRAD: X1 = theta, X4 = the gradient (one double per parameter); D0 = the energy. Exact: adjoint
         differentiation. Measured: the parameter-shift rule, every shifted energy in one job."""
@@ -776,12 +832,19 @@ class Runtime:
 
     def run(self):
         from unicorn import UcError
+        pc = self.p.main
         try:
-            self.mu.emu_start(self.p.main, HALT + 0xF00)       # never reached: main returns to HALT, which stops
+            while True:
+                self.mu.emu_start(pc, HALT + 0xF00)            # never reached: main returns to HALT, which stops
+                if self.exit_code is not None:
+                    break
+                # a nested emu_start (call(), checking an answer) leaves its instruction count behind in Unicorn,
+                # which then stops this emulation early, silently: go on from where it stopped
+                pc = self.mu.reg_read(self.A.UC_ARM64_REG_PC)
         except UcError as e:
             pc = self.mu.reg_read(self.A.UC_ARM64_REG_PC)
             raise QarmError(f"the program stopped at {pc:#x}: {e}")
-        return self.exit_code if self.exit_code is not None else 0
+        return self.exit_code
 
 
 def _printf(rt):
@@ -792,6 +855,21 @@ def _printf(rt):
 def _printf_chk(rt):                    # glibc's fortified printf: (flag, format, ...)
     rt.out.write(c_format(rt.cstr(rt.x(1)), rt.vararg(2), rt.cstr))
     rt.ret(0)
+
+
+def _snprintf_to(rt, buf, size, fmt_reg, first):
+    text = c_format(rt.cstr(rt.x(fmt_reg)), rt.vararg(first), rt.cstr).encode()
+    if size:
+        rt.mu.mem_write(buf, text[:size - 1] + b"\0")
+    rt.ret(len(text))
+
+
+def _snprintf(rt):                      # (buf, size, format, ...)
+    _snprintf_to(rt, rt.x(0), rt.x(1), 2, 3)
+
+
+def _snprintf_chk(rt):                  # glibc's fortified snprintf: (buf, size, flag, slen, format, ...)
+    _snprintf_to(rt, rt.x(0), rt.x(1), 4, 5)
 
 
 def _puts(rt):
@@ -943,7 +1021,7 @@ MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp"
 
 
 LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
-        "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
+        "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "snprintf": _snprintf, "__snprintf_chk": _snprintf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
         "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__chkstk_darwin": lambda rt: rt.ret(rt.x(0)), "malloc": _malloc, "calloc": _calloc,
         "realloc": _realloc, "free": _free, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,

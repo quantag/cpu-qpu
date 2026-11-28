@@ -1,6 +1,8 @@
-# The Q-ARM instruction set, version 1.0
+# The Q-ARM instruction set, version 1.1
 
-**Status:** version 1.0, published 2026-11-28 (release `isa-v1.0` of github.com/quantag/cpu-qpu). Quantag
+**Status:** version 1.1, 2026-11-28. It adds one instruction to 1.0, `QEVOLVE` (time evolution with a
+guaranteed error bound), in a new profile, Dynamics. Version 1.0 was published on 2026-11-28 (release `isa-v1.0` of
+github.com/quantag/cpu-qpu). Quantag
 IT Solutions GmbH. The specification is under Apache-2.0, like the rest of this repository.
 
 **With it:**
@@ -144,8 +146,9 @@ answer has a cheap classical check, the library MUST run it (section 6) before i
 | `QARM_F_VSAMPLE` | 2048 | `QVSAMPLE` |
 | `QARM_F_ASYNC` | 4096 | `QSUBMIT`, `QPOLL`, `QWAIT` |
 | `QARM_F_COLLISION` | 8192 | `QCOLLISION` |
+| `QARM_F_EVOLVE` | 16384 | `QEVOLVE` (1.1) |
 
-Bits 14–31 are reserved and MUST be 0 in 1.0. A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
+Bits 15–31 are reserved and MUST be 0 in 1.1 (bits 14–31 in 1.0). A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
 from before feature bits. Libraries treat it as `QARM_F_SEARCH` only.
 
 ## 5. Operands
@@ -251,6 +254,45 @@ enum { QARM_CAPS_HARDWARE = 1, QARM_CAPS_MEASURED = 2, QARM_CAPS_ASYNC = 4 };
 | `flags` | `HARDWARE`: results come from a physical quantum device. `MEASURED`: values are estimated from samples and carry statistical error. `ASYNC`: jobs are queued (latency of seconds to hours) |
 | `backend` | a NUL-terminated name, for display only |
 
+### 5.7 Time evolution (1.1)
+
+```c
+enum { QARM_EV_AUTO = 0, QARM_EV_EXACT, QARM_EV_PRODUCT, QARM_EV_QDRIFT };
+typedef struct {
+    const qarm_hamiltonian *h, *o;   /* H, the generator; O, the observable */
+    const double *t;                 /* the k times */
+    uint32_t k, method;              /* 1 <= k <= 4096; QARM_EV_* */
+    uint32_t order, shots;
+    uint64_t init;                   /* the initial basis state */
+    double eps;                      /* the accuracy asked for; 0: 1e-3 */
+    uint32_t steps, reserved;
+} qarm_evolution;                                                                       /* 64 bytes */
+```
+
+The table asks for the k values
+
+  v(tᵢ) = ⟨init| e^{iHtᵢ} O e^{−iHtᵢ} |init⟩.
+
+| field | meaning |
+|---|---|
+| `h`, `o` | Hamiltonian tables (5.2) with the same `qubits` |
+| `method` | `AUTO`: the runtime's choice. `EXACT`: the exact evolution, to the precision of double arithmetic. `PRODUCT`: a product formula. `QDRIFT`: Campbell's randomized compiler |
+| `order` | `PRODUCT` only: 1 (Lie–Trotter), 2 (Strang), 4 or 6 (Suzuki), or 0 for the runtime's choice. MUST be 0 for the other methods |
+| `shots` | per time, on a backend with `MEASURED`; for `QDRIFT`, the number of random sequences. 0: the runtime's default |
+| `eps` | the accuracy asked for (6.6). 0 means 1e-3 |
+| `steps` | 0: the runtime chooses the fewest steps that meet `eps`. Otherwise exactly this many steps (`PRODUCT`) or samples per sequence (`QDRIFT`); `eps` is then not used |
+| `reserved` | MUST be 0 |
+
+A runtime MUST refuse a table with `W0 = 2` if any of these holds:
+- `h` or `o` is null;
+- their `qubits` differ, or are outside 1–64;
+- a Pauli mask or `init` has a bit at or above `qubits`;
+- `k` is outside 1–4096;
+- a time or a coefficient is not finite;
+- `method` is above 3, or `order` is not as above;
+- `eps` is negative or not finite;
+- `reserved` ≠ 0.
+
 ## 6. Instructions
 
 The tables give the inputs and outputs, then what every answer satisfies. "Check" is what the library
@@ -336,6 +378,54 @@ typedef struct { uint32_t opcode, state; uint64_t x[6]; double d[2]; uint64_t ti
 - A runtime MAY complete any request at `QSUBMIT`. It SHOULD run QPU jobs (`QEXPECTN` at least)
   asynchronously, so that the program keeps computing while the job is queued.
 
+### 6.6 Time evolution (1.1)
+
+| opcode | name | in | out |
+|---|---|---|---|
+| 0x27 | `QEVOLVE` | `X1` = `qarm_evolution *`, `X2` = k doubles out | `W0 = 1`: the k values; `D0` = the error bound ε, `D1` = the standard error σ; `W3` = method \| order << 8, `X4` = steps. `W0 = 2`: refused |
+
+**The guarantee.** For every i:
+- `EXACT` and `PRODUCT`: |vᵢ − v(tᵢ)| ≤ ε, apart from rounding and, on a backend with `MEASURED`, shot noise;
+- `QDRIFT`: |E[vᵢ] − v(tᵢ)| ≤ ε, where E is the mean over the random sequences.
+
+σ is the largest standard error of the k values: from shots on a `MEASURED` backend, and from the random
+sequences for `QDRIFT`. It is 0 otherwise. A device's own errors are not included.
+
+**The bound MUST be rigorous.** ε is a proven upper bound for the method, the steps and the times actually
+used. A runtime MAY use any proven bound, such as a norm bound or a commutator bound. The reference
+implementation's bounds, for λ = Σ|cⱼ| and ω = Σ|oⱼ| over the non-identity terms of H and O, are as follows:
+- **a product formula of order p with r steps:** a state error δ ≤ 2r·Σ_{n>p} (Υ_p λ|t|/r)ⁿ/n!, where Υ_p is
+  the sum of the stages' absolute coefficients. For p = 1 and 2, δ is also at most the commutator bounds of
+  Childs, Su, Tran, Wiebe and Zhu (2021). Then ε = ω(2 + δ)δ;
+- **qDRIFT with N samples:** twice Campbell's bound on the diamond distance of the channel, 2λ²t²/N·e^{2λ|t|/N},
+  times ω;
+- **exact:** the truncation of a Taylor series, about 10⁻³⁰ or less.
+
+**eps and steps.**
+- With `steps = 0`, a runtime MUST return ε ≤ `eps`, or refuse with `W0 = 2`. It MUST NOT return a less
+  accurate answer.
+- With `steps ≠ 0`, the runtime MUST use exactly those steps and report the bound that they give, however
+  large. `X4` reports the steps used:
+  - for `PRODUCT`, r;
+  - for `QDRIFT`, N;
+  - for `EXACT`, the runtime's own segments, which carry no meaning for the program.
+
+**Methods.**
+- `AUTO` lets the runtime choose. A simulator SHOULD evolve exactly. A QPU backend SHOULD choose the product
+  formula with the fewest rotations that meets `eps`.
+- A runtime MAY refuse a method that its backend cannot run, with `W0 = 2`. For example, a QPU backend refuses
+  `EXACT`.
+- `W3` reports the method used (1, 2 or 3) and, for `PRODUCT`, the order.
+
+**Other rules.**
+- The runtime MUST read every input before it writes any output, so that `X2` may equal `t`.
+- On a QPU, all k times SHOULD be one job: the product formula is one circuit with the step dt = t/r as its
+  parameter.
+- `QEVOLVE` may be submitted with `QSUBMIT` (6.5).
+
+There is no check: a classical path computes the same values in exponential time, so the library returns
+the values with ε and σ.
+
 ## 7. Library obligations and reserved opcodes
 
 ### 7.1 Classical paths
@@ -348,8 +438,9 @@ CPU, only slower.
 ### 7.2 Library functions on top of the instructions
 
 Some algorithms need no new instruction:
-- Time evolution under a Hamiltonian table (`qarm_evolve_n`: Trotter steps as an ansatz, many times t
-  in one `QEXPECTN` batch).
+- Time evolution on the 1.0 instructions (`qarm_evolve_n`: Trotter steps as an ansatz, many times t in one
+  `QEXPECTN` batch, without an error bound). With 1.1, `QEVOLVE` does this in the runtime, with a guaranteed
+  bound (`qarm_evolve`).
 - QAOA (a cost Hamiltonian, and layers as Pauli rotations with shared parameters).
 - Optimizers (L-BFGS on `QGRAD`, SPSA on `QEXPECTN`).
 
@@ -363,8 +454,9 @@ takes on the library's obligations: the check and the classical path.
 
 | opcode | name | for |
 |---|---|---|
-| 0x27 | `QEVOLVE` | native time evolution in the runtime (higher-order product formulas, qDRIFT) |
 | 0x28–0x2F, 0x32–0x3F | — | future variational and circuit instructions |
+
+0x27 was reserved in 1.0 and is `QEVOLVE` in 1.1.
 | 0x00–0x0F, 0x40–0xFF | — | reserved |
 
 Vendors MAY use opcodes 0xF0–0xFF for experiments. They MUST NOT report those instructions in the
@@ -381,10 +473,11 @@ A runtime states the profiles it implements. Its feature bits must cover them.
 | Variational | `QVLOAD` … `QVFREE`, `QVSAMPLE` | 2 2048 |
 | Circuit | `QCIRC`, `QRAND` | 256 512 |
 | Async | `QSUBMIT`, `QPOLL`, `QWAIT` | 4096 |
+| Dynamics (1.1) | `QEVOLVE` | 16384 |
 
-`qarm_exec.py` and the QEMU plugin with its oracle helper implement all five. `qarm_exec.py` completes
+`qarm_exec.py` and the QEMU plugin with its oracle helper implement all six. `qarm_exec.py` completes
 every request at `QSUBMIT`. The QEMU plugin submits `QEXPECTN` to libqarm, which polls an IBM job while
-the program runs. Without its oracle helper, the plugin implements Core, Variational, Circuit and Async.
+the program runs. Without its oracle helper, the plugin implements Core, Variational, Circuit, Async and Dynamics.
 
 ## 9. Conformance
 
@@ -395,12 +488,12 @@ the runtime:
 ```
 $ aarch64-linux-gnu-gcc -O1 -iquote include tests/conformance/qarm_conformance.c -o conformance -lm
 $ python3 qarm_exec.py -q conformance
-Q-ARM ISA 1.0 conformance (docs/qarm_isa.md, section 9)
+Q-ARM ISA 1.1 conformance (docs/qarm_isa.md, section 9)
 PASS QAVAIL
 PASS unassigned opcode
 ...
-profiles: Core passed; Oracle passed; Variational passed; Circuit passed; Async passed
-conformance: 15 passed, 0 failed, 0 skipped (features 0x3fff)
+profiles: Core passed; Oracle passed; Variational passed; Circuit passed; Async passed; Dynamics passed
+conformance: 16 passed, 0 failed, 0 skipped (features 0x7fff)
 ```
 
 Each profile of section 8 is reported in one of three ways:
@@ -427,7 +520,8 @@ conformance.
 
 ## 10. Versions
 
-This is version 1.0, packet format 2, `QCAPS.version` 1.
+This is version 1.1, packet format 2, `QCAPS.version` 1. A 1.0 runtime leaves `QEVOLVE` unexecuted (`W0 = 0`),
+so a 1.1 program runs on it through the library's classical path.
 
 - **Minor versions** (1.1, …) may add instructions on reserved opcodes, feature bits and operand fields
   in reserved words. A program discovers additions through the feature bits. Programs and runtimes of
@@ -441,4 +535,5 @@ This is version 1.0, packet format 2, `QCAPS.version` 1.
 
 | version | date | changes |
 |---|---|---|
-| 1.0 | 2026-11-28 | First publication. 23 instructions in five profiles; packets for AArch64 and x86-64; `qarm_isa.h`; the conformance program with per-profile results. |
+| 1.1 | 2026-11-28 | `QEVOLVE` (0x27, formerly reserved): time evolution with a guaranteed error bound, by exact evolution, product formulas of order 1, 2, 4 and 6, or qDRIFT; the `qarm_evolution` table (5.7); feature bit 16384; the Dynamics profile; the conformance program's `QEVOLVE` test. 23 instructions in six profiles. |
+| 1.0 | 2026-11-28 | First publication. 22 instructions in five profiles; packets for AArch64 and x86-64; `qarm_isa.h`; the conformance program with per-profile results. |

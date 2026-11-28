@@ -68,8 +68,8 @@ static char why[200];
 
 /* 8. Profiles: each test belongs to one; a profile passes when all its tests pass, and is not claimed when all
  * are skipped */
-enum { P_CORE, P_ORACLE, P_VARIATIONAL, P_CIRCUIT, P_ASYNC, NPROFILES };
-static const char *profile_name[NPROFILES] = {"Core", "Oracle", "Variational", "Circuit", "Async"};
+enum { P_CORE, P_ORACLE, P_VARIATIONAL, P_CIRCUIT, P_ASYNC, P_DYNAMICS, NPROFILES };
+static const char *profile_name[NPROFILES] = {"Core", "Oracle", "Variational", "Circuit", "Async", "Dynamics"};
 static int prof_pass[NPROFILES], prof_fail[NPROFILES], prof_skip[NPROFILES], current = P_CORE;
 
 static void result(const char *name, int ok)
@@ -129,7 +129,7 @@ static int t_qavail(void)
     PRESERVED();
     features = (uint32_t)r.x[1];
     REQUIRE(features != 0, "W1 = 0: no features");
-    REQUIRE((features >> 14) == 0, "W1 = %#x: bits above QARM_F_COLLISION are reserved", features);
+    REQUIRE((features >> 15) == 0, "W1 = %#x: bits above QARM_F_EVOLVE are reserved", features);
     return 1;
 }
 
@@ -444,6 +444,158 @@ static int t_async(void)
     return 1;
 }
 
+/* ---------------------------------------------------------------- QEVOLVE (1.1) */
+/* the reference: exp(-iHt)|init> on at most 4 qubits by small Taylor steps in complex doubles, independent of any
+ * runtime; accurate to about 1e-13 for the cases below */
+#define RQ 16
+static void ref_apply(const qarm_hamiltonian *h, const double *re, const double *im, double *ore, double *oim, int n)
+{
+    for (int b = 0; b < (1 << n); b++) ore[b] = oim[b] = 0;
+    for (uint32_t j = 0; j < h->terms; j++) {
+        const qarm_pauli *p = &h->t[j];
+        int k = __builtin_popcountll(p->x & p->z) & 3;
+        for (int b = 0; b < (1 << n); b++) {
+            double sg = __builtin_parityll((uint64_t)b & p->z) ? -p->c : p->c, vr = sg * re[b], vi = sg * im[b];
+            int u = b ^ (int)p->x;                    /* i^k s(b) psi[b] lands on u */
+            double wr = k == 0 ? vr : k == 1 ? -vi : k == 2 ? -vr : vi, wi = k == 0 ? vi : k == 1 ? vr : k == 2 ? -vi : -vr;
+            ore[u] += wr; oim[u] += wi;
+        }
+    }
+    for (int b = 0; b < (1 << n); b++) { ore[b] += h->constant * re[b]; oim[b] += h->constant * im[b]; }
+}
+static double ref_value(const qarm_hamiltonian *h, const qarm_hamiltonian *o, uint64_t init, double t)
+{
+    int n = (int)h->qubits;
+    double re[RQ] = {0}, im[RQ] = {0}, tr[RQ], ti[RQ], ar[RQ], ai[RQ], hr[RQ], hi[RQ];
+    re[init] = 1;
+    int m = 2000;
+    double dt = t / m;
+    for (int s = 0; s < m; s++) {
+        memcpy(tr, re, sizeof tr); memcpy(ti, im, sizeof ti); memcpy(ar, re, sizeof ar); memcpy(ai, im, sizeof ai);
+        for (int j = 1; j <= 20; j++) {
+            ref_apply(h, tr, ti, hr, hi, n);
+            for (int b = 0; b < (1 << n); b++) { tr[b] = dt / j * hi[b]; ti[b] = -dt / j * hr[b]; ar[b] += tr[b]; ai[b] += ti[b]; }
+        }
+        memcpy(re, ar, sizeof re); memcpy(im, ai, sizeof im);
+    }
+    ref_apply(o, re, im, hr, hi, n);
+    double v = 0;
+    for (int b = 0; b < (1 << n); b++) v += re[b] * hr[b] + im[b] * hi[b];
+    return v;
+}
+
+static const qarm_pauli xz_t[2] = {{1, 0, 1.0}, {0, 1, 1.0}}, zq_t[1] = {{0, 1, 1.0}};
+static const qarm_hamiltonian xz_h = {1, 2, 0, xz_t}, z1_h = {1, 1, 0, zq_t};
+static const qarm_pauli ising_t[3] = {{0, 3, 0.8}, {1, 0, 0.5}, {2, 0, 0.5}}, mag_t[2] = {{0, 1, 1.0}, {2, 0, 0.25}};
+static const qarm_hamiltonian ising_h = {2, 3, 0.3, ising_t}, mag_h = {2, 2, 1.0, mag_t};
+static const qarm_pauli bad_t[1] = {{4, 0, 1.0}};                         /* X on qubit 2 of 2 */
+static const qarm_hamiltonian bad_h = {2, 1, 0, bad_t}, three_h = {3, 3, 0, ising_t};
+
+/* one QEVOLVE: W0, and the values within D0 + 5 D1 of the reference (-1: refused, 0: wrong) */
+static int evolve(qarm_evolution *e, double *ref, regs *out, int expect_method)
+{
+    double *v = guarded(8 * e->k);
+    regs r = {{0, (uint64_t)(uintptr_t)e, (uint64_t)(uintptr_t)v}, {0}};
+    CLEAN();
+    PACKET(0x02270000, &r);
+    PRESERVED();
+    *out = r;
+    if (r.x[0] == 2) return -1;
+    REQUIRE(r.x[0] == 1, "W0 = %llu", (unsigned long long)r.x[0]);
+    REQUIRE(guards_ok(8 * e->k), "wrote outside the k values");
+    uint32_t m = (uint32_t)r.x[3] & 0xff, ord = (uint32_t)r.x[3] >> 8 & 0xff;
+    REQUIRE(m >= 1 && m <= 3 && (m == 2 ? ord == 1 || ord == 2 || ord == 4 || ord == 6 : ord == 0),
+            "W3 = %#llx: method %u, order %u", (unsigned long long)r.x[3], m, ord);
+    REQUIRE(!expect_method || m == (uint32_t)expect_method, "method %u, asked for %d", m, expect_method);
+    REQUIRE(r.d[0] >= 0 && r.d[1] >= 0, "D0 = %g, D1 = %g", r.d[0], r.d[1]);
+    for (uint32_t i = 0; i < e->k; i++)
+        REQUIRE(fabs(v[i] - ref[i]) <= r.d[0] + 5 * r.d[1] + 1e-9, "t = %g: %.9g, exactly %.9g; bound %g, error %g",
+                e->t[i], v[i], ref[i], r.d[0], r.d[1]);
+    return 1;
+}
+
+static int t_qevolve(void)
+{
+    if (!have(QARM_F_EVOLVE, "QEVOLVE")) return -1;
+    static const double t1[5] = {0, 0.3, -0.7, 1.1, 2.0}, t2[4] = {0.4, 1.5, -1.0, 2.5};
+    double ref1[5], ref2[4], refz[4];
+    regs r;
+    for (int i = 0; i < 5; i++) ref1[i] = 0.5 + 0.5 * cos(2 * sqrt(2.0) * t1[i]);    /* <Z(t)>, H = X + Z, |0> */
+    for (int i = 0; i < 4; i++) { ref2[i] = ref_value(&ising_h, &mag_h, 1, t2[i]); refz[i] = 1; }
+    /* the runtime's choice, eps asked for: D0 <= eps */
+    qarm_evolution a = {&xz_h, &z1_h, t1, 5, QARM_EV_AUTO, 0, 4000, 0, 1e-4, 0, 0};
+    int s = evolve(&a, ref1, &r, 0);
+    if (s <= 0) { if (s < 0) snprintf(why, sizeof why, "the runtime's choice: refused"); return 0; }
+    REQUIRE(r.d[0] <= 1e-4, "the runtime's choice: D0 = %g, eps 1e-4", r.d[0]);
+    /* a product formula on two qubits, the order the runtime's */
+    qarm_evolution b = {&ising_h, &mag_h, t2, 4, QARM_EV_PRODUCT, 0, 4000, 1, 1e-3, 0, 0};
+    if ((s = evolve(&b, ref2, &r, QARM_EV_PRODUCT)) <= 0) {
+        if (s < 0) snprintf(why, sizeof why, "a product formula with eps 1e-3: refused");
+        return 0;
+    }
+    REQUIRE(r.d[0] <= 1e-3, "a product formula: D0 = %g, eps 1e-3", r.d[0]);
+    /* exactly the steps and the order asked for, with the bound that comes with them */
+    qarm_evolution c = {&ising_h, &mag_h, t2, 4, QARM_EV_PRODUCT, 1, 4000, 1, 0, 3, 0};
+    if ((s = evolve(&c, ref2, &r, QARM_EV_PRODUCT)) <= 0) {
+        if (s < 0) snprintf(why, sizeof why, "Lie-Trotter with 3 steps: refused");
+        return 0;
+    }
+    REQUIRE(r.x[3] == (2 | 1 << 8) && r.x[4] == 3, "Lie-Trotter, 3 steps: W3 = %#llx, X4 = %llu",
+            (unsigned long long)r.x[3], (unsigned long long)r.x[4]);
+    /* exact and qDRIFT: optional (a measured backend refuses them), right when done */
+    qarm_evolution d = {&ising_h, &mag_h, t2, 4, QARM_EV_EXACT, 0, 0, 1, 0, 0, 0};
+    if (!evolve(&d, ref2, &r, QARM_EV_EXACT)) return 0;                        /* why says what was wrong */
+    qarm_evolution q = {&ising_h, &mag_h, t2, 4, QARM_EV_QDRIFT, 0, 400, 1, 0, 400, 0};
+    if (!evolve(&q, ref2, &r, QARM_EV_QDRIFT)) return 0;
+    /* the output may be the times: all inputs are read first */
+    static double tt[4];
+    memcpy(tt, t2, sizeof tt);
+    qarm_evolution o = {&ising_h, &mag_h, tt, 4, QARM_EV_PRODUCT, 2, 4000, 1, 1e-3, 0, 0};
+    regs ro = {{0, (uint64_t)(uintptr_t)&o, (uint64_t)(uintptr_t)tt}, {0}};
+    CLEAN();
+    PACKET(0x02270000, &ro);
+    PRESERVED();
+    REQUIRE(ro.x[0] == 1, "out = t: W0 = %llu", (unsigned long long)ro.x[0]);
+    for (int i = 0; i < 4; i++)
+        REQUIRE(fabs(tt[i] - ref2[i]) <= ro.d[0] + 5 * ro.d[1] + 1e-9, "out = t: t = %g gave %g, exactly %g", t2[i],
+                tt[i], ref2[i]);
+    /* H = Z: <Z> stays 1 for every method, every t */
+    qarm_evolution zz = {&z1_h, &z1_h, t2, 4, QARM_EV_AUTO, 0, 0, 0, 0, 0, 0};
+    if ((s = evolve(&zz, refz, &r, 0)) <= 0) {
+        if (s < 0) snprintf(why, sizeof why, "H = Z, O = Z: refused");
+        return 0;
+    }
+    /* 5.7: what MUST be refused */
+    static const double nan_t[1] = {NAN};
+    struct { qarm_evolution e; const char *what; } bad[] = {
+        {{&ising_h, &mag_h, t2, 0, 0, 0, 0, 0, 0, 0, 0}, "k = 0"},
+        {{&ising_h, &mag_h, t2, 5000, 0, 0, 0, 0, 0, 0, 0}, "k = 5000"},
+        {{&three_h, &mag_h, t2, 1, 0, 0, 0, 0, 0, 0, 0}, "3 qubits in H, 2 in O"},
+        {{&bad_h, &mag_h, t2, 1, 0, 0, 0, 0, 0, 0, 0}, "a term on qubit 2 of 2"},
+        {{&ising_h, &mag_h, t2, 1, 0, 0, 0, 4, 0, 0, 0}, "init 4 on 2 qubits"},
+        {{&ising_h, &mag_h, t2, 1, 4, 0, 0, 0, 0, 0, 0}, "method 4"},
+        {{&ising_h, &mag_h, t2, 1, QARM_EV_PRODUCT, 3, 0, 0, 0, 0, 0}, "order 3"},
+        {{&ising_h, &mag_h, t2, 1, QARM_EV_EXACT, 2, 0, 0, 0, 0, 0}, "an order for exact"},
+        {{&ising_h, &mag_h, t2, 1, 0, 0, 0, 0, -1, 0, 0}, "eps = -1"},
+        {{&ising_h, &mag_h, t2, 1, 0, 0, 0, 0, 0, 0, 1}, "reserved = 1"},
+        {{&ising_h, &mag_h, nan_t, 1, 0, 0, 0, 0, 0, 0, 0}, "a NaN time"},
+        {{&ising_h, 0, t2, 1, 0, 0, 0, 0, 0, 0, 0}, "no observable"},
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        regs rb = {{0, (uint64_t)(uintptr_t)&bad[i].e, (uint64_t)(uintptr_t)guarded(8)}, {0}};
+        CLEAN();
+        PACKET(0x02270000, &rb);
+        PRESERVED();
+        REQUIRE(rb.x[0] == 2, "%s: W0 = %llu, must be 2", bad[i].what, (unsigned long long)rb.x[0]);
+    }
+    /* an accuracy no product formula reaches: refused, never a weaker answer */
+    qarm_evolution hard = {&ising_h, &mag_h, t2, 4, QARM_EV_PRODUCT, 1, 0, 1, 1e-300, 0, 0};
+    s = evolve(&hard, ref2, &r, QARM_EV_PRODUCT);
+    REQUIRE(s == -1 || (s == 1 && r.d[0] <= 1e-300), "eps 1e-300 by Lie-Trotter: W0 = %llu, D0 = %g",
+            (unsigned long long)r.x[0], r.d[0]);
+    return 1;
+}
+
 int main(void)
 {
     printf("Q-ARM ISA %d.%d conformance (docs/qarm_isa.md, section 9)\n", QARM_ISA_VERSION_MAJOR,
@@ -472,6 +624,8 @@ int main(void)
     result("VQE (QVLOAD QEXPECT QEXPECTN QGRAD QVSAMPLE QSESSION QVFREE)", t_vqe());
     current = P_ASYNC;
     result("QSUBMIT QPOLL QWAIT", t_async());
+    current = P_DYNAMICS;
+    result("QEVOLVE", t_qevolve());
     printf("profiles:");
     for (int p = 0; p < NPROFILES; p++)
         printf(" %s %s%s", profile_name[p],

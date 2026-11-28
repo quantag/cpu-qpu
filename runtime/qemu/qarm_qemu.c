@@ -26,6 +26,8 @@
  *   QSUBMIT, QPOLL, QWAIT   X1 = a qarm_request. QEXPECTN is submitted to libqarm and runs while the guest does
  *             (a QPU job on ibm); every other instruction runs at QSUBMIT, on the request's registers
  *   QVLOAD, QEXPECT, QEXPECTN, QGRAD, QVSAMPLE, QSESSION, QVFREE    on libqarm's backend (exact, simulator, ibm)
+ *   QEVOLVE   X1 = a qarm_evolution, X2 = k doubles out (ISA 1.1): libqarm's plan (exact, a product formula, qDRIFT):
+ *             W0 = 1, D0 = the error bound, D1 = the standard error, W3 = method | order << 8, X4 = steps; 2: refused
  *   QSEARCH   X1 = f, W2 = bits: the phase oracle of f from the guest program's own machine code, built once per
  *             function by tools/qarm_oracle.py (qoracle; plugin option helper=, python=), then Grover's search in
  *             libqarm (qarm_search.c): W0 = 1 and W3 = x, or W0 = 2 for none. If no oracle can be built, W0 stays 0
@@ -47,6 +49,7 @@
 #define QARM_RUNTIME
 #endif
 #include "qarm.h"
+#include "qarm_sv.h"                           /* QEVOLVE's limits */
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
@@ -54,7 +57,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #define MAGIC 0x4d524151u
 enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP_QAMPEST = 0x17, OP_QPERIOD = 0x18, OP_QSIMON = 0x19,
        OP_QBV = 0x1A, OP_QCOLLISION = 0x1B, OP_QSUBMIT = 0x12, OP_QPOLL = 0x13, OP_QWAIT = 0x14, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
-       OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26 };
+       OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26, OP_QEVOLVE = 0x27 };
 
 static struct qemu_plugin_register *reg_x[6], *reg_v[2];   /* X0..X5, D0, D1 of the ISA (docs/qarm_isa.md 3) */
 static int x86;                        /* an x86-64 guest: X0..X5 are RAX RDI RSI RDX RCX R8, D0 D1 XMM0 XMM1 */
@@ -387,9 +390,48 @@ static void qstructure(unsigned op)
 
 static uint32_t features(void)
 {
-    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC
+    return QARM_F_VQE | QARM_F_CIRC | QARM_F_RAND | QARM_F_CAPS | QARM_F_VSAMPLE | QARM_F_ASYNC | QARM_F_EVOLVE
            | (have_search ? QARM_F_SEARCH | QARM_F_MIN | QARM_F_COUNT | QARM_F_PERIOD | QARM_F_SIMON | QARM_F_BV
                             | QARM_F_AMPEST | QARM_F_COLLISION : 0);
+}
+
+/* a guest qarm_hamiltonian and its terms (freed by the caller) */
+static int read_ham(uint64_t addr, qarm_hamiltonian *h, qarm_pauli **terms)
+{
+    struct { uint32_t qubits, terms; double constant; uint64_t t; } g;
+    *terms = NULL;
+    if (!addr || !rd(addr, &g, sizeof g) || g.terms > QARM_EV_MAX_TERMS) return 0;
+    *terms = g_new0(qarm_pauli, g.terms + 1);
+    if (g.terms && !rd(g.t, *terms, sizeof(qarm_pauli) * g.terms)) return 0;
+    *h = (qarm_hamiltonian){g.qubits, g.terms, g.constant, *terms};
+    return 1;
+}
+
+static int qevolve(void)
+{
+    struct { uint64_t h, o, t; uint32_t k, method, order, shots; uint64_t init; double eps; uint32_t steps, reserved; } g;
+    _Static_assert(sizeof g == sizeof(qarm_evolution), "the guest and host layouts differ");
+    qarm_hamiltonian h, o;
+    qarm_pauli *ht = NULL, *ot = NULL;
+    double *t = NULL, bound = 0, err = 0;
+    uint32_t how = 0;
+    uint64_t steps = 0;
+    int status = 2;
+    if (!rd(x(1), &g, sizeof g)) note("QEVOLVE refused: the table is not readable");
+    else if (g.k < 1 || g.k > QARM_EV_MAX_K) note("QEVOLVE refused: k = %u: 1 to 4096", g.k);
+    else if (!read_ham(g.h, &h, &ht) || !read_ham(g.o, &o, &ot)) note("QEVOLVE refused: a Hamiltonian is not readable");
+    else if (!rd(g.t, t = g_new0(double, g.k), sizeof(double) * g.k)) note("QEVOLVE refused: the times are not readable");
+    else {
+        qarm_evolution e = {&h, &o, t, g.k, g.method, g.order, g.shots, g.init, g.eps, g.steps, g.reserved};
+        if (qarm_rt_evolve(&e, t, &bound, &err, &how, &steps) >= 0) {
+            if (wr(x(2), t, sizeof(double) * g.k)) {
+                set_d(0, bound); set_d(1, err); set_x(3, how); set_x(4, steps);
+                status = 1;
+            } else note("QEVOLVE: the output is not writable");
+        }
+    }
+    g_free(ht); g_free(ot); g_free(t);
+    return status;
 }
 
 #define MAX_SHOTS (1 << 22)
@@ -567,6 +609,9 @@ static void dispatch(unsigned op, uint64_t pc)
         set_x(0, s);
         break;
     }
+    case OP_QEVOLVE:
+        set_x(0, qevolve());
+        break;
     case OP_QGRAD:
         set_x(0, qgrad());
         break;

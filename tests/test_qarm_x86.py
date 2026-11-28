@@ -7,7 +7,7 @@
      paths of qarm.h give the answers (the conformance program reports no runtime).
   2. Under qemu-x86_64 with the plugin: tiny_search (QSEARCH), shor (QPERIOD, 15 and 21 factored from x86-64
      modexp code), hidden (QSIMON, QBV), collision (QCOLLISION), h2_vqe (VQE to 1e-6), maxcut_qaoa (QVSAMPLE), ghz
-     (QCIRC), and the conformance program: 15 of 15.
+     (QCIRC), and the conformance program: 16 of 16.
   3. tools/qarm_patch.py on legacy_search.c built for x86-64 without qarm.h: --scan finds both loops, --auto patches
      them; natively the original loops, under the plugin QSEARCH and QMIN: the same output.
 Needs gcc or clang for x86-64 and, for 2 and 3, QEMU 10.1+ with plugins: QARM_QEMU_X86 = its qemu-x86_64 (else
@@ -91,13 +91,13 @@ def main():
         for name, w in want.items():
             p = sh(qemu() + [exe[name]], check=False)
             if name == "conformance":
-                assert p.returncode == 0 and "15 passed, 0 failed, 0 skipped" in p.stdout, p.stdout
+                assert p.returncode == 0 and "16 passed, 0 failed, 0 skipped" in p.stdout, p.stdout
             else:
                 assert p.returncode == 0 and w in p.stdout, (name, p.stdout, p.stderr[-2000:])
         p = sh([q, "-plugin", plugin] + [exe["shor"]])
         assert len(re.findall(r"QPERIOD \w+, \d+ bits: compute oracle of \d+ qubits", p.stderr)) == 2, p.stderr
         print("2) under qemu-x86_64 with the plugin: QSEARCH, QPERIOD (Shor: 15 and 21 from x86-64 modexp code), QSIMON, "
-              "QBV, QCOLLISION, VQE (H2 to 1e-6), QVSAMPLE, QCIRC; conformance 15 of 15")
+              "QBV, QCOLLISION, VQE (H2 to 1e-6), QVSAMPLE, QCIRC; conformance 16 of 16")
 
         lexe, lout = os.path.join(d, "legacy"), os.path.join(d, "legacy.qarm")
         sh(cc + ["-O1", os.path.join(EX, "legacy_search.c"), "-o", lexe])
