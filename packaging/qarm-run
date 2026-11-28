@@ -1,0 +1,175 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
+#
+# qarm-run: run a Q-ARM program (AArch64 or x86-64 Linux ELF) under a Q-ARM runtime, in one command.
+#
+#   qarm-run [options] program [arguments]
+#
+# It reads the program's architecture from its ELF header and runs it in the matching qemu-aarch64 or qemu-x86_64
+# (10.1 or newer) with the Q-ARM plugin. A dynamically linked program of another architecture gets its libraries
+# from QEMU_LD_PREFIX, or from /usr/aarch64-linux-gnu or /usr/x86_64-linux-gnu. Where there is no QEMU (macOS), an
+# AArch64 program runs under qarm_exec.py (Unicorn) instead.
+#
+# Options:
+#   -b, --backend NAME   exact (default), simulator (shots sampled) or ibm (needs --config)
+#   -c, --config FILE    a config.json (backend, IBM token, shots); see config.example.json
+#   -q, --quiet          no [qarm: ...] reports on stderr
+#       --minimal        the 200-line runtime (runtime/minimal): Core and Circuit only
+#       --cpu            no runtime: QEMU alone, as a plain CPU (every packet is skipped, the classical path runs)
+#       --exec           qarm_exec.py (Unicorn) instead of QEMU
+#       --print          print the command instead of running it
+#       --info           what was found: QEMU, the plugins, the oracle helper, the ISA version
+#   -h, --help, --version
+#
+# Environment: QARM_QEMU_DIR (a directory with qemu-aarch64, qemu-x86_64), QARM_PLUGIN, QARM_PYTHON (the Python
+# for the oracle helper and qarm_exec.py; default python3), QEMU_LD_PREFIX.
+set -e
+
+VERSION=@QARM_VERSION@
+ISA=1.1
+
+die() { printf 'qarm-run: %s\n' "$*" >&2; exit 2; }
+
+# the installation: <prefix>/bin/qarm-run, <prefix>/lib/qarm, <prefix>/libexec/qarm, <prefix>/share/qarm
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+PREFIX=$(cd "$(dirname "$self")/.." && pwd)
+LIB=$PREFIX/lib/qarm
+SHARE=$PREFIX/share/qarm
+PY=${QARM_PYTHON:-python3}
+
+backend= config= quiet= mode=qemu runtime=full print=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -b|--backend) [ $# -ge 2 ] || die "$1 needs a value"; backend=$2; shift 2 ;;
+        --backend=*) backend=${1#*=}; shift ;;
+        -c|--config) [ $# -ge 2 ] || die "$1 needs a file"; config=$2; shift 2 ;;
+        --config=*) config=${1#*=}; shift ;;
+        -q|--quiet) quiet=1; shift ;;
+        --minimal) runtime=minimal; shift ;;
+        --cpu) mode=cpu; shift ;;
+        --exec) mode=exec; shift ;;
+        --print) print=1; shift ;;
+        --info) mode=info; shift ;;
+        -h|--help) sed -n '5,28p' "$self" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --version) echo "qarm-run $VERSION (Q-ARM ISA $ISA)"; exit 0 ;;
+        --) shift; break ;;
+        -*) die "unknown option $1 (see --help)" ;;
+        *) break ;;
+    esac
+done
+case $backend in ''|exact|simulator|ibm) ;; *) die "backend: exact, simulator or ibm, not $backend" ;; esac
+if [ -n "$config" ]; then
+    [ -f "$config" ] || die "no config file $config"
+    config=$(cd "$(dirname "$config")" && pwd)/$(basename "$config")
+fi
+
+# QEMU 10.1 or newer, for an architecture
+qemu_for() {
+    for d in "$QARM_QEMU_DIR" "$PREFIX/libexec/qarm" ""; do
+        if [ -n "$d" ]; then q=$d/qemu-$1; else q=$(command -v "qemu-$1" 2>/dev/null) || continue; fi
+        [ -x "$q" ] || continue
+        v=$("$q" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p' | head -n 1)
+        set -- "$1" $v
+        if [ $# -eq 3 ] && { [ "$2" -gt 10 ] || { [ "$2" -eq 10 ] && [ "$3" -ge 1 ]; }; }; then echo "$q"; return 0; fi
+        set -- "$1"
+    done
+    return 1
+}
+plugin_path() {
+    name=libqarm-qemu.so
+    [ "$runtime" = minimal ] && name=libqarm-minimal.so
+    if [ -n "$QARM_PLUGIN" ] && [ "$runtime" = full ]; then echo "$QARM_PLUGIN"; return 0; fi
+    [ -f "$LIB/$name" ] && { echo "$LIB/$name"; return 0; }
+    return 1
+}
+have_qoracle() { "$PY" -c 'import qoracle, lief, capstone, numpy' >/dev/null 2>&1; }
+
+if [ "$mode" = info ]; then
+    echo "qarm-run $VERSION, Q-ARM ISA $ISA, in $PREFIX"
+    for a in aarch64 x86_64; do
+        q=$(qemu_for $a) && echo "  qemu-$a: $q ($("$q" --version | head -n 1))" || echo "  qemu-$a: none 10.1 or newer"
+    done
+    runtime=full; p=$(plugin_path) && echo "  plugin: $p" || echo "  plugin: not found"
+    runtime=minimal; p=$(plugin_path) && echo "  minimal runtime: $p" || echo "  minimal runtime: not found"
+    if [ -f "$SHARE/tools/qarm_oracle.py" ] && have_qoracle; then
+        echo "  oracle helper: $SHARE/tools/qarm_oracle.py with $PY (QSEARCH, QMIN and the other oracle instructions)"
+    else
+        echo "  oracle helper: off ($PY -m pip install qoracle lief capstone numpy, for the oracle instructions)"
+    fi
+    exit 0
+fi
+
+[ $# -ge 1 ] || die "no program (see --help)"
+prog=$1
+shift
+[ -f "$prog" ] || die "no program $prog"
+case $prog in */*) ;; *) prog=./$prog ;; esac
+
+# the architecture, from the ELF header: e_machine at byte 18 (little-endian)
+magic=$(od -An -tx1 -N4 "$prog" | tr -d ' \n')
+machine=$(od -An -tu2 -j18 -N2 "$prog" | tr -d ' \n')
+if [ "$magic" = 7f454c46 ]; then
+    case $machine in
+        183) arch=aarch64 ;;
+        62) arch=x86_64 ;;
+        *) die "$prog: an ELF program for machine $machine; Q-ARM runs AArch64 and x86-64" ;;
+    esac
+elif [ "$magic" = cffaedfe ]; then
+    arch=macho                                     # an arm64 macOS program: qarm_exec.py runs those
+else
+    die "$prog is not a program: neither ELF nor Mach-O"
+fi
+
+run() {
+    if [ -n "$print" ]; then
+        for w in "$@"; do printf '%s ' "$w"; done
+        printf '\n'
+        exit 0
+    fi
+    exec "$@"
+}
+
+if [ "$mode" = exec ] || [ "$arch" = macho ] || ! qemu_for "$arch" >/dev/null; then
+    [ "$arch" = x86_64 ] && die "$prog is x86-64: it needs qemu-x86_64 10.1 or newer (QARM_QEMU_DIR), not found"
+    [ "$mode" = cpu ] && die "--cpu needs QEMU; on this machine run the program directly"
+    [ -f "$SHARE/qarm_exec.py" ] || die "no QEMU 10.1+ for $arch and no qarm_exec.py in $SHARE"
+    [ "$backend" = exact ] && backend=
+    set -- "$PY" "$SHARE/qarm_exec.py" ${quiet:+-q} ${config:+--config "$config"} ${backend:+--backend "$backend"} -- \
+        "$prog" "$@"
+    run "$@"
+fi
+
+q=$(qemu_for "$arch")
+host=$(uname -m)
+[ "$host" = arm64 ] && host=aarch64
+sysroot=
+if [ "$arch" != "$host" ]; then
+    if [ -n "$QEMU_LD_PREFIX" ]; then sysroot=$QEMU_LD_PREFIX
+    elif [ -d "/usr/$arch-linux-gnu" ]; then sysroot=/usr/$arch-linux-gnu
+    fi
+fi
+
+if [ "$mode" = cpu ]; then
+    run "$q" ${sysroot:+-L "$sysroot"} "$prog" "$@"
+fi
+
+p=$(plugin_path) || die "no Q-ARM plugin in $LIB (set QARM_PLUGIN)"
+opts=
+if [ "$runtime" = full ]; then
+    [ -n "$backend" ] && opts=$opts,backend=$backend
+    [ -n "$config" ] && opts=$opts,config=$config
+    [ -n "$quiet" ] && opts=$opts,quiet=on
+    if [ -f "$SHARE/tools/qarm_oracle.py" ] && have_qoracle; then
+        opts=$opts,helper=$SHARE/tools/qarm_oracle.py,python=$(command -v "$PY")
+    else
+        opts=$opts,helper=/nonexistent             # the oracle instructions are not claimed: classical paths
+    fi
+else
+    [ -n "$backend$config" ] && die "--minimal has no backends: it is the exact state vector"
+fi
+run "$q" ${sysroot:+-L "$sysroot"} -plugin "$p$opts" "$prog" "$@"

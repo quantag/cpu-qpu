@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
+# A release, on pushing a tag v<version> (e.g. v1.1.0): the Linux tarballs for x86-64 and ARM64 with their
+# checksums and QEMU's source, on a GitHub release; the image ghcr.io/quantag/qarm:<version> and :latest.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  package:
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ github.ref_name }}
+      publish: true
+  release:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          path: dist
+          merge-multiple: true
+      - name: The GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=${{ github.ref_name }}
+          cat > notes.md <<EOT
+          Q-ARM $v: run AArch64 and x86-64 programs with quantum instructions (Q-ARM ISA 1.1).
+
+          **Linux** (Ubuntu 22.04+, Debian 12+; needs libglib2.0-0, libcurl4, libgomp1):
+          \`\`\`
+          curl -fsSL https://github.com/quantag/cpu-qpu/releases/download/$v/qarm-$v-linux-\$(uname -m).tar.gz | tar xz
+          qarm-$v-linux-\$(uname -m)/bin/qarm-run --info
+          \`\`\`
+          **Anywhere with Docker** (macOS, Windows, Linux):
+          \`\`\`
+          docker run --rm -v "\$PWD:/work" ghcr.io/quantag/qarm:$v qarm-cc hello.c -o hello
+          docker run --rm -v "\$PWD:/work" ghcr.io/quantag/qarm:$v qarm-run ./hello
+          \`\`\`
+          The tarballs bundle QEMU 10.2.4's user-mode emulators, unmodified (GPL-2.0); their complete source is
+          \`qemu-10.2.4.tar.xz\` below. The specification: docs/qarm_isa.md.
+          EOT
+          gh release create "$v" --repo "${{ github.repository }}" --title "Q-ARM $v" --notes-file notes.md \
+            dist/qarm-* dist/qemu-10.2.4.tar.xz
