@@ -28,7 +28,7 @@ jobs:
       - name: Tools
         run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build pkg-config libglib2.0-dev libcurl4-openssl-dev xz-utils cmake
       - name: QEMU's release tarball and build (cached)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/qemu-pkg
@@ -42,7 +42,7 @@ jobs:
           for img in ubuntu:22.04 ubuntu:24.04 debian:12; do
             docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/packaging:/p:ro" $img sh /p/smoke.sh /dist/$(basename $t)
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: tarball-${{ matrix.runner }}
           path: |
@@ -59,7 +59,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: ${{ matrix.tarball }}
           path: dist

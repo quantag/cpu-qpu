@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, ci-node24]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -104,7 +104,7 @@ jobs:
         run: python -m tests.test_qarm_molecule
       - name: QEMU 10.2.4 with plugins (cached)
         id: qemu
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/qemu
           key: qemu-v10.2.4-aarch64-x86_64-linux-user-plugins-${{ runner.os }}-1
