@@ -41,6 +41,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | NVIDIA CUDA-Q as the coprocessor of a Q-ARM binary; how the two compare | `qarm_exec.py --backend cudaq` | [Q-ARM and CUDA-Q](docs/qarm_vs_cudaq.md) |
 | An open specification of the instruction set, and a conformance program for runtimes | [`docs/qarm_isa.md`](docs/qarm_isa.md), `tests/conformance` | [the spec](docs/qarm_isa.md) |
 | VQE: a molecule's ground-state energy, the optimizer in C; QAOA and its answer's bitstrings | `QVLOAD`, `QEXPECT`, `QEXPECTN`, `QGRAD`, `QVSAMPLE`, `QSESSION`; `tools/qarm_molecule.py` | [VQE](#vqe-the-molecules-energy-from-a-c-optimizer) |
+| A fast exact state vector on all cores (OpenMP), up to 24 qubits: an 18-qubit LiH gradient in 0.57 s | `include/qarm_sv.h`, `tools/qarm_sv_bench.c` | [speed](docs/qarm_v2.md#speed-of-the-state-vector-and-threads) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
 
@@ -860,6 +861,15 @@ SPSA (one batch per iteration): with shot noise at 4096 shots, H₂ and LiH come
 $ python3 tools/qarm_molecule.py --name lih --atom "Li 0 0 0; H 0 0 1.5949" --active 2,5 -o examples/qarm/lih.h
 $ clang -O1 -iquote include -iquote examples/qarm examples/qarm/molecule_vqe.c -o molecule_vqe -lm && ./molecule_vqe
 ```
+
+**Speed.** The exact state vector (`include/qarm_sv.h`) is used by the plain CPU, libqarm and the QEMU plugin.
+- It works in place and handles Hamiltonian terms that share an X mask in one pass.
+- It applies a whole UCC excitation in one exact pass, and runs on all cores with OpenMP.
+
+An 18-qubit LiH energy and gradient took 6.5 s before and takes 0.57 s now on 2 cores; 20 qubits, 41.6 s →
+2.8 s. A whole H₂O VQE (14 qubits) took 32 s and takes 5.6 s. libqarm takes up to 24 qubits. Measure it on
+your machine with `tools/qarm_sv_bench.c`
+([`docs/qarm_v2.md`](docs/qarm_v2.md#speed-of-the-state-vector-and-threads)).
 
 ### Native: libqarm, the Q-ARM runtime in C
 
