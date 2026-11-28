@@ -4,15 +4,17 @@
 #
 # qarm-cc: compile a C program with Q-ARM's headers (qarm.h) for AArch64 (the default) or x86-64 Linux.
 #
-#   qarm-cc [--x86-64] [--auto | --auto-all] [--remarks] [compiler options] file.c ... -o program
+#   qarm-cc [--x86-64] [--auto | --auto-all | --auto-estimate] [--remarks] [compiler options] file.c ... -o program
 #
 # It adds -O1 (oracle functions must be leaf functions without vector code: docs/qarm_isa.md 5.5), the headers
 # (-iquote <prefix>/include/qarm) and -lm, and picks the compiler: cc on a host of that architecture, else
 # aarch64-linux-gnu-gcc or x86_64-linux-gnu-gcc. QARM_CC overrides it. Options given later win (-O2, ...).
 #   --auto       the QArmAuto pass (docs/qarm_auto.md): search and minimum loops in QARM_AUTO functions go to the
-#                coprocessor (QSEARCH, QMIN). Needs clang; the pass is built for that clang's LLVM on first use
+#                coprocessor (QSEARCH, QMIN), and count and sum loops in QARM_ESTIMATE functions too, as estimates
+#                (QCOUNT, QAMPEST). Needs clang; the pass is built for that clang's LLVM on first use
 #                (llvm-N-dev and cmake), into ~/.cache/qarm, unless the installation has one
-#   --auto-all   the same for every eligible loop, marked or not
+#   --auto-all   searches and minimums in every function, marked or not
+#   --auto-estimate   every eligible loop, counts and sums included, marked or not
 #   --remarks    what the pass did, did not, and could do (-Rpass=qarm-auto ...)
 # Then: qarm-run ./program
 set -e
@@ -29,6 +31,7 @@ while [ $# -gt 0 ]; do
         --aarch64|--arm64) arch=aarch64; shift ;;
         --auto) auto=annotated; shift ;;
         --auto-all) auto=all; shift ;;
+        --auto-estimate) auto=all-estimate; shift ;;
         --remarks) remarks=1; shift ;;
         -h|--help) sed -n '5,19p' "$self" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) break ;;
@@ -63,7 +66,7 @@ if [ -n "$auto" ]; then
         fi
     fi
     set -- -fpass-plugin="$plugin" "$@"
-    [ "$auto" = all ] && set -- -Xclang -load -Xclang "$plugin" -mllvm -qarm-auto=all "$@"
+    case $auto in all|all-estimate) set -- -Xclang -load -Xclang "$plugin" -mllvm -qarm-auto=$auto "$@" ;; esac
     [ -n "$remarks" ] && set -- -Rpass=qarm-auto -Rpass-missed=qarm-auto -Rpass-analysis=qarm-auto "$@"
     linking=1
     for a in "$@"; do case $a in -c|-S|-E|-emit-llvm) linking= ;; esac; done

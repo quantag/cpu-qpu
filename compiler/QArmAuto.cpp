@@ -8,6 +8,8 @@
 //   ... -Xclang -load -Xclang QArmAuto.so -mllvm -qarm-auto=all          every eligible loop
 //   ... -Rpass=qarm-auto  -Rpass-missed=qarm-auto  -Rpass-analysis=qarm-auto     what it did, did not, could do
 //
+// Counts and sums (QCOUNT, QAMPEST), in QARM_ESTIMATE functions, are below, before the pass.
+//
 // The loops, as clang writes them before inlining (top-tested, the induction variable x from 0 by 1 to a constant
 // N <= 65536, nothing else changing from one iteration to the next):
 //
@@ -22,7 +24,8 @@
 //             high probability (Durr-Hoyer), ties broken differently; the cost of the returned arg is checked.
 //
 // Without a coprocessor, or when it declines, each loop runs exactly as compiled without the plugin. The runtime
-// side is two functions in qarm_auto.c, linked into the program: __qarm_auto_search, __qarm_auto_min.
+// side is four functions in qarm_auto.c, linked into the program: __qarm_auto_search, __qarm_auto_min,
+// __qarm_auto_count, __qarm_auto_sum.
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/InstIterator.h"
@@ -40,6 +43,9 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
+#include "llvm/Support/KnownBits.h"
+
+#include <algorithm>
 #include <set>
 #include <string>
 
@@ -47,7 +53,8 @@ using namespace llvm;
 using namespace llvm::PatternMatch;
 
 static cl::opt<std::string> AutoMode("qarm-auto", cl::init("annotated"),
-                                     cl::desc("which loops QArmAuto rewrites: annotated (QARM_AUTO functions), all, off"));
+                                     cl::desc("which loops QArmAuto rewrites: annotated (QARM_AUTO and QARM_ESTIMATE functions), all (searches and "
+                                             "minimums everywhere), all-estimate (counts and sums too), off"));
 
 namespace {
 const char *DEBUG_NAME = "qarm-auto";
@@ -106,7 +113,9 @@ static bool pureFunction(Function *F, std::string &why)
         why = "it does not take one int"; return false;
     }
     Type *R = F->getReturnType();
-    if (!R->isIntegerTy(32) && !R->isIntegerTy(8) && !R->isIntegerTy(1)) { why = "it does not return an int or a bool"; return false; }
+    if (!R->isIntegerTy(32) && !R->isIntegerTy(16) && !R->isIntegerTy(8) && !R->isIntegerTy(1)) {
+        why = "it does not return an int, a short, a char or a bool"; return false;
+    }
     std::set<Function *> path, done;
     return pureBody(F, why, path, done);
 }
@@ -399,8 +408,229 @@ static void rewriteMin(Module &M, Min &R)
     C.IV->setIncomingValueForBlock(C.Pre, B.CreateSelect(Ok, B.getInt32((uint32_t)C.N), B.getInt32(0), "qarm.start"));
 }
 
+// ---------------------------------------------------------------- count and sum (estimates: QARM_ESTIMATE)
+// count     for (x = 0; x < N; x++) if (cond(f(x))) n++;      (or n = cond ? n + 1 : n, or n += cond)
+// sum       for (x = 0; x < N; x++) s += v(f(x));             v(f(x)) in 0 .. 2^k - 1, k <= 16, known at compile
+//                                                            time (an unsigned char or short, a mask, a bool)
+// cond and v: f's result through casts, comparisons and arithmetic with constants, which the coprocessor's
+// function repeats. s an integer of 32 bits or more, or a float or double (v converted). A sum of a bool is a count.
+const unsigned MAX_K = 16;
+
+struct Est {
+    Canon C;
+    Function *Fn = nullptr;
+    CallInst *Call = nullptr;
+    PHINode *Acc = nullptr;
+    SmallVector<Instruction *, 4> Chain;         // from f's result to cond or v, in order
+    bool Negate = false;                         // a count of !cond
+    bool Count = true;
+    unsigned K = 1;                              // a sum's value bits
+};
+
+// v from call through instructions with one operand from the chain and constants for the rest
+static bool chainTo(Value *V, CallInst *Call, const Loop *L, SmallVector<Instruction *, 4> &out, std::string &why)
+{
+    out.clear();
+    while (V != Call) {
+        auto *I = dyn_cast<Instruction>(V);
+        if (!I || !L->contains(I) || out.size() >= 8) { why = "the counted or added value is not a function of the call"; return false; }
+        bool kind = (isa<CastInst>(I) && I->getType()->isIntegerTy() && I->getOperand(0)->getType()->isIntegerTy())
+                    || isa<BinaryOperator>(I) || isa<ICmpInst>(I);
+        if (!kind || !I->getType()->isIntegerTy()) { why = "the counted or added value is not integer arithmetic on the call"; return false; }
+        Value *from = nullptr;
+        for (Value *Op : I->operands())
+            if (!isa<Constant>(Op)) {
+                if (from) { why = "the counted or added value depends on more than the call"; return false; }
+                from = Op;
+            }
+        if (!from) { why = "the counted or added value is a constant"; return false; }
+        out.push_back(I);
+        V = from;
+    }
+    std::reverse(out.begin(), out.end());
+    return true;
+}
+
+static bool isInc(Value *v, PHINode *acc)
+{
+    if (acc->getType()->isIntegerTy()) return match(v, m_Add(m_Specific(acc), m_One())) || match(v, m_Add(m_One(), m_Specific(acc)));
+    return false;
+}
+
+static bool matchEst(const Canon &C, const DataLayout &DL, Est &E, std::string &why)
+{
+    E.C = C;
+    auto ph = carried(C);
+    if (ph.size() != 2) { why = "the loop does not carry exactly one count or sum"; return false; }
+    E.Acc = ph[0] == C.IV ? ph[1] : ph[0];
+    Type *T = E.Acc->getType();
+    bool fp = T->isFloatTy() || T->isDoubleTy();
+    if (!fp && !(T->isIntegerTy() && T->getIntegerBitWidth() >= 32)) { why = "the count or sum is not an int, a long or a double"; return false; }
+    SmallVector<BasicBlock *, 4> exiting;
+    C.L->getExitingBlocks(exiting);
+    if (exiting.size() != 1) { why = "the loop leaves at more than its bound"; return false; }
+    CallInst *Call = nullptr;
+    for (BasicBlock *BB : C.L->blocks())
+        for (Instruction &I : *BB) {
+            if (auto *CI = dyn_cast<CallInst>(&I)) {
+                if (isa<DbgInfoIntrinsic>(CI) || (isa<IntrinsicInst>(CI) && onlyHarmless(*CI))) continue;
+                if (Call) { why = "the loop calls more than one function"; return false; }
+                Call = CI;
+                continue;
+            }
+            if (!onlyHarmless(I)) { why = "the loop has side effects"; return false; }
+        }
+    if (!Call || !Call->getCalledFunction() || Call->arg_size() != 1 || Call->getArgOperand(0) != C.IV) {
+        why = "the loop calls no function of the counter"; return false;
+    }
+    if (!pureFunction(Call->getCalledFunction(), why)) { why = "the loop's function is not pure: " + why; return false; }
+    BasicBlock *Latch = C.L->getLoopLatch();
+    Value *next = E.Acc->getIncomingValueForBlock(Latch);
+    SmallVector<Instruction *, 3> updates;       // the instructions that may use the accumulator
+    Value *Cond = nullptr;
+    bool onTrue = true;
+    if (auto *LP = dyn_cast<PHINode>(next); LP && LP->getParent() == Latch && LP->getNumIncomingValues() == 2 && !fp) {
+        // the branch form: phi [n + 1, then], [n, the test's block], the test's other edge to the latch
+        int keep = LP->getIncomingValue(0) == E.Acc ? 0 : LP->getIncomingValue(1) == E.Acc ? 1 : -1;
+        if (keep < 0 || !isInc(LP->getIncomingValue(1 - keep), E.Acc)) { why = "the update is not n + 1 under a condition"; return false; }
+        BasicBlock *Then = LP->getIncomingBlock(1 - keep), *Test = LP->getIncomingBlock(keep);
+        auto *Br = dyn_cast<BranchInst>(Test->getTerminator());
+        if (!Br || !Br->isConditional() || Then->getSinglePredecessor() != Test || Then->getSingleSuccessor() != Latch
+            || (Br->getSuccessor(0) != Then && Br->getSuccessor(1) != Then)
+            || Br->getSuccessor(Br->getSuccessor(0) == Then ? 1 : 0) != Latch) {
+            why = "the count's condition is not tested every iteration"; return false;
+        }
+        Cond = Br->getCondition();
+        onTrue = Br->getSuccessor(0) == Then;
+        updates = {LP, cast<Instruction>(LP->getIncomingValue(1 - keep))};
+    } else if (auto *SI = dyn_cast<SelectInst>(next); SI && !fp) {
+        Value *t = SI->getTrueValue(), *f = SI->getFalseValue();
+        if (isInc(t, E.Acc) && f == E.Acc) onTrue = true;
+        else if (isInc(f, E.Acc) && t == E.Acc) onTrue = false;
+        else { why = "the update is not n + 1 under a condition"; return false; }
+        Cond = SI->getCondition();
+        updates = {SI, cast<Instruction>(onTrue ? t : f)};
+    } else {
+        // the sum: s + v or v + s
+        auto *Add = dyn_cast<BinaryOperator>(next);
+        unsigned want = fp ? Instruction::FAdd : Instruction::Add;
+        if (!Add || Add->getOpcode() != want || (Add->getOperand(0) != E.Acc && Add->getOperand(1) != E.Acc)) {
+            why = "the update is not a count (n + 1 under a condition) or a sum (s + v)"; return false;
+        }
+        Value *X = Add->getOperand(0) == E.Acc ? Add->getOperand(1) : Add->getOperand(0);
+        bool signedFp = false;
+        if (fp) {
+            if (isa<UIToFPInst>(X) || isa<SIToFPInst>(X)) { signedFp = isa<SIToFPInst>(X); X = cast<CastInst>(X)->getOperand(0); }
+            else { why = "the added value is not converted from an integer"; return false; }
+        }
+        if (!chainTo(X, Call, C.L, E.Chain, why)) return false;
+        unsigned W = X->getType()->getIntegerBitWidth();
+        KnownBits KB = computeKnownBits(X, DL);
+        unsigned k = W - KB.countMinLeadingZeros();
+        if (k == 0) { why = "the added value is always 0"; return false; }
+        if (k > MAX_K || (signedFp && k >= W)) {
+            why = "the added value has no known width of 16 bits or less (an unsigned char or short, a mask such as & 0xff)"; return false;
+        }
+        E.Count = k == 1;
+        E.K = k;
+        updates = {Add};
+    }
+    if (Cond) {
+        if (!chainTo(Cond, Call, C.L, E.Chain, why)) return false;
+        if (!Cond->getType()->isIntegerTy(1)) { why = "the count's condition is not a bool"; return false; }
+        E.Negate = !onTrue;
+    }
+    // the accumulator feeds its update only; nothing but it and the counter is used after the loop
+    for (User *U : E.Acc->users())
+        if (auto *UI = dyn_cast<Instruction>(U); UI && C.L->contains(UI) && std::find(updates.begin(), updates.end(), UI) == updates.end()) {
+            why = "the count or sum is used inside the loop"; return false;
+        }
+    for (BasicBlock *BB : C.L->blocks())
+        for (Instruction &I : *BB)
+            for (User *U : I.users())
+                if (auto *UI = dyn_cast<Instruction>(U))
+                    if (!C.L->contains(UI) && &I != E.Acc && &I != C.IV) { why = "a value computed in the loop is used after it"; return false; }
+    E.Fn = Call->getCalledFunction();
+    E.Call = Call;
+    return true;
+}
+
+// the coprocessor's function: int g(int x) = the chain on f(x) as an int (0 or 1 for a count), 0 for x >= N
+static Function *estDomain(Module &M, const Est &E)
+{
+    LLVMContext &Ctx = M.getContext();
+    Type *I32 = Type::getInt32Ty(Ctx);
+    Function *G = Function::Create(FunctionType::get(I32, {I32}, false), GlobalValue::InternalLinkage,
+                                   E.Fn->getName() + (E.Count ? ".qarmcount" : ".qarmsum"), M);
+    G->addFnAttr(Attribute::NoInline);
+    bool pow2 = E.C.N == (uint64_t(1) << E.C.Bits);
+    BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", G), *In = BasicBlock::Create(Ctx, "inside", G),
+               *Out = pow2 ? nullptr : BasicBlock::Create(Ctx, "outside", G);
+    IRBuilder<> B(Entry);
+    Value *X = G->getArg(0);
+    if (pow2) B.CreateBr(In);
+    else B.CreateCondBr(B.CreateICmpULT(X, B.getInt32((uint32_t)E.C.N)), In, Out);
+    B.SetInsertPoint(In);
+    CallInst *C = B.CreateCall(E.Fn, {X});
+    C->addFnAttr(Attribute::AlwaysInline);
+    Value *V = C;
+    ValueToValueMapTy VM;
+    VM[E.Call] = C;
+    for (Instruction *I : E.Chain) {
+        Instruction *K = I->clone();
+        for (Use &Op : K->operands())
+            if (Value *R = VM.lookup(Op.get())) Op.set(R);
+        if (auto *BO = dyn_cast<BinaryOperator>(K)) { BO->setHasNoSignedWrap(false); BO->setHasNoUnsignedWrap(false); }
+        B.Insert(K);
+        VM[I] = K;
+        V = K;
+    }
+    if (E.Negate) V = B.CreateNot(V);
+    B.CreateRet(B.CreateZExtOrTrunc(V, I32));
+    if (Out) {
+        B.SetInsertPoint(Out);
+        B.CreateRet(B.getInt32(0));
+    }
+    return G;
+}
+
+static void rewriteEst(Module &M, Est &E)
+{
+    Canon &C = E.C;
+    Function *F = C.Header->getParent();
+    Function *G = estDomain(M, E);
+    LLVMContext &Ctx = M.getContext();
+    auto *P = PointerType::get(Ctx, 0);
+    Type *I32 = Type::getInt32Ty(Ctx), *I64 = Type::getInt64Ty(Ctx), *Dbl = Type::getDoubleTy(Ctx);
+    IRBuilder<> B(&F->getEntryBlock(), F->getEntryBlock().getFirstInsertionPt());
+    AllocaInst *Slot = B.CreateAlloca(E.Count ? I64 : Dbl, nullptr, E.Count ? "qarm.count" : "qarm.sum");
+    B.SetInsertPoint(C.Pre->getTerminator());
+    Value *Ok;
+    if (E.Count)
+        Ok = B.CreateCall(M.getOrInsertFunction("__qarm_auto_count", FunctionType::get(I32, {P, I32, P}, false)),
+                          {G, B.getInt32(C.Bits), Slot}, "qarm.counted");
+    else
+        Ok = B.CreateCall(M.getOrInsertFunction("__qarm_auto_sum", FunctionType::get(I32, {P, I32, I32, P}, false)),
+                          {G, B.getInt32(C.Bits), B.getInt32(E.K), Slot}, "qarm.summed");
+    Ok = B.CreateICmpNE(Ok, B.getInt32(0));
+    Value *Est = B.CreateLoad(E.Count ? I64 : Dbl, Slot, "qarm.estimate");
+    Type *T = E.Acc->getType();
+    Value *A0 = E.Acc->getIncomingValueForBlock(C.Pre), *Inc;
+    if (T->isIntegerTy()) {
+        if (!E.Count) {                          // to the nearest integer, halves away from 0 (no libm call)
+            Value *H = B.CreateSelect(B.CreateFCmpOLT(Est, ConstantFP::get(Dbl, 0.0)), ConstantFP::get(Dbl, -0.5), ConstantFP::get(Dbl, 0.5));
+            Est = B.CreateFPToSI(B.CreateFAdd(Est, H), I64);
+        }
+        Inc = B.CreateAdd(A0, B.CreateSExtOrTrunc(Est, T));
+    } else {
+        Inc = B.CreateFAdd(A0, E.Count ? B.CreateSIToFP(Est, T) : B.CreateFPCast(Est, T));
+    }
+    E.Acc->setIncomingValueForBlock(C.Pre, B.CreateSelect(Ok, Inc, A0, "qarm.acc"));
+    C.IV->setIncomingValueForBlock(C.Pre, B.CreateSelect(Ok, B.getInt32((uint32_t)C.N), B.getInt32(0), "qarm.start"));
+}
+
 // ---------------------------------------------------------------- the pass
-static std::set<Function *> annotated(Module &M)
+static std::set<Function *> annotated(Module &M, StringRef mark)
 {
     std::set<Function *> fs;
     GlobalVariable *GA = M.getGlobalVariable("llvm.global.annotations");
@@ -414,7 +644,7 @@ static std::set<Function *> annotated(Module &M)
         auto *Str = dyn_cast<GlobalVariable>(CS->getOperand(1)->stripPointerCasts());
         if (!Fn || !Str || !Str->hasInitializer()) continue;
         if (auto *CD = dyn_cast<ConstantDataArray>(Str->getInitializer()))
-            if (CD->isCString() && CD->getAsCString() == "qarm_auto") fs.insert(Fn);
+            if (CD->isCString() && CD->getAsCString() == mark) fs.insert(Fn);
     }
     return fs;
 }
@@ -423,30 +653,33 @@ struct QArmAuto : PassInfoMixin<QArmAuto> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM)
     {
         if (AutoMode == "off") return PreservedAnalyses::all();
-        bool all = AutoMode == "all";
-        auto marked = annotated(M);
+        bool allEst = AutoMode == "all-estimate", all = allEst || AutoMode == "all";
+        auto marked = annotated(M, "qarm_auto"), estimating = annotated(M, "qarm_estimate");
         auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
         bool changed = false;
         SmallVector<Function *, 16> fns;
         for (Function &F : M)
             if (!F.isDeclaration()) fns.push_back(&F);
         for (Function *F : fns) {
-            bool enabled = all || marked.count(F);
+            bool estimate = allEst || estimating.count(F), enabled = all || estimate || marked.count(F);
             auto &LI = FAM.getResult<LoopAnalysis>(*F);
             auto &ORE = FAM.getResult<OptimizationRemarkEmitterAnalysis>(*F);
             SmallVector<Search, 2> searches;
             SmallVector<Min, 2> mins;
+            SmallVector<Est, 2> ests;
             for (Loop *L : LI.getLoopsInPreorder()) {
                 if (!L->isInnermost()) continue;
                 Canon C;
-                std::string why, why2;
+                std::string why, why2, why3;
                 Search S;
                 Min R;
+                Est E;
                 bool ok = canon(L, C, why);
                 bool isSearch = ok && matchSearch(C, S, why);
                 bool isMin = ok && !isSearch && matchMin(C, R, why2);
-                const char *kind = isSearch ? "search" : "minimum";
-                std::string fn = isSearch ? S.Pred->getName().str() : isMin ? R.Cost->getName().str() : "";
+                bool isEst = ok && !isSearch && !isMin && matchEst(C, M.getDataLayout(), E, why3);
+                const char *kind = isSearch ? "search" : isMin ? "minimum" : isEst && E.Count ? "count" : "sum";
+                std::string fn = isSearch ? S.Pred->getName().str() : isMin ? R.Cost->getName().str() : isEst ? E.Fn->getName().str() : "";
                 if ((isSearch || isMin) && enabled) {
                     if (isSearch) searches.push_back(S); else mins.push_back(R);
                     ORE.emit([&] {
@@ -455,23 +688,38 @@ struct QArmAuto : PassInfoMixin<QArmAuto> {
                                << (isSearch ? "QSEARCH (any solution; the loop checks it, and runs in full when none is found)"
                                             : "QMIN (a minimizer with high probability; the loop runs as written without a coprocessor)");
                     });
-                } else if (isSearch || isMin) {
+                } else if (isEst && estimate) {
+                    ests.push_back(E);
+                    ORE.emit([&] {
+                        auto Rm = OptimizationRemark(DEBUG_NAME, E.Count ? "QCOUNT" : "QAMPEST", L->getStartLoc(), L->getHeader());
+                        Rm << "a " << kind << " over " << fn << "(x), x < " << ore::NV("N", C.N);
+                        if (!E.Count) Rm << " of " << ore::NV("K", E.K) << "-bit values";
+                        Rm << ": " << (E.Count ? "QCOUNT" : "QAMPEST")
+                           << " (an estimate, its bound in qarm_auto_error(); the loop runs as written without a coprocessor)";
+                        return Rm;
+                    });
+                } else if (isSearch || isMin || isEst) {
+                    bool est = isEst;
                     ORE.emit([&] {
                         return OptimizationRemarkAnalysis(DEBUG_NAME, "Candidate", L->getStartLoc(), L->getHeader())
                                << "a " << kind << " over " << fn << "(x), x < " << ore::NV("N", C.N)
-                               << ": mark the function QARM_AUTO (qarm_auto.h), or compile with -mllvm -qarm-auto=all, to give it to the coprocessor";
+                               << (est ? ": mark the function QARM_ESTIMATE (qarm_auto.h), or compile with -mllvm -qarm-auto=all-estimate, "
+                                         "to estimate it on the coprocessor"
+                                       : ": mark the function QARM_AUTO (qarm_auto.h), or compile with -mllvm -qarm-auto=all, to give it to the coprocessor");
                     });
                 } else if (enabled) {
                     std::string reason = !ok ? why : why2.empty() ? why : (why + "; as a minimum: " + why2);
+                    if (ok && estimate) reason = carried(C).size() == 2 ? why3 : reason + "; as a count or sum: " + why3;
                     ORE.emit([&] {
                         return OptimizationRemarkMissed(DEBUG_NAME, "NotAQuantumLoop", L->getStartLoc(), L->getHeader())
-                               << "not a search or minimum loop: " << reason;
+                               << (estimate ? "not a search, minimum, count or sum loop: " : "not a search or minimum loop: ") << reason;
                     });
                 }
             }
             for (Search &S : searches) rewriteSearch(M, S);
             for (Min &R : mins) rewriteMin(M, R);
-            if (!searches.empty() || !mins.empty()) {
+            for (Est &E : ests) rewriteEst(M, E);
+            if (!searches.empty() || !mins.empty() || !ests.empty()) {
                 changed = true;
                 FAM.invalidate(*F, PreservedAnalyses::none());
             }
@@ -483,7 +731,7 @@ struct QArmAuto : PassInfoMixin<QArmAuto> {
 
 extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo()
 {
-    return {LLVM_PLUGIN_API_VERSION, "QArmAuto", "1.0", [](PassBuilder &PB) {
+    return {LLVM_PLUGIN_API_VERSION, "QArmAuto", "1.1", [](PassBuilder &PB) {
                 PB.registerPipelineEarlySimplificationEPCallback(
 #if LLVM_VERSION_MAJOR >= 20
                     [](ModulePassManager &MPM, OptimizationLevel, ThinOrFullLTOPhase) { MPM.addPass(QArmAuto()); });
