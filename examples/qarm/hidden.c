@@ -33,7 +33,7 @@ int main(void)
     if (qarm_simon(two_to_one, 6, &s))
         printf("Simon: the hidden shift is %#x (%s)\n", s, f & QARM_F_SIMON ? "QSIMON" : "classical");
     else
-        printf("Simon: no hidden shift\n");
+        printf(f & QARM_F_SIMON ? "Simon: no hidden shift found\n" : "Simon: no hidden shift\n");
     qarm_bv(parity, 6, &s);
     printf("Bernstein-Vazirani: the hidden string is %#x (%s)\n", s, f & QARM_F_BV ? "QBV, one query" : "classical");
     return 0;

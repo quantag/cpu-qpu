@@ -299,6 +299,15 @@ The tables give the inputs and outputs, then what every answer satisfies. "Check
 MUST verify, by calling the program's own function, before it returns a `W0 = 1` answer. When the check
 fails, the library MUST take the classical path.
 
+A check establishes only what it tests:
+- QSEARCH's and QCOLLISION's checks verify the answer completely.
+- QMIN's check verifies the reported cost, not that it is the least.
+- QPERIOD's, QSIMON's and QBV's checks probe four inputs.
+
+The rest is the "guaranteed" column, which the runtime provides with the stated probability. `W0 = 2` from
+QSEARCH, QPERIOD, QSIMON and QCOLLISION means that nothing was found within the instruction's budget. It is
+not a proof that nothing exists.
+
 ### 6.1 Discovery
 
 | opcode | name | in | out |
@@ -316,8 +325,8 @@ All take `X1` = the address of f and `W2` = bits (1 ≤ bits ≤ 31).
 | 0x15 | `QMIN` | `W0 = 1`, `W3` = x, `W4` = cost(x) (signed 32-bit) | x is a least-cost argument with probability ≥ 1/2 per run (Dürr–Høyer) | cost(W3) = W4 |
 | 0x16 | `QCOUNT` | `W0 = 1`, `X3` = M̃, `D0` = ε | \|M̃ − M\| ≤ ε with probability ≥ 8/π², where M = \|{x : f(x) = 1}\| | — |
 | 0x17 | `QAMPEST` | in: `W3` = k (value bits). `W0 = 1`, `D0` = μ̃, `D1` = ε | \|μ̃ − μ\| ≤ ε with probability ≥ 8/π², where μ = 2^−bits Σₓ f(x), f(x) ∈ [0, 2ᵏ) | — |
-| 0x18 | `QPERIOD` | `W0 = 1`, `W3` = r; `W0 = 2`: none | r > 0 is the least period: f(x + r) = f(x) wherever both are in the domain | f(i) = f(i + r), i = 0…3 |
-| 0x19 | `QSIMON` | `W0 = 1`, `W3` = s ≠ 0; `W0 = 2`: f is one-to-one | f(x) = f(x ⊕ s) for every x | f(i) = f(i ⊕ s), i = 0…3 |
+| 0x18 | `QPERIOD` | `W0 = 1`, `W3` = r; `W0 = 2`: none found | r > 0 is the least period: f(x + r) = f(x) wherever both are in the domain | f(i) = f(i + r), i = 0…3 |
+| 0x19 | `QSIMON` | `W0 = 1`, `W3` = s ≠ 0; `W0 = 2`: no shift found (a runtime that verifies its candidates on every input, as the reference runtimes do, returns it only when there is none) | f(x) = f(x ⊕ s) for every x | f(i) = f(i ⊕ s), i = 0…3 |
 | 0x1A | `QBV` | `W0 = 1`, `W3` = s | f(x) = s·x ⊕ c (mod 2) for a constant c, if f has that form | f agrees at four probe inputs |
 | 0x1B | `QCOLLISION` | `W0 = 1`, `W3` = x, `W4` = y; `W0 = 2`: none found | x ≠ y and f(x) = f(y). Brassard–Høyer–Tapp: O(N^1/3) oracle calls for a two-to-one f. `W0 = 2` after three tries, likely when f is one-to-one | x ≠ y, f(x) = f(y) |
 
@@ -535,5 +544,5 @@ so a 1.1 program runs on it through the library's classical path.
 
 | version | date | changes |
 |---|---|---|
-| 1.1 | 2026-11-28 | `QEVOLVE` (0x27, formerly reserved): time evolution with a guaranteed error bound, by exact evolution, product formulas of order 1, 2, 4 and 6, or qDRIFT; the `qarm_evolution` table (5.7); feature bit 16384; the Dynamics profile; the conformance program's `QEVOLVE` test. 23 instructions in six profiles. |
+| 1.1 | 2026-11-28 | `QEVOLVE` (0x27, formerly reserved): time evolution with a guaranteed error bound, by exact evolution, product formulas of order 1, 2, 4 and 6, or qDRIFT; the `qarm_evolution` table (5.7); feature bit 16384; the Dynamics profile; the conformance program's `QEVOLVE` test. 23 instructions in six profiles. Clarified: what each check establishes (6.2), and that `W0 = 2` from an oracle instruction means none found, not none exists (QSIMON's said "f is one-to-one"). |
 | 1.0 | 2026-11-28 | First publication. 22 instructions in five profiles; packets for AArch64 and x86-64; `qarm_isa.h`; the conformance program with per-profile results. |

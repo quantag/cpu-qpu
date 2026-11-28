@@ -34,8 +34,16 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
    that code.
 2. **One binary for every machine.** The packets are no-ops on a plain CPU. A program built today runs
    unchanged on a laptop, under an emulator with a simulator, and on a QPU-backed runtime.
-3. **Answers are verified by the program's own code.** A wrong quantum answer cannot reach the caller
-   where a check exists: search, minimum, period, shift, collision.
+3. **Answers are checked by the program's own code.** What a check establishes depends on the
+   instruction (docs/qarm_v2.md, "What the checks establish"):
+   - **Fully verified:** a search answer (f(x) = 1) and a collision (x ≠ y, f(x) = f(y)). A wrong one
+     cannot reach the caller.
+   - **Cost verified, optimality probabilistic:** a minimum. The library confirms that the returned x has
+     the reported cost. That no x costs less holds only with the probability of Dürr–Høyer.
+   - **Probed on four inputs:** a period, a hidden shift and a hidden string. A probe rejects most wrong
+     answers but proves nothing about the other inputs.
+   - **Search exhaustion:** a search that finds nothing reports "none found within the search budget". A
+     solution may still exist.
 4. **An open binary standard.** Anyone can implement a runtime, and the conformance program says
    whether it is right. That runtime could be an emulator, a hypervisor, an OS service or a future CPU
    with a quantum coprocessor.

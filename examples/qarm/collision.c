@@ -21,7 +21,10 @@ __attribute__((noinline)) static int tag(int m)
 int main(void)
 {
     int a, b;
-    if (qarm_collision(tag, 14, &a, &b) != 1) { printf("no collision\n"); return 1; }
+    if (qarm_collision(tag, 14, &a, &b) != 1) {
+        printf(qarm_features() & QARM_F_COLLISION ? "no collision found in three tries\n" : "no collision\n");
+        return 1;
+    }
     printf("tag(0x%04x) = tag(0x%04x) = 0x%03x (%s)\n", a, b, tag(a), qarm_features() & QARM_F_COLLISION
            ? "QCOLLISION on the quantum coprocessor" : "every tag computed and sorted on this CPU");
     return !(a != b && tag(a) == tag(b));

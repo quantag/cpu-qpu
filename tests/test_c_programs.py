@@ -2,7 +2,8 @@
 # Copyright 2026 Quantag IT Solutions GmbH
 """End-to-end: C programs compiled by clang or gcc (-O0/-O1/-O2), run by cpu_qpu.py on the quantum
 interpreter (exact simulator backend) and on the CPU reference; every case must MATCH.
-Run: python3 -m tests.test_c_programs [clang|gcc] [arm64|riscv64|riscv32|x86_64]"""
+Run: python3 -m tests.test_c_programs [clang|gcc|gcc-N] [arm64|riscv64|riscv32|x86_64]   (gcc-14: GCC 14's gcc-14, or
+<triple>-gcc-14 for a cross target)"""
 import json, os, shutil, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -52,8 +53,10 @@ if __name__ == "__main__":
     cc_name = sys.argv[1] if len(sys.argv) > 1 else "clang"
     arch = sys.argv[2] if len(sys.argv) > 2 else "arm64"
     isa = isas.get(arch)
-    cc = ["clang"] + isa.clang if cc_name == "clang" else [next((g for g in isa.gcc if shutil.which(g)), isa.gcc[0])] + isa.gcc_flags
-    limits = EXPECT_MODEL_LIMIT.get((cc_name, arch), set())
+    suffix = cc_name[3:] if cc_name.startswith("gcc-") else ""                # a versioned GCC: gcc-14
+    gccs = [g + suffix for g in isa.gcc]
+    cc = ["clang"] + isa.clang if cc_name == "clang" else [next((g for g in gccs if shutil.which(g)), gccs[0])] + isa.gcc_flags
+    limits = EXPECT_MODEL_LIMIT.get(("gcc" if cc_name.startswith("gcc") else cc_name, arch), set())
     fails = 0
     with tempfile.TemporaryDirectory() as d:
         for src in sorted({c[0] for c in CASES}):

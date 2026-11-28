@@ -9,6 +9,8 @@ a byte offset, and every cycle parses one variable-length instruction with gates
   fetch      an 11-byte window at the PC: the 16-byte block that contains the PC and the start of the
              next block are selected with a one-hot decode of the upper PC bits, then a byte shifter
              controlled by the low four PC bits aligns the window
+  prefixes   an alignment NOP's prefixes (up to six 66 and one 2E, x86.MAX66): their number P, one-hot, and a
+             shift of the window by P; any other instruction with them traps
   normalise  drop the REX prefix and the 0F escape byte (controlled byte shifts), which puts the
              opcode and the bytes after it at fixed positions
   decode     exact patterns over the opcode and the next byte (the table KINDS in x86.py), then the
@@ -23,7 +25,7 @@ A byte sequence that matches no kind, breaks a validity rule, or divides by zero
 """
 from dataclasses import dataclass
 from .core import Machine
-from .x86 import KINDS, ALL_CLASSES, MODRM, S8_OP0, D1, REG8_REG, WINDOW, RAX, RCX, RDX, RSP, RBP
+from .x86 import KINDS, ALL_CLASSES, MODRM, S8_OP0, D1, REG8_REG, WINDOW, MAX66, RAX, RCX, RDX, RSP, RBP
 
 FIXED = (RAX, RCX, RDX, RSP, RBP)          # registers with implicit uses; always instantiated
 PUSHES = ("push", "pushrm", "pushi", "call", "callr")
@@ -126,6 +128,25 @@ class QuantumX86(Machine):
             cur = nxt
         win = cur
 
+        # PREFIXES of an alignment NOP: j = 0 .. MAX66 bytes 66, then an optional 2E; P = j + (2E). sel[P] one-hot
+        byte = lambda q, v: AND(*[(q[j], (v >> j) & 1) for j in range(8)])
+        is66 = [byte(win[i], 0x66) for i in range(MAX66)]
+        is2e = [byte(win[i], 0x2E) for i in range(MAX66 + 1)]
+        sel = [self.a1() for _ in range(MAX66 + 2)]
+        run = []                                               # run[j]: the first j bytes are 66
+        for j in range(MAX66 + 1):
+            ctrls = [(is66[i], 1) for i in range(j)] + ([(is66[j], 0)] if j < MAX66 else [])   # exactly j of them
+            self.mcx(ctrls + [(is2e[j], 0)], sel[j])
+            self.mcx(ctrls + [(is2e[j], 1)], sel[j + 1])
+        npre = [XOR(*[sel[v] for v in range(1, MAX66 + 2) if v >> b & 1]) for b in range(3)]    # P in binary
+        haspre = NOT(sel[0])
+        pw = [self.alloc(8) for _ in range(WINDOW)]
+        for k in range(WINDOW):
+            for v in range(MAX66 + 2):
+                if k + v < WINDOW:
+                    self.bus(pw[k], [(sel[v], 1)], win[k + v])
+        win = pw
+
         # NORMALISE: REX prefix, then the 0F escape byte
         hasrex = AND((win[0][4], 0), (win[0][5], 0), (win[0][6], 1), (win[0][7], 0))
         rb, rx, rr, rw = (AND((hasrex, 1), (win[0][j], 1)) for j in range(4))
@@ -166,6 +187,8 @@ class QuantumX86(Machine):
         bad.append(AND((hasrex, 0), (s8, 1), (RG(*REG8_REG), 1), (r0[5], 1)))
         if rhas("mov_ri"): bad.append(AND((hasrex, 0), (s8, 1), (raw["mov_ri"], 1), (op[2], 1)))
         if rhas("pop"): bad.append(AND((raw["pop"], 1), (op[0], 0), (op[1], 0), (op[2], 1), (rb, 0)))   # POP RSP
+        bad.append(AND((haspre, 1), (RG("nop", "nopm") if rhas("nop", "nopm") else Z, 0)))    # prefixes: NOPs only
+        bad.append(AND((haspre, 1), (hasrex, 1)))
         invalid = self.OR(*bad)
         f = {n: AND((raw[n], 1), (invalid, 0)) for n in raw}
         has = lambda *names: any(n in f for n in names)
@@ -216,7 +239,7 @@ class QuantumX86(Machine):
                 self.mcx([(isz1, 0), (iany, 1), (iB[i - 8], 1)], IMM[i])
         # instruction length and the address of the next instruction
         ln = [ONE, Z, Z, Z]
-        for term in ([hasrex, Z, Z, Z], [esc, Z, Z, Z], [modrm, Z, Z, Z], [sib, Z, Z, Z], [dsz1, Z, dsz4, Z], [isz1, Z, isz4, isz8]):
+        for term in (npre + [Z], [hasrex, Z, Z, Z], [esc, Z, Z, Z], [modrm, Z, Z, Z], [sib, Z, Z, Z], [dsz1, Z, dsz4, Z], [isz1, Z, isz4, isz8]):
             ln, _ = self.add(ln, term, Z, 4)
         nip, _ = self.add(self.pc, (ln + [Z] * p)[:p], Z, p)
 
