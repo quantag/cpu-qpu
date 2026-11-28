@@ -579,6 +579,18 @@ core count on larger machines.
 libqarm now takes up to 24 qubits: six vectors of 2^24 doubles, 768 MB. The plain-CPU path of `qarm.h`
 keeps its static buffers of `QARM_VQE_MAX_QUBITS` (default 12) qubits.
 
+Practical notes:
+- **Compilers without OpenMP 3.0 run on one core.** Apple's clang has no OpenMP; with Homebrew's
+  `libomp`, use `-Xpreprocessor -fopenmp -lomp`. MSVC has only OpenMP 2.0. libqarm's CMake checks the
+  version and falls back to serial code.
+- **Threads:** `OMP_NUM_THREADS` sets them.
+- **Popcount:** build with `-march=native` (or at least `-mpopcnt` on x86-64) for the hardware parity
+  instruction. Without it, the 18-qubit energy takes 0.73 s instead of 0.44 s.
+- **Memory:** the kept Hamiltonian factors use up to `QARM_SV_CACHE_MB` (default 1024 MB, also an
+  environment variable). Groups that do not fit are computed on the fly.
+- **Parameters:** an ansatz has at most 255, since the table's `param` field is one byte. N₂'s full
+  valence space (315 excitations) does not fit yet.
+
 ### Checks
 
 Noise can push an energy below the true ground state, so a measured energy cannot be checked by
