@@ -945,7 +945,7 @@ MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp"
 LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
         "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
-        "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "malloc": _malloc, "calloc": _calloc,
+        "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__chkstk_darwin": lambda rt: rt.ret(rt.x(0)), "malloc": _malloc, "calloc": _calloc,
         "realloc": _realloc, "free": _free, "__memcpy_chk": _memcpy, "putc": _putc, "fputc": _putc, "_IO_putc": _putc,
         "fputs": _fputs, "fwrite": _fwrite, "fflush": _fflush}
 STDOUT_FILE, STDERR_FILE = 0x5100, 0x5200      # what the program sees as FILE *stdout, *stderr

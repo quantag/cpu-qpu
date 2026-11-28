@@ -210,7 +210,7 @@ static unsigned qarm_sv_blk_idx(const qarm_sv_blk *k, long b)
 static void qarm_sv_block_rot(const qarm_sv *s, const qarm_ansatz *a, uint32_t o, uint32_t e, double *re, double *im,
                               double t)
 {
-    qarm_sv_blk k;
+    static qarm_sv_blk k;                             /* 8 KB: not on the stack (macOS probes large frames) */
     qarm_sv_blk_make(&k, a, o, e, t);
     uint64_t x = k.x;
     long half = (1L << s->n) >> 1, m = qarm_sv_low(x);
@@ -232,7 +232,7 @@ static void qarm_sv_block_rot(const qarm_sv *s, const qarm_ansatz *a, uint32_t o
 /* 2 Re <l| -i A |p> of the block */
 static double qarm_sv_block_d(const qarm_sv *s, const qarm_ansatz *a, uint32_t o, uint32_t e)
 {
-    qarm_sv_blk k;
+    static qarm_sv_blk k;
     qarm_sv_blk_make(&k, a, o, e, 0);
     uint64_t x = k.x;
     long N = 1L << s->n;
