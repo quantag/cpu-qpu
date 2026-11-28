@@ -36,8 +36,14 @@ def find_qemu():
     q = q if q and os.path.exists(q) else shutil.which("qemu-x86_64")
     if not q:
         return None, None
+    v = subprocess.run([q, "--version"], capture_output=True, text=True).stdout
+    m = re.search(r"version (\d+)\.(\d+)", v)
+    if not m or (int(m.group(1)), int(m.group(2))) < (10, 1):
+        return None, None                                  # the plugin API needs QEMU 10.1
     inc = os.environ.get("QARM_QEMU_INCLUDE") or os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(q))),
                                                                "include")
+    if not os.path.exists(os.path.join(inc, "qemu-plugin.h")):
+        return None, None
     return q, inc
 
 
@@ -73,7 +79,7 @@ def main():
 
         q, inc = find_qemu()
         if not q:
-            print("2) and 3) skipped: no qemu-x86_64 (set QARM_QEMU_X86)")
+            print("2) and 3) skipped: no qemu-x86_64 10.1+ with plugins (set QARM_QEMU_X86)")
             print("PASS")
             return
         b = os.path.join(d, "build")
