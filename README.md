@@ -45,6 +45,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | A fast exact state vector on all cores (OpenMP), up to 24 qubits: an 18-qubit LiH gradient in 0.57 s | `include/qarm_sv.h`, `tools/qarm_sv_bench.c` | [speed](docs/qarm_v2.md#speed-of-the-state-vector-and-threads) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
+| **Quantum speedups for loops already written**: a compiler pass finds search and minimum loops in plain C and gives them to QSEARCH and QMIN; one mark (`QARM_AUTO`) on the function, no quantum calls | `qarm-cc --auto prog.c` | [docs/qarm_auto.md](docs/qarm_auto.md) |
 | **Install Q-ARM in one step**: a Linux tarball with QEMU 10.2.4 and the plugin bundled, or a container image for any OS; `qarm-cc` compiles, `qarm-run` runs | `qarm-cc hello.c -o hello && qarm-run ./hello` | [Install Q-ARM](#install-q-arm-qarm-run-and-qarm-cc) |
 
 ## Quick start
@@ -826,6 +827,11 @@ $ docker run --rm -v "$PWD:/work" ghcr.io/quantag/qarm qarm-run ./hello
 | `--cpu` | QEMU without the plugin, a plain CPU: every packet skipped, the classical paths taken |
 | `--exec` | `qarm_exec.py` (Unicorn) instead of QEMU; also the default for macOS (Mach-O) programs |
 | `--print` | the QEMU command line, not run |
+
+`qarm-cc --auto` adds QArmAuto, an LLVM pass, which turns plain search and minimum loops in functions marked
+`QARM_AUTO` into QSEARCH and QMIN ([docs/qarm_auto.md](docs/qarm_auto.md)). The program needs no quantum code.
+On a CPU without the coprocessor, the loops run as written. It needs clang, and the pass is built for that
+clang on first use; the image has it ready.
 
 The oracle instructions (`QSEARCH`, `QMIN` and the rest of the Oracle profile) build their oracles with
 qoracle: `python3 -m pip install qoracle lief capstone numpy`. Without it, `qarm-run` does not claim them, and

@@ -1,0 +1,102 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Quantag IT Solutions GmbH
+ *
+ * tests/test_qarm_auto.py's loops. Each line with a loop says what QArmAuto must do with it:
+ *   expect: QSEARCH | QMIN       rewritten (-Rpass=qarm-auto)
+ *   expect: missed               in a QARM_AUTO function, but not a search or minimum (-Rpass-missed)
+ *   expect: candidate            a search or minimum outside QARM_AUTO (-Rpass-analysis)
+ * main() runs every rewritten function against a copy that the pass leaves alone (no QARM_AUTO) on tables
+ * filled from a seed, and checks what the rewrite promises: a search's answer is a solution, and "none" only when
+ * there is none; a minimum's value is the least, and its argument has it. It prints one line per seed. */
+#include <stdio.h>
+#include <stdlib.h>
+#include "qarm_auto.h"
+
+static int table[1024], target;
+static int hit(int x) { return table[x] == target; }
+static _Bool hit_bool(int x) { return table[x] == target; }
+static int cost(int x) { return table[x] - 500; }
+static int cost2(int x) { return (table[x] * 7) % 13 - (table[(x + 1) & 1023] & 3); }
+static int nohit(int x) { return table[x] == -1; }
+int writes;
+static int impure(int x) { writes++; return table[x] == target; }
+
+#define SEARCH(name, N, p) \
+    QARM_AUTO static int name(void) { for (int x = 0; x < N; x++) if (p(x)) return x; return -1; }    /* expect: QSEARCH */ \
+    static int name##_ref(void) { for (int x = 0; x < N; x++) if (p(x)) return x; return -1; }
+SEARCH(s256, 256, hit)
+SEARCH(s1000, 1000, hit)
+SEARCH(s3, 3, hit)
+SEARCH(sbool, 1024, hit_bool)
+SEARCH(snone, 512, nohit)
+
+QARM_AUTO static int sflag(int *out)
+{
+    int found = 0;
+    for (int x = 0; x < 700; x++) if (hit(x)) { *out = x; found = 1; break; }              /* expect: QSEARCH */
+    return found;
+}
+
+#define MIN(name, N, c, OP, b0, a0) \
+    QARM_AUTO static int name(int *arg) { int b = b0, a = a0; for (int x = 0; x < N; x++) { int v = c(x); if (v OP b) { b = v; a = x; } } *arg = a; return b; }   /* expect: QMIN */ \
+    static int name##_ref(int *arg) { int b = b0, a = a0; for (int x = 0; x < N; x++) { int v = c(x); if (v OP b) { b = v; a = x; } } *arg = a; return b; }
+MIN(m256, 256, cost, <, 1 << 30, 0)
+MIN(m1000, 1000, cost, <, 1 << 30, -1)
+MIN(mle, 512, cost2, <=, 1 << 30, -1)
+MIN(mlow, 300, cost, <, -400, 77)        /* a first value below most costs: the loop's own rule on it */
+MIN(mties, 256, cost2, <, 100, 5)
+
+/* not searches or minimums: the pass must leave them alone */
+QARM_AUTO int count(void) { int n = 0; for (int x = 0; x < 256; x++) if (hit(x)) n++; return n; }                         /* expect: missed */
+QARM_AUTO int side(void) { for (int x = 0; x < 256; x++) if (impure(x)) return x; return -1; }                           /* expect: missed */
+QARM_AUTO int big(void) { for (int x = 0; x < 100000; x++) if (hit(x & 1023)) return x; return -1; }                     /* expect: missed */
+QARM_AUTO int from1(void) { for (int x = 1; x < 256; x++) if (hit(x)) return x; return -1; }                             /* expect: missed */
+QARM_AUTO int step2(void) { for (int x = 0; x < 256; x += 2) if (hit(x)) return x; return -1; }                          /* expect: missed */
+QARM_AUTO int maxi(int *arg) { int b = -(1 << 30), a = 0; for (int x = 0; x < 256; x++) { int c = cost(x); if (c > b) { b = c; a = x; } } *arg = a; return b; }   /* expect: missed */
+QARM_AUTO int inverted(int *arg) { int b = 1 << 30, a = 0; for (int x = 0; x < 256; x++) { int c = cost(x); if (c < b) {} else { b = c; a = x; } } *arg = a; return b; }   /* expect: missed */
+QARM_AUTO int stores(int *out) { for (int x = 0; x < 256; x++) { out[x] = 0; if (hit(x)) return x; } return -1; }         /* expect: missed */
+int unmarked(void) { for (int x = 0; x < 256; x++) if (hit(x)) return x; return -1; }                                    /* expect: candidate */
+
+static int check_search(const char *n, int got, int ref, int (*p)(int))
+{
+    if (ref < 0 ? got != -1 : (got < 0 || !p(got))) { printf("FAIL %s: %d, the loop as written %d\n", n, got, ref); return 1; }
+    return 0;
+}
+static int check_min(const char *n, int got, int arg, int ref, int refarg, int (*c)(int), int N, int b0, int a0)
+{
+    /* the least value; its argument has it, or is the loop's first argument when nothing beat the first value */
+    int ok = got == ref && (arg == a0 && ref == b0 ? 1 : arg >= 0 && arg < N && c(arg) == got);
+    if (!ok) { printf("FAIL %s: %d at %d, the loop as written %d at %d\n", n, got, arg, ref, refarg); return 1; }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    int seeds = argc > 1 ? atoi(argv[1]) : 20, fails = 0;
+    for (int seed = 0; seed < seeds; seed++) {
+        srand(seed * 7919 + 1);
+        for (int i = 0; i < 1024; i++) table[i] = rand() % 1000;
+        target = table[rand() % 1024];
+        if (seed % 5 == 4) target = 5000;                  /* no solution anywhere */
+        int a, ra;
+        fails += check_search("s256", s256(), s256_ref(), hit);
+        fails += check_search("s1000", s1000(), s1000_ref(), hit);
+        fails += check_search("s3", s3(), s3_ref(), hit);
+        fails += check_search("sbool", sbool(), sbool_ref(), hit);
+        fails += check_search("snone", snone(), snone_ref(), nohit);
+        int out = -7, f = sflag(&out);
+        fails += check_search("sflag", f ? out : -1, s1000_ref() < 700 ? s1000_ref() : -1, hit);
+        int v, rv;
+#define RUN(name, N, c, b0, a0) v = name(&a); rv = name##_ref(&ra); fails += check_min(#name, v, a, rv, ra, c, N, b0, a0);
+        RUN(m256, 256, cost, 1 << 30, 0)
+        RUN(m1000, 1000, cost, 1 << 30, -1)
+        RUN(mle, 512, cost2, 1 << 30, -1)
+        RUN(mlow, 300, cost, -400, 77)
+        RUN(mties, 256, cost2, 100, 5)
+        printf("seed %d: s256 %d s1000 %d s3 %d sbool %d snone %d sflag %d/%d m256 %d m1000 %d mle %d mlow %d mties %d\n", seed,
+               s256(), s1000(), s3(), sbool(), snone(), f, out, m256(&a), m1000(&a), mle(&a), mlow(&a), mties(&a));
+    }
+    (void)count; (void)side; (void)big; (void)from1; (void)step2; (void)maxi; (void)inverted; (void)stores; (void)unmarked;
+    printf(fails ? "FAILED %d\n" : "all checks passed\n", fails);
+    return fails != 0;
+}

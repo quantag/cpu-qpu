@@ -7,7 +7,9 @@
 #   packaging/install.sh --prefix DIR --qemu-include DIR [--bundle-qemu DIR] [--version V]
 #
 #   DIR/bin/qarm-run, qarm-cc         the launcher and the compiler wrapper
-#   DIR/lib/qarm/libqarm-qemu.so      the QEMU plugin with libqarm (every profile), libqarm-minimal.so
+#   DIR/lib/qarm/libqarm-qemu.so      the QEMU plugin with libqarm (every profile), libqarm-minimal.so, and
+#                                     QArmAuto-llvmN.so when clang N and its llvm-config are here (else
+#                                     qarm-cc --auto builds it on first use from share/qarm/compiler)
 #   DIR/libexec/qarm/qemu-aarch64     with --bundle-qemu: that QEMU's qemu-aarch64 and qemu-x86_64
 #   DIR/include/qarm/                 qarm.h and the headers it includes
 #   DIR/share/qarm/                   qarm_exec.py and its modules, tools/qarm_oracle.py (the oracle helper),
@@ -46,7 +48,21 @@ for f in qarm-run qarm-cc; do
     chmod 755 "$prefix/bin/$f"
 done
 cp "$build/qemu/libqarm-qemu.so" "$build/minimal/libqarm-minimal.so" "$prefix/lib/qarm/"
-for h in qarm.h qarm_isa.h qarm_sv.h qarm_rt.h qarm_opt.h qarm.inc; do cp "$ROOT/include/$h" "$prefix/include/qarm/"; done
+for h in qarm.h qarm_isa.h qarm_sv.h qarm_rt.h qarm_opt.h qarm.inc qarm_auto.h; do cp "$ROOT/include/$h" "$prefix/include/qarm/"; done
+mkdir -p "$prefix/share/qarm/compiler"
+cp "$ROOT/compiler/QArmAuto.cpp" "$ROOT/compiler/CMakeLists.txt" "$ROOT/compiler/qarm_auto.c" "$prefix/share/qarm/compiler/"
+if command -v clang >/dev/null 2>&1; then              # the pass, for this machine's clang, when its LLVM is here
+    v=$(clang -dumpversion | cut -d. -f1)
+    for c in "llvm-config-$v" "/usr/lib/llvm-$v/bin/llvm-config" llvm-config; do
+        if command -v "$c" >/dev/null 2>&1 && [ "$("$c" --version | cut -d. -f1)" = "$v" ]; then
+            if cmake -S "$ROOT/compiler" -B "$build/auto" -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="$("$c" --cmakedir)" >/dev/null 2>&1 \
+                && cmake --build "$build/auto" >/dev/null 2>&1; then
+                cp "$build/auto/QArmAuto.so" "$prefix/lib/qarm/QArmAuto-llvm$v.so"
+            fi
+            break
+        fi
+    done
+fi
 for f in qarm_exec.py qarm_vqe.py qarm_evolve.py; do cp "$ROOT/$f" "$prefix/share/qarm/"; done
 for f in qarm_oracle.py qarm_patch.py qarm_patch_x86.py; do cp "$ROOT/tools/$f" "$prefix/share/qarm/tools/"; done
 cp "$ROOT"/examples/qarm/*.c "$ROOT"/examples/qarm/*.h "$prefix/share/qarm/examples/" 2>/dev/null || true
