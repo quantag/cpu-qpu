@@ -1,8 +1,9 @@
-# The Q-ARM instruction set, version 1.1
+# The Q-ARM instruction set, version 1.2
 
-**Status:** version 1.1, 2026-11-28. It adds one instruction to 1.0, `QEVOLVE` (time evolution with a
-guaranteed error bound), in a new profile, Dynamics. Version 1.0 was published on 2026-11-28 (release `isa-v1.0` of
-github.com/quantag/cpu-qpu). Quantag
+**Status:** version 1.2, 2026-11-28. Version 1.1 added `QEVOLVE`, time evolution with a guaranteed error bound,
+in the Dynamics profile. Version 1.2 adds `QLINDBLAD`, the same for open systems (Lindblad dynamics with Pauli
+jump operators), in the Open profile, and lets `QEVOLVE`'s qDRIFT run on QPUs. Version 1.0 was published on
+2026-11-28 (release `isa-v1.0` of github.com/quantag/cpu-qpu). Quantag
 IT Solutions GmbH. The specification is under Apache-2.0, like the rest of this repository.
 
 **With it:**
@@ -147,8 +148,9 @@ answer has a cheap classical check, the library MUST run it (section 6) before i
 | `QARM_F_ASYNC` | 4096 | `QSUBMIT`, `QPOLL`, `QWAIT` |
 | `QARM_F_COLLISION` | 8192 | `QCOLLISION` |
 | `QARM_F_EVOLVE` | 16384 | `QEVOLVE` (1.1) |
+| `QARM_F_LINDBLAD` | 32768 | `QLINDBLAD` (1.2) |
 
-Bits 15–31 are reserved and MUST be 0 in 1.1 (bits 14–31 in 1.0). A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
+Bits 16–31 are reserved and MUST be 0 in 1.2 (bits 15–31 in 1.1, bits 14–31 in 1.0). A runtime that returns `W0 = 1` with `W1 = 0` is a runtime
 from before feature bits. Libraries treat it as `QARM_F_SEARCH` only.
 
 ## 5. Operands
@@ -293,6 +295,34 @@ A runtime MUST refuse a table with `W0 = 2` if any of these holds:
 - `eps` is negative or not finite;
 - `reserved` ≠ 0.
 
+### 5.8 Open-system evolution (1.2)
+
+```c
+typedef struct {
+    qarm_evolution e;                /* 5.7 */
+    const qarm_hamiltonian *jumps;   /* the jump operators P_k, with c = the rate gamma_k */
+} qarm_lindblad;                                                                        /* 72 bytes */
+```
+
+The table asks for the k values v(tᵢ) = Tr(O ρ(tᵢ)), where ρ(0) = |init⟩⟨init| and
+
+  dρ/dt = −i[H, ρ] + Σₖ γₖ (Pₖ ρ Pₖ − ρ).
+
+That is the Lindblad equation with Pauli jump operators. Since P†P = I, the dissipator is PρP − ρ. With
+them come dephasing (Z), bit flips (X), and depolarizing noise (X, Y and Z at equal rates). `e`'s fields mean
+what they mean for `QEVOLVE`, with these differences:
+- `method` is `AUTO`, `EXACT` or `PRODUCT`;
+- `order` is 1 (Lie–Trotter), 2 (Strang) or 0. Higher orders have negative stage coefficients, which are not
+  channels;
+- `shots` is the number of trajectories when the runtime samples (6.7). 0 is the runtime's default.
+
+A runtime MUST refuse with `W0 = 2` what 5.7 refuses, and also these:
+- `jumps` is null;
+- its `qubits` differ from H's, or a mask has a bit at or above them;
+- a rate is negative or not finite, or `jumps`' `constant` ≠ 0;
+- `method` is `QDRIFT`, or `order` is 4 or 6;
+- a time is negative: an open system evolves forward only.
+
 ## 6. Instructions
 
 The tables give the inputs and outputs, then what every answer satisfies. "Check" is what the library
@@ -425,6 +455,10 @@ implementation's bounds, for λ = Σ|cⱼ| and ω = Σ|oⱼ| over the non-identi
 - A runtime MAY refuse a method that its backend cannot run, with `W0 = 2`. For example, a QPU backend refuses
   `EXACT`.
 - `W3` reports the method used (1, 2 or 3) and, for `PRODUCT`, the order.
+- **qDRIFT on a QPU (1.2).** A measured backend MAY run `QDRIFT` as R random sequences, where R is `shots` and 0
+  means the runtime's default. Each sequence is one circuit with the step t/N as its parameter, so all k times are
+  that circuit's batch. vᵢ is the mean over the sequences: its expectation is the qDRIFT channel's ⟨O⟩, within ε
+  of v(tᵢ). σ is the sequences' spread over √R, shot noise included.
 
 **Other rules.**
 - The runtime MUST read every input before it writes any output, so that `X2` may equal `t`.
@@ -434,6 +468,34 @@ implementation's bounds, for λ = Σ|cⱼ| and ω = Σ|oⱼ| over the non-identi
 
 There is no check: a classical path computes the same values in exponential time, so the library returns
 the values with ε and σ.
+
+### 6.7 Open-system evolution (1.2)
+
+| opcode | name | in | out |
+|---|---|---|---|
+| 0x28 | `QLINDBLAD` | `X1` = `qarm_lindblad *`, `X2` = k doubles out | as `QEVOLVE` (6.6): the k values, `D0` = ε, `D1` = σ, `W3` = method \| order << 8, `X4` = steps; `W0 = 2`: refused |
+
+**The guarantee** is `QEVOLVE`'s. For every i, |vᵢ − v(tᵢ)| ≤ ε when the runtime evolves the density matrix,
+and |E[vᵢ] − v(tᵢ)| ≤ ε when it samples trajectories. σ is the standard error of the trajectories, and 0
+otherwise. The rules on `eps`, `steps`, reading before writing, and `QSUBMIT` are 6.6's. ε MUST be rigorous.
+
+The reference bounds, in the diamond norm:
+- **The generators' norms.** −i[cP, ·] has norm at most 2|c|, and γ(P · P − ·) at most 2γ, so the generator L
+  has ‖L‖ ≤ Λ = 2λ + 2Σγₖ. Each factor e^{sLⱼ} with s ≥ 0 is a channel, and so a contraction.
+- **Exact:** the Taylor series of e^{ΔL} on the density matrix, as in 6.6.
+- **Lie–Trotter or Strang with r steps:** ‖e^{tL} − S_p(t/r)^r‖ ≤ 2r·Σ_{n>p} (Λt/r)ⁿ/n!. For p = 1, it is also
+  at most t²/(2r) times the sum of 2‖A‖‖B‖ over the pairs of generators that do not commute.
+- **From a state error to ε:** ε = ω·δ, because |Tr(O′Δρ)| ≤ ‖O′‖·‖Δρ‖₁.
+
+**Trajectories.** A jump factor e^{xD[P]} = (1 − q)·id + q·P·P, with q = (1 − e^{−2x})/2. A runtime MAY sample
+it: apply P with probability q in each trajectory. The mean over the trajectories is then unbiased for the
+product formula's ⟨O⟩.
+
+**Methods.** `AUTO` lets the runtime choose. A simulator SHOULD evolve exactly when it can hold the density
+matrix. A runtime MAY refuse any method it cannot run; the reference runtimes run `QLINDBLAD` on their exact
+simulators only.
+
+There is no check, as for `QEVOLVE`.
 
 ## 7. Library obligations and reserved opcodes
 
@@ -463,9 +525,9 @@ takes on the library's obligations: the check and the classical path.
 
 | opcode | name | for |
 |---|---|---|
-| 0x28–0x2F, 0x32–0x3F | — | future variational and circuit instructions |
+| 0x29–0x2F, 0x32–0x3F | — | future variational and circuit instructions |
 
-0x27 was reserved in 1.0 and is `QEVOLVE` in 1.1.
+0x27 was reserved in 1.0 and is `QEVOLVE` in 1.1; 0x28 is `QLINDBLAD` in 1.2.
 | 0x00–0x0F, 0x40–0xFF | — | reserved |
 
 Vendors MAY use opcodes 0xF0–0xFF for experiments. They MUST NOT report those instructions in the
@@ -483,10 +545,11 @@ A runtime states the profiles it implements. Its feature bits must cover them.
 | Circuit | `QCIRC`, `QRAND` | 256 512 |
 | Async | `QSUBMIT`, `QPOLL`, `QWAIT` | 4096 |
 | Dynamics (1.1) | `QEVOLVE` | 16384 |
+| Open (1.2) | `QLINDBLAD` | 32768 |
 
-`qarm_exec.py` and the QEMU plugin with its oracle helper implement all six. `qarm_exec.py` completes
+`qarm_exec.py` and the QEMU plugin with its oracle helper implement all seven. `qarm_exec.py` completes
 every request at `QSUBMIT`. The QEMU plugin submits `QEXPECTN` to libqarm, which polls an IBM job while
-the program runs. Without its oracle helper, the plugin implements Core, Variational, Circuit, Async and Dynamics.
+the program runs. Without its oracle helper, the plugin implements Core, Variational, Circuit, Async, Dynamics and Open.
 
 ## 9. Conformance
 
@@ -497,12 +560,12 @@ the runtime:
 ```
 $ aarch64-linux-gnu-gcc -O1 -iquote include tests/conformance/qarm_conformance.c -o conformance -lm
 $ python3 qarm_exec.py -q conformance
-Q-ARM ISA 1.1 conformance (docs/qarm_isa.md, section 9)
+Q-ARM ISA 1.2 conformance (docs/qarm_isa.md, section 9)
 PASS QAVAIL
 PASS unassigned opcode
 ...
-profiles: Core passed; Oracle passed; Variational passed; Circuit passed; Async passed; Dynamics passed
-conformance: 16 passed, 0 failed, 0 skipped (features 0x7fff)
+profiles: Core passed; Oracle passed; Variational passed; Circuit passed; Async passed; Dynamics passed; Open passed
+conformance: 17 passed, 0 failed, 0 skipped (features 0xffff)
 ```
 
 Each profile of section 8 is reported in one of three ways:
@@ -529,8 +592,8 @@ conformance.
 
 ## 10. Versions
 
-This is version 1.1, packet format 2, `QCAPS.version` 1. A 1.0 runtime leaves `QEVOLVE` unexecuted (`W0 = 0`),
-so a 1.1 program runs on it through the library's classical path.
+This is version 1.2, packet format 2, `QCAPS.version` 1. An older runtime leaves `QEVOLVE` (1.1) and `QLINDBLAD`
+(1.2) unexecuted (`W0 = 0`), so a newer program runs on it through the library's classical path.
 
 - **Minor versions** (1.1, …) may add instructions on reserved opcodes, feature bits and operand fields
   in reserved words. A program discovers additions through the feature bits. Programs and runtimes of
@@ -544,5 +607,6 @@ so a 1.1 program runs on it through the library's classical path.
 
 | version | date | changes |
 |---|---|---|
+| 1.2 | 2026-11-28 | `QLINDBLAD` (0x28, formerly reserved): open-system evolution under the Lindblad equation with Pauli jump operators, with a guaranteed error bound: exact on the density matrix, Lie–Trotter or Strang, on the density matrix or by trajectories; the `qarm_lindblad` table (5.8); feature bit 32768; the Open profile; the conformance program's `QLINDBLAD` test. `QEVOLVE`'s qDRIFT on measured backends, as R random circuits (6.6). 24 instructions in seven profiles. |
 | 1.1 | 2026-11-28 | `QEVOLVE` (0x27, formerly reserved): time evolution with a guaranteed error bound, by exact evolution, product formulas of order 1, 2, 4 and 6, or qDRIFT; the `qarm_evolution` table (5.7); feature bit 16384; the Dynamics profile; the conformance program's `QEVOLVE` test. 23 instructions in six profiles. Clarified: what each check establishes (6.2), and that `W0 = 2` from an oracle instruction means none found, not none exists (QSIMON's said "f is one-to-one"). |
 | 1.0 | 2026-11-28 | First publication. 22 instructions in five profiles; packets for AArch64 and x86-64; `qarm_isa.h`; the conformance program with per-profile results. |

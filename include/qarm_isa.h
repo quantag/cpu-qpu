@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Quantag IT Solutions GmbH
  *
- * The Q-ARM instruction set, version 1.1 (docs/qarm_isa.md): its constants and data layouts, and nothing else.
+ * The Q-ARM instruction set, version 1.2 (docs/qarm_isa.md): its constants and data layouts, and nothing else.
  * A runtime, a library or a tool includes this header to speak the ISA; include/qarm.h (the library) includes it.
  * Every value here is normative: the section of the specification is named beside it. C99; LP64, little-endian. */
 #ifndef QARM_ISA_H
@@ -10,7 +10,7 @@
 
 /* ---------------------------------------------------------------- 10. Versions */
 #define QARM_ISA_VERSION_MAJOR 1
-#define QARM_ISA_VERSION_MINOR 1
+#define QARM_ISA_VERSION_MINOR 2
 #define QARM_ISA_PACKET_FORMAT 2                 /* the V of word 2 */
 #define QARM_ISA_CAPS_VERSION 1                  /* qarm_capabilities.version */
 
@@ -31,6 +31,7 @@ enum {
     QARM_OPC_QVLOAD = 0x20, QARM_OPC_QEXPECT = 0x21, QARM_OPC_QEXPECTN = 0x22, QARM_OPC_QGRAD = 0x23,
     QARM_OPC_QSESSION = 0x24, QARM_OPC_QVSAMPLE = 0x25, QARM_OPC_QVFREE = 0x26,   /* 6.3 */
     QARM_OPC_QEVOLVE = 0x27,                     /* 6.6 (1.1) */
+    QARM_OPC_QLINDBLAD = 0x28,                   /* 6.7 (1.2) */
     QARM_OPC_QCIRC = 0x30, QARM_OPC_QCAPS = 0x31 /* 6.4, 6.1 */
 };
 
@@ -40,9 +41,11 @@ enum { QARM_ST_NOT_EXECUTED = 0, QARM_ST_DONE = 1, QARM_ST_NEGATIVE = 2, QARM_ST
 /* ---------------------------------------------------------------- 4. Feature bits (QAVAIL's W1) */
 enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM_F_PERIOD = 16, QARM_F_SIMON = 32,
        QARM_F_BV = 64, QARM_F_AMPEST = 128, QARM_F_CIRC = 256, QARM_F_RAND = 512, QARM_F_CAPS = 1024,
-       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096, QARM_F_COLLISION = 8192, QARM_F_EVOLVE = 16384 /* 1.1 */ };
+       QARM_F_VSAMPLE = 2048, QARM_F_ASYNC = 4096, QARM_F_COLLISION = 8192, QARM_F_EVOLVE = 16384 /* 1.1 */,
+       QARM_F_LINDBLAD = 32768 /* 1.2 */ };
 #define QARM_F_ALL_1_0 0x3fffu                   /* every bit of 1.0 */
-#define QARM_F_ALL_1_1 0x7fffu                   /* every bit of 1.1; bits 15-31 are reserved */
+#define QARM_F_ALL_1_1 0x7fffu                   /* every bit of 1.1 */
+#define QARM_F_ALL_1_2 0xffffu                   /* every bit of 1.2; bits 16-31 are reserved */
 
 /* 8. Profiles */
 #define QARM_PROFILE_CORE QARM_F_CAPS
@@ -52,6 +55,7 @@ enum { QARM_F_SEARCH = 1, QARM_F_VQE = 2, QARM_F_MIN = 4, QARM_F_COUNT = 8, QARM
 #define QARM_PROFILE_CIRCUIT (QARM_F_CIRC | QARM_F_RAND)
 #define QARM_PROFILE_ASYNC QARM_F_ASYNC
 #define QARM_PROFILE_DYNAMICS QARM_F_EVOLVE        /* 1.1 */
+#define QARM_PROFILE_OPEN QARM_F_LINDBLAD          /* 1.2: open-system dynamics */
 
 /* ---------------------------------------------------------------- 5.2 Pauli operators and Hamiltonians */
 /* P(x, z) = i^popcount(x & z) X^x Z^z: on qubit q, I X Z Y for (x_q, z_q) = 00 10 01 11; H = constant + sum c P */
@@ -87,6 +91,15 @@ typedef struct {
     uint32_t steps, reserved;                    /* 0: the fewest that meet eps; otherwise exactly these (eps unused) */
 } qarm_evolution;                                                                                    /* 64 */
 
+/* ---------------------------------------------------------------- 5.8 Open-system evolution (1.2) */
+/* Tr(O rho(t)) for k times t >= 0, rho(0) = |init><init|, under the Lindblad equation with Pauli jump operators:
+ *   d rho / dt = -i [H, rho] + sum_k gamma_k (P_k rho P_k - rho)
+ * e as for QEVOLVE (method AUTO, EXACT or PRODUCT of order 1 or 2; shots: trajectories when the runtime samples) */
+typedef struct {
+    qarm_evolution e;
+    const qarm_hamiltonian *jumps;               /* the P_k with c = gamma_k >= 0; same qubits; constant 0 */
+} qarm_lindblad;                                                                                     /* 72 */
+
 /* ---------------------------------------------------------------- 5.6 Capabilities */
 enum { QARM_CAPS_HARDWARE = 1, QARM_CAPS_MEASURED = 2, QARM_CAPS_ASYNC = 4 };
 typedef struct { uint32_t version, features, qubits, flags; char backend[48]; } qarm_capabilities;   /* 64 */
@@ -105,6 +118,7 @@ QARM_ISA_SIZE(qarm_gate, 16);
 QARM_ISA_SIZE(qarm_circuit, 16);
 QARM_ISA_SIZE(qarm_capabilities, 64);
 QARM_ISA_SIZE(qarm_evolution, 64);
+QARM_ISA_SIZE(qarm_lindblad, 72);
 QARM_ISA_SIZE(qarm_request, 80);
 #undef QARM_ISA_SIZE
 #endif

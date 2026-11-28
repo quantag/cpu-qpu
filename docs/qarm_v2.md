@@ -1,6 +1,6 @@
 # Q-ARM v2: quantum instructions with a classical fallback, in one ARM binary
 
-> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.1,
+> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.2,
 > constants in `include/qarm_isa.h`), with a conformance program in `tests/conformance` and a guide to writing
 > a runtime in [`docs/qarm_runtime_guide.md`](qarm_runtime_guide.md). This document is the reference
 > implementation's.
@@ -74,6 +74,7 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x31` | `QCAPS` | `X1` = `qarm_capabilities` | `W0 = 1`: version, features, qubits, flags (1 hardware, 2 measured, 4 async), backend name |
 | `0x20`–`0x26` | VQE | section 6 | |
 | `0x27` | `QEVOLVE` | `X1` = `qarm_evolution`, `X2` = k doubles out (ISA 1.1) | `W0 = 1`, the k values ⟨O(t)⟩ within `D0`, the guaranteed error bound; `D1` its standard error; `W3` = method \| order << 8, `X4` = steps (section 6, `QEVOLVE`) |
+| `0x28` | `QLINDBLAD` | `X1` = `qarm_lindblad`, `X2` = k doubles out (ISA 1.2) | as `QEVOLVE`, for Tr(O ρ(t)) under a Lindblad equation (section 6, `QLINDBLAD`) |
 
 Programs reach the instructions through `qarm.h`'s calls. For search and minimum loops, there is also the
 QArmAuto compiler pass (docs/qarm_auto.md), which rewrites a plain loop into QSEARCH or QMIN.
@@ -418,6 +419,48 @@ the worst actual error is 0.84 of its bound, and no bound is exceeded.
 | the runtime's choice, eps 10⁻⁶ | exact | 1.3·10⁻³⁶ | — |
 | a product formula, eps 10⁻² | Strang, 273 steps | 0.0099 | 4.6·10⁻⁶ |
 | Strang, 4 steps | as asked | 2 (no useful bound) | 0.023 |
+
+On a QPU, `QEVOLVE` runs product formulas as one circuit for all the times. Since 1.2, it also runs qDRIFT
+there. qDRIFT draws `shots` random sequences (16 by default), and each sequence is one circuit with t/N as its
+parameter, covering every time in its batch. The mean over the sequences is the value, and their spread,
+shot noise included, is `info.err`.
+
+### Open systems: `QLINDBLAD` (ISA 1.2)
+
+`QLINDBLAD` evolves a density matrix under the Lindblad equation with Pauli jump operators:
+
+  dρ/dt = −i[H, ρ] + Σₖ γₖ (Pₖ ρ Pₖ − ρ).
+
+It returns Tr(O ρ(t)) for up to 4096 times, with a proven bound, as `QEVOLVE` does. Dephasing is Z jumps,
+bit flips are X jumps, and depolarizing noise is X, Y and Z at one rate.
+
+```c
+qarm_pauli dephase[N];                      /* Z on each spin, rate gamma */
+for (int i = 0; i < N; i++) dephase[i] = (qarm_pauli){0, 1ULL << i, 0.05};
+qarm_hamiltonian jumps = {N, N, 0, dephase};
+qarm_lindblad l = {{&h, &m, t, K, QARM_EV_AUTO, 0, 0, 0, 1e-6, 0, 0}, &jumps};
+qarm_evolve_info info;
+qarm_evolve_open(&l, out, &info);           /* 1 coprocessor, 0 this CPU, -1 refused */
+```
+
+| method | what runs | the bound `D0` |
+|---|---|---|
+| exact | the Taylor series of e^{ΔL} on the density matrix, up to 10 qubits | about 10⁻³⁶ |
+| Lie–Trotter, Strang | the unitary factors, then the jump channels (1 − q)·ρ + q·PρP, on the density matrix; above 10 qubits, by trajectories that apply P with probability q | 2r·Σ_{n>p}(Λt/r)ⁿ/n!, Λ = 2λ + 2Σγ (diamond norm); for Lie–Trotter also a commutator bound |
+
+Orders 4 and 6 are refused: their negative stages are not channels. So are negative times, since an open
+system evolves forward only.
+
+`tests/test_qarm_lindblad.py` checks every method against e^{tL} of the full Liouvillian on 30 random
+equations: no bound is exceeded. `examples/qarm/decoherence.c` runs the quench from the section above on 6
+spins, closed and with dephasing at two rates:
+
+| | bound | the largest error, measured |
+|---|---|---|
+| closed (`QEVOLVE`), γ = 0.05 and γ = 0.5 (`QLINDBLAD`), exact | 10⁻³⁶ | — |
+| γ = 0.5, Strang for eps 5·10⁻² (1090 steps) | 0.05 | 4.8·10⁻⁷ |
+
+The reference runtimes run `QLINDBLAD` on their exact simulators. On a QPU it is refused for now.
 
 ### Time evolution on the 1.0 instructions: `qarm_evolve_n`
 

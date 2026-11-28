@@ -50,14 +50,14 @@ def main():
         assert "other 0 of 2000 shots (on the coprocessor)" in run("qarm-run", "-q", "./ghz").stdout
         conf = os.path.join(share, "conformance", "qarm_conformance.c")
         run("qarm-cc", conf, "-o", "conf")
-        full = "16 passed, 0 failed, 0 skipped" if oracle else "8 passed, 0 failed, 8 skipped"
+        full = "17 passed, 0 failed, 0 skipped" if oracle else "9 passed, 0 failed, 8 skipped"
         assert full in run("qarm-run", "-q", "conf").stdout
         archs = ["AArch64"]
         if os.uname().machine == "x86_64" and os.path.exists(os.path.join(prefix, "libexec", "qarm", "qemu-x86_64")):
             run("qarm-cc", "--x86-64", conf, "-o", "conf86")
             assert full in run("qarm-run", "-q", "./conf86").stdout
             archs.append("x86-64")
-        assert "5 passed, 0 failed, 11 skipped" in run("qarm-run", "--minimal", "./conf").stdout
+        assert "5 passed, 0 failed, 12 skipped" in run("qarm-run", "--minimal", "./conf").stdout
         assert "no runtime" in run("qarm-run", "--cpu", "./conf").stdout
         how = ""
         try:

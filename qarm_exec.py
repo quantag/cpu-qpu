@@ -47,12 +47,13 @@ GATES = {1: "x", 2: "y", 3: "z", 4: "h", 5: "s", 6: "sdg", 7: "t", 8: "tdg", 9: 
 OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QSESSION, OP_QVFREE = 0x20, 0x21, 0x22, 0x23, 0x24, 0x26
 OP_QVSAMPLE = 0x25
 OP_QEVOLVE = 0x27          # ISA 1.1
+OP_QLINDBLAD = 0x28        # ISA 1.2
 OP_QSUBMIT, OP_QPOLL, OP_QWAIT = 0x12, 0x13, 0x14
-FEATURES = 32767          # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
-                          #              QCOLLISION EVOLVE
+FEATURES = 65535          # QAVAIL's W1: QSEARCH VQE QMIN QCOUNT QPERIOD QSIMON QBV QAMPEST QCIRC QRAND QCAPS QVSAMPLE ASYNC
+                          #              QCOLLISION EVOLVE LINDBLAD
 OPS = (OP_QAVAIL, OP_QSEARCH, OP_QCOLLISION, OP_QMIN, OP_QCOUNT, OP_QAMPEST, OP_QPERIOD, OP_QSIMON, OP_QBV, OP_QRAND, OP_QCIRC,
        OP_QCAPS, OP_QVLOAD, OP_QEXPECT, OP_QEXPECTN, OP_QGRAD, OP_QVSAMPLE, OP_QSESSION, OP_QVFREE, OP_QSUBMIT, OP_QPOLL,
-       OP_QWAIT, OP_QEVOLVE)
+       OP_QWAIT, OP_QEVOLVE, OP_QLINDBLAD)
 
 
 class QarmError(Exception):
@@ -411,6 +412,8 @@ class Runtime:
             self.vqe_op(op)
         elif op == OP_QEVOLVE:
             self.qevolve(self.x(1), self.x(2))
+        elif op == OP_QLINDBLAD:
+            self.qlindblad(self.x(1), self.x(2))
 
     def call(self, fn, arg):
         """Call a function of the program: f(arg) -> W0 (used to check answers)."""
@@ -779,15 +782,38 @@ class Runtime:
             values, se = qe.run(e, p, int(seed) if seed else None)
             where = "the exact simulator"
         else:
-            if p.method != qe.PRODUCT:
-                return refuse("a measured backend runs product formulas")
-            if p.steps * p.ops > 100000:
+            if p.method == qe.EXACT:
+                return refuse("a measured backend does not evolve exactly")
+            if p.method == qe.QDRIFT:
+                # R random circuits, theta[0] = t / N, every time in each one's batch; the spread of the sequences'
+                # means, shot noise included, is the standard error
+                R = e.shots or 16
+                if p.steps > 100000 or R > 1000:
+                    return refuse(f"qDRIFT with {p.steps} samples and {R} sequences: deeper than 100000 operations or "
+                                  "more than 1000 circuits")
+                seed = os.environ.get("QCPU_SEED")
+                rng = random.Random(int(seed) if seed else None)
+                per = []
+                for read, ha, aa in qe.qdrift_tables(e, p, rng, R):
+                    problem = qarm_vqe.Problem(read, ha, aa)
+                    measured = (qarm_vqe.Cudaq if self.qpu["backend"] == "cudaq" else qarm_vqe.Measured)(problem, self.qpu, self.note)
+                    vals, errs, job, sec = measured.energies([problem.angles([t / p.steps]) for t in e.t], 0)
+                    per.append(vals)
+                values = [sum(col) / R for col in zip(*per)]
+                if R > 1:
+                    se = max((sum((v - m) ** 2 for v in col) / (R - 1) / R) ** 0.5 for col, m in zip(zip(*per), values))
+                else:
+                    se = max(errs)
+                where = f"{measured.where.split(';')[0]}, {R} circuits"
+                p.sequences = R
+            elif p.steps * p.ops > 100000:
                 return refuse(f"{p.steps} steps of {p.ops:.0f} rotations: deeper than 100000 operations")
-            read, ha, aa, nops = qe.ansatz_tables(e, p)
-            problem = qarm_vqe.Problem(read, ha, aa)
-            measured = (qarm_vqe.Cudaq if self.qpu["backend"] == "cudaq" else qarm_vqe.Measured)(problem, self.qpu, self.note)
-            values, errs, job, sec = measured.energies([problem.angles([t / p.steps]) for t in e.t], e.shots)
-            se, where = max(errs), f"{measured.where.split(';')[0]}, job {job}, {sec} s"
+            if p.method == qe.PRODUCT:
+                read, ha, aa, nops = qe.ansatz_tables(e, p)
+                problem = qarm_vqe.Problem(read, ha, aa)
+                measured = (qarm_vqe.Cudaq if self.qpu["backend"] == "cudaq" else qarm_vqe.Measured)(problem, self.qpu, self.note)
+                values, errs, job, sec = measured.energies([problem.angles([t / p.steps]) for t in e.t], e.shots)
+                se, where = max(errs), f"{measured.where.split(';')[0]}, job {job}, {sec} s"
         try:
             self.mu.mem_write(out, struct.pack(f"<{len(values)}d", *values))
         except UcError:
@@ -801,6 +827,46 @@ class Runtime:
         unit = {qe.EXACT: "segments", qe.PRODUCT: "steps", qe.QDRIFT: "samples per sequence"}
         self.note(f"QEVOLVE: {e.h.qubits} qubits, {len(e.h.terms)} terms, {len(e.t)} times: {name[p.method]}, "
                   f"{p.steps} {unit[p.method]}; error bound {p.bound:.3g} ({where})")
+
+    def qlindblad(self, addr, out):
+        """QLINDBLAD (ISA 1.2): X1 = a qarm_lindblad, X2 = k doubles out; QEVOLVE's outputs. On the exact simulator:
+        the density matrix up to 10 qubits (exact, or a product formula), trajectories above"""
+        from unicorn import UcError
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import qarm_evolve as qe
+        import qarm_vqe
+
+        def refuse(why):
+            self.set_x(0, 2)
+            self.note(f"QLINDBLAD refused: {why}")
+        try:
+            l = qe.read_lindblad(lambda a, n: bytes(self.mu.mem_read(a, n)), addr)
+        except (ValueError, struct.error, UcError) as err:
+            return refuse(f"the table is not readable ({err})")
+        why = qe.lb_check(l)
+        if why:
+            return refuse(why)
+        if l.e.h.qubits > qarm_vqe.MAX_EXACT_QUBITS:
+            return refuse(f"{l.e.h.qubits} qubits: the simulator takes up to {qarm_vqe.MAX_EXACT_QUBITS}")
+        p = qe.lb_plan(l, self.qpu is None)
+        if isinstance(p, str):
+            return refuse(p)
+        seed = os.environ.get("QCPU_SEED")
+        values, se = qe.lb_run(l, p, int(seed) if seed else None)
+        try:
+            self.mu.mem_write(out, struct.pack(f"<{len(values)}d", *values))
+        except UcError:
+            return refuse("the output is not writable")
+        self.set_d(0, p.bound)
+        self.set_d(1, se)
+        self.set_x(3, p.method | p.order << 8)
+        self.set_x(4, p.steps)
+        self.set_x(0, 1)
+        how = ("exact (the density matrix)" if p.method == qe.EXACT else
+               f"{'Lie-Trotter' if p.order == 1 else 'Strang'}, {p.steps} steps, "
+               + ("on the density matrix" if p.dm else f"{p.trajectories} trajectories, standard error {se:.3g}"))
+        self.note(f"QLINDBLAD: {l.e.h.qubits} qubits, {len(l.e.h.terms)} terms, {len(l.jumps.terms)} jump operators, "
+                  f"{len(l.e.t)} times: {how}; error bound {p.bound:.3g}")
 
     def qgrad(self, problem, measured):
         """QGRAD: X1 = theta, X4 = the gradient (one double per parameter); D0 = the energy. Exact: adjoint
@@ -977,6 +1043,14 @@ def _math(fn):
     return call
 
 
+def _sincos(rt):
+    """sincos(x, &s, &c): x in D0, the pointers in X0, X1 (what GCC makes of sin(x) and cos(x) together)"""
+    v = struct.unpack("<d", struct.pack("<Q", rt.mu.reg_read(rt.A.UC_ARM64_REG_D0)))[0]
+    rt.mu.mem_write(rt.x(0), struct.pack("<d", math.sin(v)))
+    rt.mu.mem_write(rt.x(1), struct.pack("<d", math.cos(v)))
+    rt.ret(None)
+
+
 def _strcmp(rt):
     a, b = rt.cstr(rt.x(0)).encode("utf-8"), rt.cstr(rt.x(1)).encode("utf-8")
     rt.ret((a > b) - (a < b) & 0xFFFFFFFFFFFFFFFF)
@@ -1020,7 +1094,7 @@ def _strtol(rt):
 MATH = {name: _math(getattr(math, name)) for name in ("sin", "cos", "tan", "exp", "log", "sqrt", "atan", "fabs")}
 
 
-LIBC = {**MATH, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
+LIBC = {**MATH, "sincos": _sincos, "strcmp": _strcmp, "strncmp": _strncmp, "atoi": _atoi, "atol": _atoi, "strtol": _strtol, "strtoul": _strtol,
         "strtoll": _strtol, "strtoull": _strtol, "__isoc23_strtol": _strtol, "__isoc23_strtoul": _strtol, "printf": _printf, "__printf_chk": _printf_chk, "snprintf": _snprintf, "__snprintf_chk": _snprintf_chk, "puts": _puts, "putchar": _putchar, "exit": _exit, "_exit": _exit, "strlen": _strlen,
         "memset": _memset, "memcpy": _memcpy, "memmove": _memcpy, "__stack_chk_fail": _stack_chk_fail,
         "__memset_chk": _memset, "bzero": _bzero, "__bzero": _bzero, "__chkstk_darwin": lambda rt: rt.ret(rt.x(0)), "malloc": _malloc, "calloc": _calloc,

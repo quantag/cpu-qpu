@@ -25,7 +25,7 @@ LAYOUT = r"""
 int main(void)
 {
     S(qarm_pauli); S(qarm_hamiltonian); S(qarm_op); S(qarm_ansatz); S(qarm_gate); S(qarm_circuit);
-    S(qarm_capabilities); S(qarm_request); S(qarm_evolution);
+    S(qarm_capabilities); S(qarm_request); S(qarm_evolution); S(qarm_lindblad); F(qarm_lindblad, jumps);
     F(qarm_pauli, c); F(qarm_hamiltonian, constant); F(qarm_hamiltonian, t); F(qarm_op, reserved); F(qarm_op, scale);
     F(qarm_op, x); F(qarm_op, z); F(qarm_ansatz, init); F(qarm_ansatz, op); F(qarm_gate, reserved); F(qarm_gate, angle);
     F(qarm_circuit, g); F(qarm_capabilities, backend); F(qarm_request, x); F(qarm_request, d); F(qarm_request, ticket);
@@ -44,7 +44,7 @@ WANT = {"qarm_pauli": 24, "qarm_hamiltonian": 24, "qarm_op": 32, "qarm_ansatz": 
         "qarm_request.ticket": 72, "qarm_evolution": 64, "qarm_evolution.o": 8, "qarm_evolution.t": 16,
         "qarm_evolution.k": 24, "qarm_evolution.method": 28, "qarm_evolution.order": 32, "qarm_evolution.shots": 36,
         "qarm_evolution.init": 40, "qarm_evolution.eps": 48, "qarm_evolution.steps": 56, "qarm_evolution.reserved": 60,
-        "word2": 0x2300000}
+        "qarm_lindblad": 72, "qarm_lindblad.jumps": 64, "word2": 0x2300000}
 
 
 def header_constants():
@@ -111,9 +111,9 @@ def main():
         sh(cc64 + ["-O1", "-iquote", INC, os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c"), "-o", conf,
                    "-lm"])
         want = ("profiles: Core passed; Oracle not claimed; Variational not claimed; Circuit passed; Async not claimed; "
-                "Dynamics not claimed")
+                "Dynamics not claimed; Open not claimed")
         p = sh([q] + sysroot + ["-plugin", plug, conf], check=False)
-        assert p.returncode == 0 and want in p.stdout and "5 passed, 0 failed, 11 skipped" in p.stdout, p.stdout
+        assert p.returncode == 0 and want in p.stdout and "5 passed, 0 failed, 12 skipped" in p.stdout, p.stdout
         ghz = os.path.join(d, "ghz")
         sh(cc64 + ["-O1", "-iquote", INC, os.path.join(ROOT, "examples", "qarm", "ghz.c"), "-o", ghz, "-lm"])
         p = sh([q] + sysroot + ["-plugin", plug, ghz])
