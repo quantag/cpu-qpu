@@ -29,9 +29,10 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
 
 ## Where Q-ARM is ahead
 
-1. **The program does not change.** A search loop over a C predicate becomes a quantum search. No one
-   writes the oracle: it comes from the same machine code that the CPU runs, and it is checked against
-   that code.
+1. **The program barely changes.** With the QArmAuto compiler pass (docs/qarm_auto.md), a plain C search
+   or minimum loop becomes QSEARCH or QMIN, with one mark on the function and no quantum code. Without the
+   pass, the change is one library call (`qarm_search`, `qarm_min`). No one writes the oracle: it comes
+   from the same machine code that the CPU runs, and it is checked against that code.
 2. **One binary for every machine.** The packets are no-ops on a plain CPU. A program built today runs
    unchanged on a laptop, under an emulator with a simulator, and on a QPU-backed runtime.
 3. **Answers are checked by the program's own code.** What a check establishes depends on the

@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, qarm-auto]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -49,6 +49,11 @@ jobs:
           python -m tests.test_c_programs gcc-14 x86_64
       - name: test_qarm_isa (the specification, qarm_isa.h and the implementations agree)
         run: python -m tests.test_qarm_isa
+      - name: test_qarm_auto (the QArmAuto pass; LLVM 18's headers)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -q llvm-18-dev clang-18
+          QARM_CLANG=clang-18 python -m tests.test_qarm_auto
       - name: test_packaging (the scripts parse; more in the export job)
         shell: bash
         run: python -m tests.test_packaging
@@ -116,6 +121,10 @@ jobs:
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_evolve
       - name: test_packaging (install.sh with QEMU bundled; qarm-run and qarm-cc)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_packaging
+      - name: test_qarm_auto with QEMU (examples/qarm/auto.c under the plugin, arm64 and x86-64)
+        run: |
+          sudo apt-get install -y -q llvm-18-dev clang-18
+          QARM_CLANG=clang-18 QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_auto
       - name: test_qarm_x86 (Q-ARM on x86-64, in qemu-x86_64 with the plugin)
         run: QARM_QEMU_X86=$HOME/qemu/bin/qemu-x86_64 QARM_QEMU_INCLUDE=$HOME/qemu/include python -m tests.test_qarm_x86
   package:

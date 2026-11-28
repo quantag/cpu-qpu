@@ -72,6 +72,9 @@ jobs:
             docker run --rm qarm:test sh -c "qarm-cc --$a /opt/qarm/share/qarm/conformance/qarm_conformance.c -o /tmp/c && qarm-run -q /tmp/c" | tee out.txt
             grep -q "16 passed, 0 failed, 0 skipped" out.txt
           done
+          docker run --rm qarm:test sh -c "qarm-cc --auto /opt/qarm/share/qarm/examples/auto.c -o /tmp/a && qarm-run /tmp/a" > auto.txt 2>&1 || { cat auto.txt; exit 1; }
+          cat auto.txt
+          grep -q "QSEARCH consistent" auto.txt && grep -q "QMIN imbalance" auto.txt && grep -q "BYRG" auto.txt
       - name: Push ghcr.io/quantag/qarm:${{ inputs.version }}-${{ matrix.arch }}
         if: inputs.publish
         run: |

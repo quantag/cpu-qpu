@@ -75,6 +75,9 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x20`–`0x26` | VQE | section 6 | |
 | `0x27` | `QEVOLVE` | `X1` = `qarm_evolution`, `X2` = k doubles out (ISA 1.1) | `W0 = 1`, the k values ⟨O(t)⟩ within `D0`, the guaranteed error bound; `D1` its standard error; `W3` = method \| order << 8, `X4` = steps (section 6, `QEVOLVE`) |
 
+Programs reach the instructions through `qarm.h`'s calls. For search and minimum loops, there is also the
+QArmAuto compiler pass (docs/qarm_auto.md), which rewrites a plain loop into QSEARCH or QMIN.
+
 Each algorithm family is one instruction. Its input is an ordinary C function or table. Each has a
 classical path in `qarm.h`, a check of the answer where one exists, and a `QAVAIL` feature bit.
 
