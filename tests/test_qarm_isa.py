@@ -20,8 +20,8 @@ LAYOUT = r"""
 #include <stddef.h>
 #include <stdio.h>
 #include "qarm_isa.h"
-#define F(t, f) printf(#t "." #f " %zu\n", offsetof(t, f))
-#define S(t) printf(#t " %zu\n", sizeof(t))
+#define F(t, f) printf(#t "." #f " %lu\n", (unsigned long)offsetof(t, f))
+#define S(t) printf(#t " %lu\n", (unsigned long)sizeof(t))
 int main(void)
 {
     S(qarm_pauli); S(qarm_hamiltonian); S(qarm_op); S(qarm_ansatz); S(qarm_gate); S(qarm_circuit);
