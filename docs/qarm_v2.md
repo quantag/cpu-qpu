@@ -1,6 +1,6 @@
 # Q-ARM v2: quantum instructions with a classical fallback, in one ARM binary
 
-> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.0,
+> The instruction set is specified, vendor-neutrally, in [`docs/qarm_isa.md`](qarm_isa.md) (version 1.1,
 > constants in `include/qarm_isa.h`), with a conformance program in `tests/conformance` and a guide to writing
 > a runtime in [`docs/qarm_runtime_guide.md`](qarm_runtime_guide.md). This document is the reference
 > implementation's.
@@ -73,14 +73,10 @@ The operands are in fixed registers, so the packet itself has none:
 | `0x30` | `QCIRC` | `X1` = `qarm_circuit`, `W2` = shots, `X3` = `uint64_t` samples | `W0 = 1`: samples written; `W0 = 2`: refused |
 | `0x31` | `QCAPS` | `X1` = `qarm_capabilities` | `W0 = 1`: version, features, qubits, flags (1 hardware, 2 measured, 4 async), backend name |
 | `0x20`–`0x26` | VQE | section 6 | |
+| `0x27` | `QEVOLVE` | `X1` = `qarm_evolution`, `X2` = k doubles out (ISA 1.1) | `W0 = 1`, the k values ⟨O(t)⟩ within `D0`, the guaranteed error bound; `D1` its standard error; `W3` = method \| order << 8, `X4` = steps (section 6, `QEVOLVE`) |
 
-**The instruction set, planned.** Each algorithm family is one instruction. Its input is an ordinary C
-function or table. Each has a classical path in `qarm.h`, a check of the answer where one exists, and a
-`QAVAIL` feature bit.
-
-| opcode | name | input | result | check |
-|---|---|---|---|---|
-| `0x27` | `QEVOLVE` | Hamiltonian table, t | ⟨O(t)⟩ natively in the runtime (qDRIFT, higher-order formulas); today a library function, section 6 | exact for small cases |
+Each algorithm family is one instruction. Its input is an ordinary C function or table. Each has a
+classical path in `qarm.h`, a check of the answer where one exists, and a `QAVAIL` feature bit.
 
 QAOA and quantum kernels are generators of tables for `QEXPECT` and `QCIRC` in the C library, not
 instructions.
@@ -360,9 +356,46 @@ QVSAMPLE (the coprocessor's measurements): best cut 10 (11010010), in 38.1% of 1
     queue per gradient.
   - The gradient is then summed per parameter, weighted by each rotation's `scale`.
 
-### Time evolution: `qarm_evolve_n`
+### Time evolution: `QEVOLVE` (ISA 1.1)
 
-Hamiltonian simulation needs no new instruction. `qarm_trotter` writes exp(−iHt) as an ansatz table of
+`QEVOLVE` gives ⟨init| e^{iHt} O e^{−iHt} |init⟩ for up to 4096 times, with an error bound that the runtime
+proves: |value − exact| ≤ `D0` for every t. The program says how accurate it needs the answer to be
+(`eps`). The runtime chooses how to get there, or the program names the method and the steps itself:
+
+```c
+qarm_evolution e = {&h, &m, t, K, QARM_EV_AUTO, 0, 0, 0, 1e-6, 0, 0};   /* H, O, times, method, ..., eps */
+qarm_evolve_info info;
+int where = qarm_evolve(&e, out, &info);    /* 1 coprocessor, 0 this CPU, -1 refused; info.bound, .err, .steps */
+```
+
+| method | what the runtime runs | the bound `D0` |
+|---|---|---|
+| `QARM_EV_EXACT` | the Taylor series of e^{−iHΔ}, 40 terms, λΔ ≤ 2 | about 10⁻³⁰ and below |
+| `QARM_EV_PRODUCT`, order 1, 2, 4, 6 | Lie–Trotter, Strang, Suzuki; r steps of t/r, as one table with dt as its parameter | the smaller of a norm bound and, for orders 1 and 2, the commutator bound of Childs et al. 2021 |
+| `QARM_EV_QDRIFT` | N random terms per sequence, `shots` sequences | twice Campbell's diamond-norm bound, times ‖O‖ |
+| `QARM_EV_AUTO` | exact on a simulator; on a QPU, the product formula with the fewest rotations whose bound meets `eps` | |
+
+Every implementation plans with the same code: `include/qarm_sv.h` for C (libqarm, the library's classical
+path), and `qarm_evolve.py` for `qarm_exec.py`.
+- On libqarm's `exact` backend, the plan runs on the state vector.
+- On `simulator` and `ibm`, the product formula is one ansatz table and all k times are one `QEXPECTN`
+  batch, so a QPU queue is waited for once.
+- With `steps = 0`, the runtime meets `eps` or refuses (`W0 = 2`). It never returns a weaker answer.
+
+`tests/test_qarm_evolve.py` checks the bounds against the exact e^{−iHt} on random Hamiltonians. In 540 plans
+the worst actual error is 0.84 of its bound, and no bound is exceeded.
+
+`examples/qarm/quench.c` is the quench below, by `QEVOLVE`:
+
+| request | plan | bound | the largest error, measured |
+|---|---|---|---|
+| the runtime's choice, eps 10⁻⁶ | exact | 1.3·10⁻³⁶ | — |
+| a product formula, eps 10⁻² | Strang, 273 steps | 0.0099 | 4.6·10⁻⁶ |
+| Strang, 4 steps | as asked | 2 (no useful bound) | 0.023 |
+
+### Time evolution on the 1.0 instructions: `qarm_evolve_n`
+
+Hamiltonian simulation also works without the new instruction. `qarm_trotter` writes exp(−iHt) as an ansatz table of
 second-order (symmetric) Trotter steps. Each Pauli term of H becomes a `QARM_PAULI_ROT`, and adjacent
 equal terms are merged.
 
@@ -882,7 +915,7 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 
 ## 10. Next
 
-- More instructions on the same model: a native `QEVOLVE` (higher-order product formulas, qDRIFT).
+- `QEVOLVE` on a QPU with qDRIFT, as random circuits in one job; Lindblad dynamics.
 - `QSEARCH` on an IBM device from libqarm, and natively without the Python helper;
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;

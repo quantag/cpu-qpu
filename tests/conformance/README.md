@@ -1,6 +1,6 @@
 # Q-ARM conformance
 
-`qarm_conformance.c` checks a Q-ARM runtime against [the specification](../../docs/qarm_isa.md) (ISA 1.0),
+`qarm_conformance.c` checks a Q-ARM runtime against [the specification](../../docs/qarm_isa.md) (ISA 1.1),
 section 9, on AArch64 or x86-64. It emits the raw packets and checks the status protocol, refusals, side effects (registers
 and the bytes around every output buffer), the answers and the feature bits. It never falls back to
 the classical paths of `include/qarm.h`, so what it measures is the runtime alone.

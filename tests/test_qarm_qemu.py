@@ -23,7 +23,7 @@ arm64 builds that also run on a plain CPU and under qarm_exec.py.
  10. QVSAMPLE: examples/qarm/maxcut_qaoa.c, the same output as under qarm_exec.py's exact simulator up to the
      samples: the largest cut, 10; RY CX: only 00 and 11 (and on the ibm mock with 5). spin_chain.c (time
      evolution): the same table as under qarm_exec.py.
- 11. The conformance program (docs/qarm_isa.md): 15 of 15 under the plugin; without the oracle helper the
+ 11. The conformance program (docs/qarm_isa.md): 16 of 16 under the plugin; without the oracle helper the
      oracle instructions are not claimed (skipped) and the rest pass.
  12. tools/qarm_patch.py: examples/qarm/legacy_search.c, built without qarm.h and patched, runs QSEARCH and QMIN
      under the plugin (the trampoline's packets in a segment the tool added); without the plugin, the original loops.
@@ -199,7 +199,7 @@ def main():
         print("10) QVSAMPLE: maxcut_qaoa under QEMU, the same QAOA energy as under qarm_exec.py, the largest cut 10 "
               f"among the samples; RY CX: 00 {c[0]}, 11 {c[3]}; spin_chain: the same M(t) as under qarm_exec.py")
         p = sh(qemu(",quiet=on") + [exe["conformance"]], check=False)
-        assert p.returncode == 0 and "15 passed, 0 failed, 0 skipped (features 0x3fff)" in p.stdout, p.stdout
+        assert p.returncode == 0 and "16 passed, 0 failed, 0 skipped (features 0x7fff)" in p.stdout, p.stdout
         p = sh(qemu(",quiet=on,helper=/nonexistent") + [exe["conformance"]], check=False)
         skips = re.findall(r"SKIP (\w+): \w+ not claimed", p.stdout)
         assert p.returncode == 0 and sorted(skips) == sorted(["QSEARCH", "QMIN", "QCOUNT", "QAMPEST", "QPERIOD", "QSIMON",
@@ -220,8 +220,8 @@ def main():
         print("12) qarm_patch: legacy_search (no qarm.h) patched: QSEARCH and QMIN under the plugin; without it the "
               "original loops; the same output; built with -mbranch-protection=standard (PACIASP kept, AUTIASP before the "
               "trampoline's RET), the same under -cpu max")
-        print("11) conformance: 15 of 15 under the plugin; without the oracle helper the 8 oracle instructions are "
-              "not claimed, the other 7 tests pass")
+        print("11) conformance: 16 of 16 under the plugin; without the oracle helper the 8 oracle instructions are "
+              "not claimed, the other 8 tests pass")
     print("PASS")
 
 

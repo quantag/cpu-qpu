@@ -6,7 +6,7 @@ step, from nothing to a runtime that passes the conformance program. Each step c
 [`runtime/minimal/qarm_minimal.c`](../runtime/minimal/qarm_minimal.c), a QEMU plugin of about 200 lines that
 implements the Core and Circuit profiles.
 
-The rules are in [`docs/qarm_isa.md`](qarm_isa.md), the specification (version 1.0). The constants and
+The rules are in [`docs/qarm_isa.md`](qarm_isa.md), the specification (version 1.1). The constants and
 layouts are in [`include/qarm_isa.h`](../include/qarm_isa.h). Include it and never retype a number.
 
 ## 0. What you need
@@ -98,8 +98,8 @@ qemu-aarch64 -L /usr/aarch64-linux-gnu -plugin build/minimal/libqarm-minimal.so 
 On `runtime/minimal` the result is:
 
 ```
-profiles: Core passed; Oracle not claimed; Variational not claimed; Circuit passed; Async not claimed
-conformance: 5 passed, 0 failed, 10 skipped (features 0x700)
+profiles: Core passed; Oracle not claimed; Variational not claimed; Circuit passed; Async not claimed; Dynamics not claimed
+conformance: 5 passed, 0 failed, 11 skipped (features 0x700)
 ```
 
 So that runtime conforms to Core and Circuit. Any program built with `include/qarm.h` runs on it:
@@ -123,6 +123,14 @@ So that runtime conforms to Core and Circuit. Any program built with `include/qa
     the function itself.
 - **Async** (section 6.5). Copy the request's inputs at `QSUBMIT`. Complete it then, or later from a job,
   writing the outputs into the request. Report `state` with `QPOLL`.
+- **Dynamics** (sections 5.7, 6.6). `QEVOLVE` needs a plan with a proven error bound. `qarm_sv.h` has the
+  reference planner and its bounds:
+  - `qarm_ev_check` refuses the cases of 5.7;
+  - `qarm_ev_plan` picks the method and steps, and the bound they guarantee;
+  - `qarm_sv_evolve` runs the plan on a state vector;
+  - `qarm_ev_steps_table` writes a product formula as an ansatz table, for a QPU.
+
+  With `steps = 0`, meet `eps` or refuse. Never report a bound that you have not proven.
 
 The full implementations to read are:
 - `runtime/qemu/qarm_qemu.c`, every profile, with libqarm as the backend;
@@ -131,6 +139,6 @@ The full implementations to read are:
 ## 7. Claiming conformance
 
 Run the conformance program on your runtime, on every architecture it supports. Then state the profiles
-it reports as passed and the specification's version, for example "Q-ARM ISA 1.0: Core, Circuit". The
+it reports as passed and the specification's version, for example "Q-ARM ISA 1.1: Core, Circuit". The
 statistical tests assume an ideal backend. On a noisy QPU they show the device's errors; judge
 conformance on its simulator.

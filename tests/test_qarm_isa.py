@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Quantag IT Solutions GmbH
-"""The Q-ARM ISA 1.0 as published: the specification, its header and the implementations say the same thing.
+"""The Q-ARM ISA (1.1) as published: the specification, its header and the implementations say the same thing.
 
   1. include/qarm_isa.h compiles alone as C99 (-pedantic, -Wall -Wextra), and its layouts have the sizes and the
      field offsets of docs/qarm_isa.md, section 5.
@@ -25,10 +25,13 @@ LAYOUT = r"""
 int main(void)
 {
     S(qarm_pauli); S(qarm_hamiltonian); S(qarm_op); S(qarm_ansatz); S(qarm_gate); S(qarm_circuit);
-    S(qarm_capabilities); S(qarm_request);
+    S(qarm_capabilities); S(qarm_request); S(qarm_evolution);
     F(qarm_pauli, c); F(qarm_hamiltonian, constant); F(qarm_hamiltonian, t); F(qarm_op, reserved); F(qarm_op, scale);
     F(qarm_op, x); F(qarm_op, z); F(qarm_ansatz, init); F(qarm_ansatz, op); F(qarm_gate, reserved); F(qarm_gate, angle);
     F(qarm_circuit, g); F(qarm_capabilities, backend); F(qarm_request, x); F(qarm_request, d); F(qarm_request, ticket);
+    F(qarm_evolution, o); F(qarm_evolution, t); F(qarm_evolution, k); F(qarm_evolution, method); F(qarm_evolution, order);
+    F(qarm_evolution, shots); F(qarm_evolution, init); F(qarm_evolution, eps); F(qarm_evolution, steps);
+    F(qarm_evolution, reserved);
     printf("word2 %#x\n", QARM_ISA_WORD2(QARM_OPC_QCIRC));
     return 0;
 }
@@ -38,7 +41,10 @@ WANT = {"qarm_pauli": 24, "qarm_hamiltonian": 24, "qarm_op": 32, "qarm_ansatz": 
         "qarm_hamiltonian.t": 16, "qarm_op.reserved": 4, "qarm_op.scale": 8, "qarm_op.x": 16, "qarm_op.z": 24,
         "qarm_ansatz.init": 16, "qarm_ansatz.op": 24, "qarm_gate.reserved": 4, "qarm_gate.angle": 8,
         "qarm_circuit.g": 8, "qarm_capabilities.backend": 16, "qarm_request.x": 8, "qarm_request.d": 56,
-        "qarm_request.ticket": 72, "word2": 0x2300000}
+        "qarm_request.ticket": 72, "qarm_evolution": 64, "qarm_evolution.o": 8, "qarm_evolution.t": 16,
+        "qarm_evolution.k": 24, "qarm_evolution.method": 28, "qarm_evolution.order": 32, "qarm_evolution.shots": 36,
+        "qarm_evolution.init": 40, "qarm_evolution.eps": 48, "qarm_evolution.steps": 56, "qarm_evolution.reserved": 60,
+        "word2": 0x2300000}
 
 
 def header_constants():
@@ -75,13 +81,11 @@ def main():
         assert sfeats == hfeats, (sfeats, hfeats)
         for name, v in sops.items():
             assert hops.get(name) == v, (name, v, hops.get(name))
-        missing = set(hops) - set(sops) - {"QEVOLVE"}
+        missing = set(hops) - set(sops)
         assert not missing, missing
         sys.path.insert(0, ROOT)
         import qarm_exec
         for name, v in hops.items():
-            if name == "QEVOLVE":
-                continue
             assert getattr(qarm_exec, "OP_" + name) == v, name
         assert qarm_exec.FEATURES == sum(hfeats.values())
         plugin = open(os.path.join(ROOT, "runtime", "qemu", "qarm_qemu.c"), encoding="utf-8").read()
@@ -106,9 +110,10 @@ def main():
         conf = os.path.join(d, "conformance")
         sh(cc64 + ["-O1", "-iquote", INC, os.path.join(ROOT, "tests", "conformance", "qarm_conformance.c"), "-o", conf,
                    "-lm"])
-        want = "profiles: Core passed; Oracle not claimed; Variational not claimed; Circuit passed; Async not claimed"
+        want = ("profiles: Core passed; Oracle not claimed; Variational not claimed; Circuit passed; Async not claimed; "
+                "Dynamics not claimed")
         p = sh([q] + sysroot + ["-plugin", plug, conf], check=False)
-        assert p.returncode == 0 and want in p.stdout and "5 passed, 0 failed, 10 skipped" in p.stdout, p.stdout
+        assert p.returncode == 0 and want in p.stdout and "5 passed, 0 failed, 11 skipped" in p.stdout, p.stdout
         ghz = os.path.join(d, "ghz")
         sh(cc64 + ["-O1", "-iquote", INC, os.path.join(ROOT, "examples", "qarm", "ghz.c"), "-o", ghz, "-lm"])
         p = sh([q] + sysroot + ["-plugin", plug, ghz])

@@ -52,8 +52,10 @@
  *   qarm_vsample(&v, theta, shots, s)  QVSAMPLE: shots bitstrings of |psi(theta)> measured in the Z basis (bit q =
  *                                      qubit q): the answer of a QAOA or VQE run. 1: on the coprocessor, 0:
  *                                      sampled here, -1: refused
- *   qarm_evolve_n(&h, &o, init, t, k, steps, ops, cap, out)  time evolution: <O(t)> for k times, second-order
- *                                      Trotter tables (qarm_trotter) on QVLOAD and one QEXPECTN batch
+ *   qarm_evolve(&e, out, &info)        QEVOLVE (ISA 1.1): <O(t)> for k times with a guaranteed error bound; the
+ *                                      runtime chooses exact, a product formula (order 1, 2, 4, 6) or qDRIFT
+ *   qarm_evolve_n(&h, &o, init, t, k, steps, ops, cap, out)  time evolution on the 1.0 instructions: <O(t)> for k
+ *                                      times, second-order Trotter tables (qarm_trotter) on QVLOAD and QEXPECTN
  *   qarm_session(1) / qarm_session(0)  QSESSION: reserve a QPU for the optimizer loop, release it
  *   qarm_vqe_free(&v)                  QVFREE
  *
@@ -762,4 +764,60 @@ static inline int qarm_evolve_n(const qarm_hamiltonian *h, const qarm_hamiltonia
     qarm_vqe_free(&v);
     return ok < 0 ? -1 : where;
 }
+
+/* ---------------------------------------------------------------- QEVOLVE (docs/qarm_isa.md 6.6, ISA 1.1)
+ * out[i] = <init| exp(iHt_i) O exp(-iHt_i) |init> for the k times of e, within info->bound of the exact value for
+ * every t (for qDRIFT: its mean; info->err is a standard error from shots or random sequences). The runtime picks
+ * the method unless e asks for one: exact on a simulator, the cheapest product formula that meets e->eps on a QPU.
+ * 1: on the coprocessor, 0: on this CPU (the same plans, exact by default, up to QARM_VQE_MAX_QUBITS qubits), -1:
+ * refused (the reason on stderr). out may be e->t. */
+typedef struct { double bound, err; uint32_t method, order; uint64_t steps; } qarm_evolve_info;
+#if defined(QARM_RUNTIME)
+static inline int qarm_evolve(const qarm_evolution *e, double *out, qarm_evolve_info *info)
+{
+    qarm_evolve_info i = {0, 0, 0, 0, 0};
+    uint32_t how = 0;
+    int w = qarm_rt_evolve(e, out, &i.bound, &i.err, &how, &i.steps);
+    i.method = how & 0xff; i.order = how >> 8;
+    if (info) *info = i;
+    return w;
+}
+#else
+static inline int qarm__evolve(const qarm_evolution *e, double *out, qarm_evolve_info *info)
+{
+    const char *why = qarm_ev_check(e);
+    qarm_ev_plan_t p;
+    double se = 0;
+    if (why || e->h->qubits > QARM_VQE_MAX_QUBITS) {
+        fprintf(stderr, "qarm_evolve: %s\n", why ? why : "more qubits than the classical path takes");
+        return -1;
+    }
+    if (qarm_ev_plan(e, 1, 0, &p) < 0) { fprintf(stderr, "qarm_evolve: %s\n", p.why); return -1; }
+    p.seed = 0x5eed;
+    qarm_sv s = qarm__sv((int)e->h->qubits);
+    if (qarm_sv_evolve(&s, e, &p, out, &se) < 0) return -1;
+    if (info) { info->bound = p.bound; info->err = se; info->method = p.method; info->order = p.order; info->steps = p.steps; }
+    return 0;
+}
+#ifdef QARM_PACKET
+static inline int qarm_evolve(const qarm_evolution *e, double *out, qarm_evolve_info *info)
+{
+    register long x0 __asm__(QARM_X0) = 0;                     /* 0: not executed, 1: done, 2: refused */
+    register const qarm_evolution *x1 __asm__(QARM_X1) = e;
+    register double *x2 __asm__(QARM_X2) = out;
+    register long x3 __asm__(QARM_X3) = 0, x4 __asm__(QARM_X4) = 0;
+    register double d0 __asm__(QARM_D0) = 0, d1 __asm__(QARM_D1) = 0;
+    __asm__ volatile(QARM_PACKET(0x02270000) : "+r"(x0), "+r"(x3), "+r"(x4), "+" QARM_FP(d0), "+" QARM_FP(d1)
+                     : "r"(x1), "r"(x2) : "memory");
+    if (x0 == 1) {
+        if (info) { info->bound = d0; info->err = d1; info->method = (uint32_t)x3 & 0xff; info->order = (uint32_t)x3 >> 8 & 0xff; info->steps = (uint64_t)x4; }
+        return 1;
+    }
+    if (x0 == 2) return -1;
+    return qarm__evolve(e, out, info);
+}
+#else
+static inline int qarm_evolve(const qarm_evolution *e, double *out, qarm_evolve_info *info) { return qarm__evolve(e, out, info); }
+#endif
+#endif
 #endif

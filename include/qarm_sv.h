@@ -7,6 +7,8 @@
  *   qarm_sv_energy(&s, h)                    <psi|H|psi>
  *   qarm_sv_grad(&s, h, a, theta, grad)      the energy and its gradient, by adjoint differentiation: one forward and
  *                                            one backward pass, whatever the number of parameters
+ *   qarm_sv_evolve(&s, e, &plan, out, &se)   QEVOLVE: <O(t)> for k times, by the plan of qarm_ev_plan (exact, a
+ *                                            product formula of order 1, 2, 4 or 6, or qDRIFT) with its error bound
  * Every kernel works in place, one pass over the vector: a Pauli rotation pairs |b> with |b ^ x>; an energy term is
  * a sum over those pairs; the terms of H that share an X mask share one pass (H psi and <psi|H|psi> together).
  * Built with OpenMP (-fopenmp; libqarm does it when the compiler has it), the passes over 2^n amplitudes run on all
@@ -18,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "qarm_isa.h"
 
 #ifndef QARM_SV_PAR_MIN
@@ -592,5 +595,430 @@ static void qarm_sv_circuit(qarm_sv *s, const qarm_circuit *c)
         int k = qarm_sv_lower(&c->g[i], ops);
         for (int j = 0; j < k; j++) qarm_sv_apply(s, s->re, s->im, &ops[j], qarm_sv_angle(&ops[j], &one));
     }
+}
+
+/* ---------------------------------------------------------------- time evolution (QEVOLVE, docs/qarm_isa.md 6.6)
+ * <init| exp(iHt) O exp(-iHt) |init> for each t of a qarm_evolution, with a bound D0 that holds for every t:
+ *   |result - exact| <= D0 (rounding aside); for qDRIFT, |E[result] - exact| <= D0 and se is the standard error.
+ * lambda = sum |c_j| and omega = sum |o_j| over the terms that are not the identity: ||H - c|| <= lambda,
+ * ||O - c|| <= omega. A state error ||phi~ - phi|| <= d moves <O> by at most omega (2 + d) d.
+ *   exact        the Taylor series of exp(-iH dt), 40 terms, lambda dt <= 2: the truncation tau = tail_40(lambda dt)
+ *                per segment, d_{j+1} <= (1 + tau) d_j + tau (about 1e-37 per segment)
+ *   product      S_p, p = 1 (Lie-Trotter), 2 (Strang), 4, 6 (Suzuki), r steps of t / r:
+ *                ||U - S_p(t/r)^r|| <= 2 r tail_p(Upsilon_p lambda |t| / r), tail_p(x) = sum_{n > p} x^n / n!: both
+ *                expansions agree to order p, and the order-n coefficient of each is at most (Upsilon_p lambda)^n / n!,
+ *                Upsilon_p the sum of the stages' |coefficients| (1, 1, 8u_2 - 1, (8u_2 - 1)(8u_3 - 1)). With
+ *                commutator scaling (Childs, Su, Tran, Wiebe, Zhu 2021), for p = 1 also
+ *                t^2 / (2r) sum_j ||[sum_{k>j} H_k, H_j]||, and for p = 2 also t^3 / r^2 times
+ *                1/12 sum_j ||[sum_{l>j} H_l, [sum_{k>j} H_k, H_j]]|| + 1/24 sum_j ||[H_j, [H_j, sum_{k>j} H_k]]||,
+ *                each nested commutator bounded term by term (Pauli terms: 2 |c c'| per anticommuting pair)
+ *   qDRIFT       N terms drawn with probability |c_j| / lambda, each exp(-i sgn(c_j) lambda t/N P_j): the average
+ *                channel is within 2 lambda^2 t^2 / N e^{2 lambda |t| / N} of U (Campbell 2019); D0 counts it twice,
+ *                so that it holds for either normalization of the diamond norm. R sequences: se = their spread / sqrt R */
+#define QARM_EV_MAX_K 4096
+#define QARM_EV_MAX_TERMS 1000000u
+#define QARM_EV_EPS 1e-3                          /* eps = 0 */
+#define QARM_EV_SEQUENCES 100                     /* qDRIFT's R when shots = 0 */
+#define QARM_EV_TAYLOR 40
+#define QARM_EV_MAX_STEPS 1e12
+#ifndef QARM_EV_WORK
+#define QARM_EV_WORK 2e10                         /* amplitude updates a plan may take */
+#endif
+
+typedef struct {
+    uint32_t method, order;                       /* QARM_EV_EXACT, _PRODUCT or _QDRIFT; the order of a product */
+    uint64_t steps;                               /* r, qDRIFT's N, or the exact segments of the longest chain */
+    uint32_t sequences, reserved;                 /* qDRIFT's R */
+    double bound, work, ops;                      /* D0; amplitude updates; rotations per step (product) */
+    uint64_t seed;                                /* qDRIFT's generator */
+    const char *why;                              /* refused: the reason */
+} qarm_ev_plan_t;
+
+static int qarm_ev_mask_ok(uint64_t m, uint32_t n) { return n >= 64 || !(m >> n); }
+
+static const char *qarm_ev_check_h(const qarm_hamiltonian *h, uint32_t n, const char *what)
+{
+    (void)what;
+    if (h->terms > QARM_EV_MAX_TERMS) return "more than 1000000 terms";
+    if (h->terms && !h->t) return "no terms";
+    if (!isfinite(h->constant)) return "a coefficient is not finite";
+    for (uint32_t i = 0; i < h->terms; i++) {
+        if (!qarm_ev_mask_ok(h->t[i].x | h->t[i].z, n)) return "a Pauli term has a qubit at or above qubits";
+        if (!isfinite(h->t[i].c)) return "a coefficient is not finite";
+    }
+    return 0;
+}
+
+/* NULL, or why the table is refused (docs/qarm_isa.md 5.7) */
+static const char *qarm_ev_check(const qarm_evolution *e)
+{
+    const char *why;
+    if (!e->h || !e->o) return "a Hamiltonian is missing";
+    uint32_t n = e->h->qubits;
+    if (n < 1 || n > 64) return "qubits: 1 to 64";
+    if (e->o->qubits != n) return "the observable's qubits differ from the generator's";
+    if ((why = qarm_ev_check_h(e->h, n, "H")) || (why = qarm_ev_check_h(e->o, n, "O"))) return why;
+    if (!qarm_ev_mask_ok(e->init, n)) return "init has a bit at or above qubits";
+    if (e->k < 1 || e->k > QARM_EV_MAX_K) return "k: 1 to 4096";
+    if (!e->t) return "no times";
+    for (uint32_t i = 0; i < e->k; i++)
+        if (!isfinite(e->t[i])) return "a time is not finite";
+    if (e->method > QARM_EV_QDRIFT) return "unknown method";
+    if (e->method == QARM_EV_PRODUCT) {
+        if (e->order != 0 && e->order != 1 && e->order != 2 && e->order != 4 && e->order != 6)
+            return "order: 1, 2, 4, 6, or 0 for the runtime's choice";
+    } else if (e->order) return "order is for product formulas only";
+    if (!(e->eps >= 0) || !isfinite(e->eps)) return "eps: finite, 0 or more";
+    if (e->reserved) return "reserved must be 0";
+    return 0;
+}
+
+static double qarm_ev_tail(double x, int p)       /* sum over n > p of x^n / n!, x >= 0 */
+{
+    double term = 1, sum;
+    int n;
+    for (n = 1; n <= p + 1; n++) term *= x / n;
+    sum = term;
+    for (; n < 100000; n++) {
+        term *= x / n;
+        sum += term;
+        if (n > x && term <= sum * 1e-17) break;
+    }
+    return sum * (1 + 1e-12);                     /* the sum's own rounding, upward */
+}
+
+static double qarm_ev_norm(const qarm_hamiltonian *h)
+{
+    double l = 0;
+    for (uint32_t i = 0; i < h->terms; i++)
+        if (h->t[i].x || h->t[i].z) l += fabs(h->t[i].c);
+    return l;
+}
+
+static int qarm_ev_anti(uint64_t x1, uint64_t z1, uint64_t x2, uint64_t z2) { return qarm_sv_odd((x1 & z2) ^ (z1 & x2)); }
+
+/* the second-order commutator sums: c[0] = sum_j ||[S_j, [S_j, H_j]]|| over l, k > j, c[1] = sum_j ||[H_j, [H_j, S_j]]||;
+ * infinite above 400 terms (the first is cubic in them) */
+static void qarm_ev_comm2(const qarm_hamiltonian *h, double c[2])
+{
+    c[0] = c[1] = 0;
+    if (h->terms > 400) { c[0] = c[1] = INFINITY; return; }
+    for (uint32_t j = 0; j < h->terms; j++) {
+        const qarm_pauli *a = &h->t[j];
+        if (!a->x && !a->z) continue;
+        for (uint32_t k = j + 1; k < h->terms; k++) {
+            const qarm_pauli *b = &h->t[k];
+            if (!qarm_ev_anti(a->x, a->z, b->x, b->z)) continue;
+            double ab = 2 * fabs(a->c * b->c);    /* ||[H_k, H_j]||; the product's masks: */
+            uint64_t px = a->x ^ b->x, pz = a->z ^ b->z;
+            c[1] += 2 * fabs(a->c) * ab;          /* [H_j, [H_j, H_k]]: H_j anticommutes with H_k H_j */
+            for (uint32_t l = j + 1; l < h->terms; l++)
+                if (qarm_ev_anti(h->t[l].x, h->t[l].z, px, pz)) c[0] += 2 * fabs(h->t[l].c) * ab;
+        }
+    }
+}
+
+static double qarm_ev_comm(const qarm_hamiltonian *h)     /* sum_{j<k} ||[H_j, H_k]||; infinite above 4096 terms */
+{
+    if (h->terms > 4096) return INFINITY;
+    double c = 0;
+    for (uint32_t j = 0; j < h->terms; j++)
+        for (uint32_t k = j + 1; k < h->terms; k++) {
+            const qarm_pauli *a = &h->t[j], *b = &h->t[k];
+            if (qarm_sv_odd((a->x & b->z) ^ (a->z & b->x))) c += 2 * fabs(a->c * b->c);
+        }
+    return c;
+}
+
+static double qarm_ev_upsilon(int p)
+{
+    double u = 1;
+    for (int q = 4; q <= p; q += 2) u *= 8 / (4 - pow(4, 1.0 / (q - 1))) - 1;
+    return u;
+}
+
+static double qarm_ev_obs(double omega, double d)          /* d: the state's error */
+{
+    if (d >= 2) return 2 * omega;
+    double b = omega * (2 + d) * d;
+    return b > 2 * omega ? 2 * omega : b;
+}
+
+/* comm: p = 1, sum_{j<k} ||[H_j, H_k]||; p = 2, the weighted sum c[0] / 12 + c[1] / 24 */
+static double qarm_ev_product_d(double lam, double comm, int p, double t, double r)
+{
+    t = fabs(t);
+    if (lam == 0 || t == 0) return 0;
+    double d = 2 * r * qarm_ev_tail(qarm_ev_upsilon(p) * lam * t / r, p);
+    if (comm < INFINITY && (p == 1 || p == 2)) {
+        double c = (p == 1 ? t * t / (2 * r) : t * t * t / (r * r)) * comm * (1 + 1e-12);
+        if (c < d) d = c;
+    }
+    return d;
+}
+
+static double qarm_ev_qdrift_d(double lam, double t, double N)
+{
+    t = fabs(t);
+    if (lam == 0 || t == 0) return 0;
+    double x = lam * t / N;
+    return 2 * 2 * x * x * N * exp(2 * x) * (1 + 1e-12);   /* twice Campbell's bound */
+}
+
+static double qarm_ev_exact_d(double lam, double t, uint64_t *segments)
+{
+    t = fabs(t);
+    if (lam == 0 || t == 0) { *segments = 0; return 0; }
+    double m = ceil(lam * t / 2), tau = qarm_ev_tail(lam * t / m, QARM_EV_TAYLOR);
+    if (m > QARM_EV_MAX_STEPS) { *segments = (uint64_t)QARM_EV_MAX_STEPS; return INFINITY; }
+    *segments = (uint64_t)m;
+    return expm1(m * log1p(tau)) * (1 + 1e-12);   /* d_m = (1 + tau)^m - 1 */
+}
+
+/* the least steps x (1 .. QARM_EV_MAX_STEPS) with bound(x) <= eps: 0 when there is none */
+static uint64_t qarm_ev_least(double (*bound)(const double *, double), const double *arg, double eps)
+{
+    double hi = 1;
+    while (bound(arg, hi) > eps) {
+        if (hi >= QARM_EV_MAX_STEPS) return 0;
+        hi *= 2;
+    }
+    double lo = hi / 2;                            /* bound(lo) > eps, or lo < 1 */
+    if (lo < 1) return 1;
+    while (hi - lo > 1) {
+        double mid = floor((lo + hi) / 2);
+        if (bound(arg, mid) <= eps) hi = mid; else lo = mid;
+    }
+    return (uint64_t)hi;
+}
+/* arg: omega, lambda, comm, p, tmax */
+static double qarm_ev_pb(const double *a, double r) { return qarm_ev_obs(a[0], qarm_ev_product_d(a[1], a[2], (int)a[3], a[4], r)); }
+static double qarm_ev_qb(const double *a, double N) { return qarm_ev_obs(a[0], qarm_ev_qdrift_d(a[1], a[4], N)); }
+
+/* what QEVOLVE runs: 0, or -1 with p->why. exact_ok: the backend evolves exactly (not on a measured backend);
+ * limit: the amplitude updates allowed (0: QARM_EV_WORK) */
+static int qarm_ev_plan(const qarm_evolution *e, int exact_ok, double limit, qarm_ev_plan_t *p)
+{
+    const qarm_hamiltonian *h = e->h;
+    double N = ldexp(1, (int)h->qubits), lam = qarm_ev_norm(h), omega = qarm_ev_norm(e->o), tmax = 0, tpos = 0,
+           tneg = 0, eps = e->eps > 0 ? e->eps : QARM_EV_EPS, L = 0;
+    uint32_t method = e->method == QARM_EV_AUTO ? (exact_ok ? QARM_EV_EXACT : QARM_EV_PRODUCT) : e->method;
+    memset(p, 0, sizeof *p);
+    if (!limit) limit = QARM_EV_WORK;
+    for (uint32_t i = 0; i < h->terms; i++) L += h->t[i].x || h->t[i].z;
+    for (uint32_t i = 0; i < e->k; i++) {
+        double t = e->t[i];
+        if (fabs(t) > tmax) tmax = fabs(t);
+        if (t > tpos) tpos = t;
+        if (-t > tneg) tneg = -t;
+    }
+    p->method = method;
+    if (method == QARM_EV_EXACT) {
+        uint64_t m1, m2;
+        if (!exact_ok) { p->why = "exact evolution is not available on this backend"; return -1; }
+        double d1 = qarm_ev_exact_d(lam, tpos, &m1), d2 = qarm_ev_exact_d(lam, tneg, &m2);
+        p->steps = m1 > m2 ? m1 : m2;
+        p->bound = qarm_ev_obs(omega, d1 > d2 ? d1 : d2);
+        p->work = ((double)(m1 + m2) * QARM_EV_TAYLOR * (L + 1) + e->k * (e->o->terms + 1.0)) * N;
+    } else if (method == QARM_EV_PRODUCT) {
+        static const int orders[4] = {1, 2, 4, 6};
+        static const double mult[7] = {0, 1, 2, 0, 10, 0, 50};   /* rotations per step, per term */
+        double comm = qarm_ev_comm(h), c2[2], best = INFINITY;
+        qarm_ev_comm2(h, c2);
+        for (int i = 0; i < 4; i++) {
+            int q = orders[i];
+            if (e->order && (int)e->order != q) continue;
+            double arg[5] = {omega, lam, q == 1 ? comm : q == 2 ? c2[0] / 12 + c2[1] / 24 : INFINITY, q, tmax};
+            uint64_t r = e->steps ? e->steps : qarm_ev_least(qarm_ev_pb, arg, eps);
+            if (!r) continue;
+            double cost = (double)r * mult[q] * (L > 0 ? L : 1);
+            if (cost < best) {
+                best = cost;
+                p->order = (uint32_t)q;
+                p->steps = r;
+                p->ops = mult[q] * L;
+                p->bound = qarm_ev_pb(arg, (double)r);
+            }
+        }
+        if (!p->steps) { p->why = "no product formula meets eps within 10^12 steps"; return -1; }
+        p->work = best * e->k * N;
+    } else {
+        double arg[5] = {omega, lam, 0, 0, tmax};
+        uint64_t n = e->steps ? e->steps : qarm_ev_least(qarm_ev_qb, arg, eps);
+        if (!n) { p->why = "qDRIFT cannot meet eps within 10^12 samples"; return -1; }
+        p->steps = n;
+        p->sequences = e->shots ? e->shots : QARM_EV_SEQUENCES;
+        p->bound = qarm_ev_qb(arg, (double)n);
+        p->work = (double)n * p->sequences * e->k * N;
+    }
+    if (p->work > limit) { p->why = "the evolution would take more work than this runtime allows"; return -1; }
+    return 0;
+}
+
+/* the rotations of S_p(f dt) in order, adjacent equal terms merged: emit(ctx, x, z, angle / dt) */
+typedef void (*qarm_ev_emit_fn)(void *ctx, uint64_t x, uint64_t z, double a);
+static void qarm_ev_formula(const qarm_hamiltonian *h, int p, double f, qarm_ev_emit_fn emit, void *ctx)
+{
+    if (p <= 2) {
+        for (int half = 0; half < (p == 2 ? 2 : 1); half++)
+            for (uint32_t i = 0; i < h->terms; i++) {
+                const qarm_pauli *t = &h->t[half ? h->terms - 1 - i : i];
+                if (t->x || t->z) emit(ctx, t->x, t->z, (p == 2 ? f / 2 : f) * t->c);
+            }
+        return;
+    }
+    double u = 1 / (4 - pow(4, 1.0 / (p - 1))), c[5] = {u, u, 1 - 4 * u, u, u};
+    for (int i = 0; i < 5; i++) qarm_ev_formula(h, p - 2, f * c[i], emit, ctx);
+}
+
+/* one step of S_p as an ansatz table: Pauli rotations with scale = angle per unit dt, param 0 (theta[0] = dt) */
+typedef struct { qarm_op *ops; uint32_t n, cap; int full; } qarm_ev_table;
+static inline void qarm_ev_table_add(void *ctx, uint64_t x, uint64_t z, double a)
+{
+    qarm_ev_table *t = (qarm_ev_table *)ctx;
+    if (t->n && t->ops[t->n - 1].x == x && t->ops[t->n - 1].z == z) { t->ops[t->n - 1].scale += a; return; }
+    if (t->n == t->cap) { t->full = 1; return; }
+    qarm_op o = {QARM_PAULI_ROT, 0, 0, 0, 0, a, x, z};
+    t->ops[t->n++] = o;
+}
+/* r steps of S_p into ops; the number of operations, -1 when cap is too small */
+static inline long qarm_ev_steps_table(const qarm_hamiltonian *h, int p, uint64_t r, qarm_op *ops, uint32_t cap)
+{
+    qarm_ev_table t = {ops, 0, cap, 0};
+    for (uint64_t i = 0; i < r && !t.full; i++) qarm_ev_formula(h, p, 1, qarm_ev_table_add, &t);
+    return t.full ? -1 : (long)t.n;
+}
+
+/* on the state vector: one pending rotation, merged with an equal neighbour */
+typedef struct { qarm_sv *s; uint64_t x, z; double a, dt; int have; } qarm_ev_run;
+static void qarm_ev_flush(qarm_ev_run *w)
+{
+    if (w->have && w->a != 0) qarm_sv_pauli_rot(w->s, w->s->re, w->s->im, w->x, w->z, w->a);
+    w->have = 0;
+}
+static void qarm_ev_run_add(void *ctx, uint64_t x, uint64_t z, double a)
+{
+    qarm_ev_run *w = (qarm_ev_run *)ctx;
+    if (w->have && w->x == x && w->z == z) { w->a += a * w->dt; return; }
+    qarm_ev_flush(w);
+    w->x = x; w->z = z; w->a = a * w->dt; w->have = 1;
+}
+
+static void qarm_ev_basis(qarm_sv *s, uint64_t init)
+{
+    long N = 1L << s->n;
+    for (long b = 0; b < N; b++) s->re[b] = s->im[b] = 0;
+    s->re[init] = 1;
+}
+
+/* exp(-i (H - c) T) on (re, im): segments of the Taylor series; tr, ti, lr, li are scratch */
+static void qarm_ev_taylor(qarm_sv *s, const qarm_hamiltonian *h, double lam, double T)
+{
+    long N = 1L << s->n;
+    if (lam == 0 || T == 0) return;
+    double m = ceil(lam * fabs(T) / 2), dt = T / m;
+    for (double seg = 0; seg < m; seg++) {
+        for (long b = 0; b < N; b++) { s->tr[b] = s->re[b]; s->ti[b] = s->im[b]; }
+        for (int n = 1; n <= QARM_EV_TAYLOR; n++) {
+            qarm_sv_hpsi(s, h);                    /* (lr, li) = (H - c) term */
+            double f = dt / n;
+            QARM_SV_PAR(N)
+            for (long b = 0; b < N; b++) {         /* term = -i f (lr + i li) */
+                s->re[b] = f * s->li[b];
+                s->im[b] = -f * s->lr[b];
+                s->tr[b] += s->re[b];
+                s->ti[b] += s->im[b];
+            }
+        }
+        for (long b = 0; b < N; b++) { s->re[b] = s->tr[b]; s->im[b] = s->ti[b]; }
+    }
+}
+
+typedef struct { double t; uint32_t i; } qarm_ev_time;
+static int qarm_ev_cmp_time(const void *a, const void *b)
+{
+    double x = ((const qarm_ev_time *)a)->t, y = ((const qarm_ev_time *)b)->t;
+    return x < y ? -1 : x > y;
+}
+
+static uint64_t qarm_ev_next(uint64_t *st)       /* splitmix64 */
+{
+    uint64_t z = (*st += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* runs the plan: out[i] = <O(t_i)>, *se = the largest standard error (qDRIFT), 0 otherwise. out may be e->t.
+ * 0, or -1 (no memory) */
+static int qarm_sv_evolve(qarm_sv *s, const qarm_evolution *e, const qarm_ev_plan_t *p, double *out, double *se)
+{
+    const qarm_hamiltonian *h = e->h, *o = e->o;
+    uint32_t k = e->k;
+    qarm_ev_time *ts = (qarm_ev_time *)malloc(sizeof *ts * k);
+    if (!ts) return -1;
+    for (uint32_t i = 0; i < k; i++) { ts[i].t = e->t[i]; ts[i].i = i; }   /* every input read before any output */
+    *se = 0;
+    if (p->method == QARM_EV_EXACT) {
+        double lam = qarm_ev_norm(h);
+        qsort(ts, k, sizeof *ts, qarm_ev_cmp_time);
+        for (int dir = 0; dir < 2; dir++) {      /* t >= 0 upward from 0, then t < 0 downward */
+            double cur = 0;
+            qarm_ev_basis(s, e->init);
+            for (uint32_t j = 0; j < k; j++) {
+                const qarm_ev_time *x = &ts[dir ? k - 1 - j : j];
+                if (dir ? x->t >= 0 : x->t < 0) continue;
+                qarm_ev_taylor(s, h, lam, x->t - cur);
+                cur = x->t;
+                out[x->i] = qarm_sv_energy(s, o);
+            }
+        }
+    } else if (p->method == QARM_EV_PRODUCT) {
+        for (uint32_t j = 0; j < k; j++) {
+            qarm_ev_run w = {s, 0, 0, 0, ts[j].t / (double)p->steps, 0};
+            qarm_ev_basis(s, e->init);
+            if (ts[j].t != 0)
+                for (uint64_t r = 0; r < p->steps; r++) qarm_ev_formula(h, (int)p->order, 1, qarm_ev_run_add, &w);
+            qarm_ev_flush(&w);
+            out[ts[j].i] = qarm_sv_energy(s, o);
+        }
+    } else {
+        double lam = qarm_ev_norm(h), *cum = (double *)malloc(sizeof *cum * (h->terms + 1));
+        uint32_t *idx = (uint32_t *)malloc(sizeof *idx * (h->terms + 1)), L = 0;
+        uint64_t st = p->seed;
+        if (!cum || !idx) { free(cum); free(idx); free(ts); return -1; }
+        for (uint32_t i = 0; i < h->terms; i++)
+            if ((h->t[i].x || h->t[i].z) && h->t[i].c != 0) {
+                cum[L] = (L ? cum[L - 1] : 0) + fabs(h->t[i].c);
+                idx[L++] = i;
+            }
+        for (uint32_t j = 0; j < k; j++) {
+            double mean = 0, m2 = 0, tau = lam * ts[j].t / (double)p->steps;
+            for (uint32_t q = 0; q < p->sequences; q++) {
+                qarm_ev_run w = {s, 0, 0, 0, 1, 0};
+                qarm_ev_basis(s, e->init);
+                for (uint64_t n = 0; L && ts[j].t != 0 && n < p->steps; n++) {
+                    double u = (double)(qarm_ev_next(&st) >> 11) / 9007199254740992.0 * cum[L - 1];
+                    uint32_t lo = 0, hi = L - 1;
+                    while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (u < cum[mid]) hi = mid; else lo = mid + 1; }
+                    const qarm_pauli *t = &h->t[idx[lo]];
+                    qarm_ev_run_add(&w, t->x, t->z, t->c > 0 ? tau : -tau);
+                }
+                qarm_ev_flush(&w);
+                double v = qarm_sv_energy(s, o), d = v - mean;
+                mean += d / (q + 1);
+                m2 += d * (v - mean);
+            }
+            out[ts[j].i] = mean;
+            if (p->sequences > 1) {
+                double sd = sqrt(m2 / (p->sequences - 1) / p->sequences);
+                if (sd > *se) *se = sd;
+            }
+        }
+        free(cum);
+        free(idx);
+    }
+    free(ts);
+    return 0;
 }
 #endif

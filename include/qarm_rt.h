@@ -36,6 +36,9 @@ const char *qarm_rt_where(const qarm_rt *r);                                    
 int qarm_rt_circuit(const qarm_circuit *c, int shots, uint64_t *samples);  /* 1 (on ibm or simulated), -1 refused */
 int qarm_rt_rand(void *buf, int n);                                          /* 1 from ibm's measurements, 0 pseudo */
 int qarm_rt_caps(qarm_capabilities *caps);
+/* QEVOLVE: out[i] = <O(t_i)> within *bound (*err: the standard error on a measured backend or of qDRIFT); *how =
+ * method | order << 8, *steps: the plan's. 0 exact, 1 measured, -1 refused (the reason on stderr) */
+int qarm_rt_evolve(const qarm_evolution *e, double *out, double *bound, double *err, uint32_t *how, uint64_t *steps);
 
 /* QSEARCH: a phase oracle as tools/qarm_oracle.py writes it; Grover simulated on the search register's amplitudes */
 typedef struct qarm_oracle qarm_oracle;
