@@ -43,6 +43,8 @@ jobs:
         run: python -m tests.test_qarm_exec
       - name: test_qarm_patch (Q-ARM put into an ELF binary built without qarm.h)
         run: python -m tests.test_qarm_patch
+      - name: test_qarm_x86 (x86-64 programs natively; QEMU parts in the export job)
+        run: python -m tests.test_qarm_x86
       - name: test_qarm_vqe (Q-ARM v2 VQE; Qiskit parts in the job below)
         run: python -m tests.test_qarm_vqe
       - name: test_libqarm (the native runtime; its ibm backend against a mock of IBM's API in the job below)
@@ -83,13 +85,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/qemu
-          key: qemu-v10.2.4-aarch64-linux-user-plugins-${{ runner.os }}-1
+          key: qemu-v10.2.4-aarch64-x86_64-linux-user-plugins-${{ runner.os }}-1
       - name: Build QEMU
         if: steps.qemu.outputs.cache-hit != 'true'
         run: |
           git clone -q --depth 1 --branch v10.2.4 https://github.com/qemu/qemu.git /tmp/qemu-src
           mkdir /tmp/qemu-src/build && cd /tmp/qemu-src/build
-          ../configure --prefix=$HOME/qemu --target-list=aarch64-linux-user --enable-plugins --disable-docs --disable-tools --disable-werror
+          ../configure --prefix=$HOME/qemu --target-list=aarch64-linux-user,x86_64-linux-user --enable-plugins --disable-docs --disable-tools --disable-werror
           ninja install
       - name: test_qarm_qemu (Q-ARM in qemu-aarch64, the plugin of runtime/qemu)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_qemu
+      - name: test_qarm_x86 (Q-ARM on x86-64, in qemu-x86_64 with the plugin)
+        run: QARM_QEMU_X86=$HOME/qemu/bin/qemu-x86_64 QARM_QEMU_INCLUDE=$HOME/qemu/include python -m tests.test_qarm_x86

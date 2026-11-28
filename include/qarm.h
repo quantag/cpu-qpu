@@ -347,36 +347,62 @@ static int qarm__vqe_classical(const qarm_hamiltonian *h, const qarm_ansatz *a, 
     return 0;
 }
 
-#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__aarch64__) || defined(__x86_64__)) && (defined(__GNUC__) || defined(__clang__))
+#if defined(__aarch64__)
 #define QARM_PACKET(op) \
     ".inst 0x14000008\n\t"            /* B .+32: a plain CPU continues after the packet */ \
     ".inst 0x4d524151\n\t"            /* "QARM" */ \
     ".inst " #op "\n\t"               /* version 2, opcode */ \
     ".inst 0\n\t.inst 0\n\t.inst 0\n\t.inst 0\n\t.inst 0\n\t"
+#define QARM_X0 "x0"                     /* the operand registers X0..X5, D0, D1 (docs/qarm_isa.md, section 3) */
+#define QARM_X1 "x1"
+#define QARM_X2 "x2"
+#define QARM_X3 "x3"
+#define QARM_X4 "x4"
+#define QARM_X5 "x5"
+#define QARM_D0 "d0"
+#define QARM_D1 "d1"
+#define QARM_FP "w"                      /* the constraint of a floating-point register */
+#else                                    /* x86-64: the same packet behind JMP +30 (docs/qarm_isa.md, section 2.1) */
+#define QARM_PACKET(op) \
+    ".byte 0xeb, 0x1e, 0, 0\n\t"       /* JMP .+32: a plain CPU continues after the packet */ \
+    ".long 0x4d524151\n\t"            /* "QARM" */ \
+    ".long " #op "\n\t"               /* version 2, opcode */ \
+    ".long 0, 0, 0, 0, 0\n\t"
+#define QARM_X0 "rax"                    /* X0..X5 are RAX RDI RSI RDX RCX R8; D0, D1 are XMM0, XMM1 */
+#define QARM_X1 "rdi"
+#define QARM_X2 "rsi"
+#define QARM_X3 "rdx"
+#define QARM_X4 "rcx"
+#define QARM_X5 "r8"
+#define QARM_D0 "xmm0"
+#define QARM_D1 "xmm1"
+#define QARM_FP "x"
+#endif
 #define QARM_OP_QAVAIL  0x02100000
 #define QARM_OP_QSEARCH 0x02110000
 
 static inline int qarm_available(void)
 {
-    register long x0 __asm__("x0") = 0;                     /* a plain CPU leaves 0 */
+    register long x0 __asm__(QARM_X0) = 0;                     /* a plain CPU leaves 0 */
     __asm__ volatile(QARM_PACKET(0x02100000) : "+r"(x0) : : "memory");
     return (int)x0;
 }
 
 static inline int qarm_features(void)
 {
-    register long x0 __asm__("x0") = 0;
-    register long x1 __asm__("x1") = 0;
+    register long x0 __asm__(QARM_X0) = 0;
+    register long x1 __asm__(QARM_X1) = 0;
     __asm__ volatile(QARM_PACKET(0x02100000) : "+r"(x0), "+r"(x1) : : "memory");
     return x0 == 1 ? (int)(x1 ? x1 : QARM_F_SEARCH) : 0;     /* a runtime without feature bits: QSEARCH only */
 }
 
 static inline int qarm_search(int (*f)(int), int bits, int *x)
 {
-    register long x0 __asm__("x0") = 0;                     /* 0: not executed, 1: found, 2: none */
-    register int (*x1)(int) __asm__("x1") = f;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = 0;
+    register long x0 __asm__(QARM_X0) = 0;                     /* 0: not executed, 1: found, 2: none */
+    register int (*x1)(int) __asm__(QARM_X1) = f;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = 0;
     __asm__ volatile(QARM_PACKET(0x02110000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1 && f((int)x3) == 1) { *x = (int)x3; return 1; }   /* every answer checked by f itself */
     if (x0 == 2) return 0;
@@ -387,10 +413,10 @@ static inline int qarm_search(int (*f)(int), int bits, int *x)
 
 static inline int qarm_vqe_load(const qarm_hamiltonian *h, const qarm_ansatz *a, qarm_vqe *v)
 {
-    register long x0 __asm__("x0") = 0;                     /* 0: not executed, 1: loaded, 2: refused */
-    register const qarm_hamiltonian *x1 __asm__("x1") = h;
-    register const qarm_ansatz *x2 __asm__("x2") = a;
-    register long x3 __asm__("x3") = 0;
+    register long x0 __asm__(QARM_X0) = 0;                     /* 0: not executed, 1: loaded, 2: refused */
+    register const qarm_hamiltonian *x1 __asm__(QARM_X1) = h;
+    register const qarm_ansatz *x2 __asm__(QARM_X2) = a;
+    register long x3 __asm__(QARM_X3) = 0;
     __asm__ volatile(QARM_PACKET(0x02200000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1) { v->h = h; v->a = a; v->handle = x3; v->quantum = 1; return 1; }
     if (x0 == 2) { v->quantum = 0; return -1; }
@@ -400,12 +426,12 @@ static inline int qarm_vqe_load(const qarm_hamiltonian *h, const qarm_ansatz *a,
 static inline double qarm_expect(qarm_vqe *v, const double *theta, double *err)
 {
     if (v->quantum) {
-        register long x0 __asm__("x0") = 0;
-        register const double *x1 __asm__("x1") = theta;
-        register long x2 __asm__("x2") = 0;                 /* shots: config.json's */
-        register long x3 __asm__("x3") = v->handle;
-        register double d0 __asm__("d0") = 0, d1 __asm__("d1") = 0;
-        __asm__ volatile(QARM_PACKET(0x02210000) : "+r"(x0), "+w"(d0), "+w"(d1) : "r"(x1), "r"(x2), "r"(x3)
+        register long x0 __asm__(QARM_X0) = 0;
+        register const double *x1 __asm__(QARM_X1) = theta;
+        register long x2 __asm__(QARM_X2) = 0;                 /* shots: config.json's */
+        register long x3 __asm__(QARM_X3) = v->handle;
+        register double d0 __asm__(QARM_D0) = 0, d1 __asm__(QARM_D1) = 0;
+        __asm__ volatile(QARM_PACKET(0x02210000) : "+r"(x0), "+" QARM_FP(d0), "+" QARM_FP(d1) : "r"(x1), "r"(x2), "r"(x3)
                          : "memory");
         if (x0 == 1) { if (err) *err = d1; return d0; }
     }
@@ -416,11 +442,11 @@ static inline double qarm_expect(qarm_vqe *v, const double *theta, double *err)
 static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double *e)
 {
     if (v->quantum) {
-        register long x0 __asm__("x0") = 0;
-        register const double *x1 __asm__("x1") = thetas;
-        register long x2 __asm__("x2") = k;
-        register long x3 __asm__("x3") = v->handle;
-        register double *x4 __asm__("x4") = e;
+        register long x0 __asm__(QARM_X0) = 0;
+        register const double *x1 __asm__(QARM_X1) = thetas;
+        register long x2 __asm__(QARM_X2) = k;
+        register long x3 __asm__(QARM_X3) = v->handle;
+        register double *x4 __asm__(QARM_X4) = e;
         __asm__ volatile(QARM_PACKET(0x02220000) : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
         if (x0 == 1) return 1;
     }
@@ -431,11 +457,11 @@ static inline int qarm_expect_n(qarm_vqe *v, const double *thetas, int k, double
 
 static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value)
 {
-    register long x0 __asm__("x0") = 0;
-    register int (*x1)(int) __asm__("x1") = cost;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = 0;
-    register long x4 __asm__("x4") = 0;
+    register long x0 __asm__(QARM_X0) = 0;
+    register int (*x1)(int) __asm__(QARM_X1) = cost;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = 0;
+    register long x4 __asm__(QARM_X4) = 0;
     __asm__ volatile(QARM_PACKET(0x02150000) : "+r"(x0), "+r"(x3), "+r"(x4) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1 && cost((int)x3) == (int)x4) {             /* the answer's cost checked by cost itself */
         *x = (int)x3;
@@ -448,11 +474,11 @@ static inline int qarm_min(int (*cost)(int), int bits, int *x, int *value)
 /* QCOLLISION 0x1B: X1 = f, W2 = bits -> W0 = 1, W3 = x, W4 = y; W0 = 2: none found */
 static inline int qarm_collision(int (*f)(int), int bits, int *x, int *y)
 {
-    register long x0 __asm__("x0") = 0;
-    register int (*x1)(int) __asm__("x1") = f;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = 0;
-    register long x4 __asm__("x4") = 0;
+    register long x0 __asm__(QARM_X0) = 0;
+    register int (*x1)(int) __asm__(QARM_X1) = f;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = 0;
+    register long x4 __asm__(QARM_X4) = 0;
     __asm__ volatile(QARM_PACKET(0x021b0000) : "+r"(x0), "+r"(x3), "+r"(x4) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1 && qarm__is_collision(f, bits, (int)x3, (int)x4)) {   /* checked by calling f twice */
         *x = (int)x3;
@@ -465,10 +491,10 @@ static inline int qarm_collision(int (*f)(int), int bits, int *x, int *y)
 /* QPERIOD 0x18, QSIMON 0x19, QBV 0x1A: X1 = f, W2 = bits -> W0 = 1 and W3 = the answer, W0 = 2: none */
 static inline long qarm__structure(unsigned op, int (*f)(int), int bits, int *out)
 {
-    register long x0 __asm__("x0") = 0;
-    register int (*x1)(int) __asm__("x1") = f;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = 0;
+    register long x0 __asm__(QARM_X0) = 0;
+    register int (*x1)(int) __asm__(QARM_X1) = f;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = 0;
     if (op == 0x18) __asm__ volatile(QARM_PACKET(0x02180000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
     else if (op == 0x19) __asm__ volatile(QARM_PACKET(0x02190000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
     else __asm__ volatile(QARM_PACKET(0x021a0000) : "+r"(x0), "+r"(x3) : "r"(x1), "r"(x2) : "memory");
@@ -498,12 +524,12 @@ static inline int qarm_bv(int (*f)(int), int bits, int *sv)
 
 static inline double qarm_mean(int (*g)(int), int bits, int k, double *err)
 {
-    register long x0 __asm__("x0") = 0;
-    register int (*x1)(int) __asm__("x1") = g;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = k;
-    register double d0 __asm__("d0") = 0, d1 __asm__("d1") = 0;
-    __asm__ volatile(QARM_PACKET(0x02170000) : "+r"(x0), "+w"(d0), "+w"(d1) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    register long x0 __asm__(QARM_X0) = 0;
+    register int (*x1)(int) __asm__(QARM_X1) = g;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = k;
+    register double d0 __asm__(QARM_D0) = 0, d1 __asm__(QARM_D1) = 0;
+    __asm__ volatile(QARM_PACKET(0x02170000) : "+r"(x0), "+" QARM_FP(d0), "+" QARM_FP(d1) : "r"(x1), "r"(x2), "r"(x3) : "memory");
     if (x0 == 1) {
         if (err) *err = d1;
         return d0;
@@ -513,12 +539,12 @@ static inline double qarm_mean(int (*g)(int), int bits, int k, double *err)
 
 static inline long qarm_count(int (*f)(int), int bits, double *err)
 {
-    register long x0 __asm__("x0") = 0;
-    register int (*x1)(int) __asm__("x1") = f;
-    register long x2 __asm__("x2") = bits;
-    register long x3 __asm__("x3") = 0;
-    register double d0 __asm__("d0") = 0;
-    __asm__ volatile(QARM_PACKET(0x02160000) : "+r"(x0), "+r"(x3), "+w"(d0) : "r"(x1), "r"(x2) : "memory");
+    register long x0 __asm__(QARM_X0) = 0;
+    register int (*x1)(int) __asm__(QARM_X1) = f;
+    register long x2 __asm__(QARM_X2) = bits;
+    register long x3 __asm__(QARM_X3) = 0;
+    register double d0 __asm__(QARM_D0) = 0;
+    __asm__ volatile(QARM_PACKET(0x02160000) : "+r"(x0), "+r"(x3), "+" QARM_FP(d0) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1) {
         if (err) *err = d0;
         return x3;
@@ -528,10 +554,10 @@ static inline long qarm_count(int (*f)(int), int bits, double *err)
 
 static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples)
 {
-    register long x0 __asm__("x0") = 0;                     /* 0: not executed, 1: sampled, 2: refused */
-    register const qarm_circuit *x1 __asm__("x1") = c;
-    register long x2 __asm__("x2") = shots;
-    register uint64_t *x3 __asm__("x3") = samples;
+    register long x0 __asm__(QARM_X0) = 0;                     /* 0: not executed, 1: sampled, 2: refused */
+    register const qarm_circuit *x1 __asm__(QARM_X1) = c;
+    register long x2 __asm__(QARM_X2) = shots;
+    register uint64_t *x3 __asm__(QARM_X3) = samples;
     __asm__ volatile(QARM_PACKET(0x02300000) : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
     if (x0 == 1) return 1;
     if (x0 == 2) return -1;
@@ -540,9 +566,9 @@ static inline int qarm_run(const qarm_circuit *c, int shots, uint64_t *samples)
 
 static inline int qarm_rand(void *buf, int n)
 {
-    register long x0 __asm__("x0") = 0;                     /* 1: hardware's bytes, 3: a simulator's */
-    register void *x1 __asm__("x1") = buf;
-    register long x2 __asm__("x2") = n;
+    register long x0 __asm__(QARM_X0) = 0;                     /* 1: hardware's bytes, 3: a simulator's */
+    register void *x1 __asm__(QARM_X1) = buf;
+    register long x2 __asm__(QARM_X2) = n;
     __asm__ volatile(QARM_PACKET(0x021c0000) : "+r"(x0) : "r"(x1), "r"(x2) : "memory");
     if (x0 == 1 || x0 == 3) return x0 == 1;
     return qarm__rand(buf, n);
@@ -550,8 +576,8 @@ static inline int qarm_rand(void *buf, int n)
 
 static inline int qarm_caps(qarm_capabilities *caps)
 {
-    register long x0 __asm__("x0") = 0;
-    register qarm_capabilities *x1 __asm__("x1") = caps;
+    register long x0 __asm__(QARM_X0) = 0;
+    register qarm_capabilities *x1 __asm__(QARM_X1) = caps;
     __asm__ volatile(QARM_PACKET(0x02310000) : "+r"(x0) : "r"(x1) : "memory");
     return x0 == 1 ? 1 : qarm__caps(caps);
 }
@@ -559,12 +585,12 @@ static inline int qarm_caps(qarm_capabilities *caps)
 static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 {
     if (v->quantum) {
-        register long x0 __asm__("x0") = 0;
-        register const double *x1 __asm__("x1") = theta;
-        register long x3 __asm__("x3") = v->handle;
-        register double *x4 __asm__("x4") = grad;
-        register double d0 __asm__("d0") = 0;
-        __asm__ volatile(QARM_PACKET(0x02230000) : "+r"(x0), "+w"(d0) : "r"(x1), "r"(x3), "r"(x4) : "memory");
+        register long x0 __asm__(QARM_X0) = 0;
+        register const double *x1 __asm__(QARM_X1) = theta;
+        register long x3 __asm__(QARM_X3) = v->handle;
+        register double *x4 __asm__(QARM_X4) = grad;
+        register double d0 __asm__(QARM_D0) = 0;
+        __asm__ volatile(QARM_PACKET(0x02230000) : "+r"(x0), "+" QARM_FP(d0) : "r"(x1), "r"(x3), "r"(x4) : "memory");
         if (x0 == 1) return d0;
     }
     return qarm__grad(v->h, v->a, theta, grad);
@@ -573,11 +599,11 @@ static inline double qarm_grad(qarm_vqe *v, const double *theta, double *grad)
 static inline int qarm_vsample(qarm_vqe *v, const double *theta, int shots, uint64_t *samples)
 {
     if (v->quantum) {
-        register long x0 __asm__("x0") = 0;                 /* 1: sampled, 2: refused */
-        register const double *x1 __asm__("x1") = theta;
-        register long x2 __asm__("x2") = shots;
-        register long x3 __asm__("x3") = v->handle;
-        register uint64_t *x4 __asm__("x4") = samples;
+        register long x0 __asm__(QARM_X0) = 0;                 /* 1: sampled, 2: refused */
+        register const double *x1 __asm__(QARM_X1) = theta;
+        register long x2 __asm__(QARM_X2) = shots;
+        register long x3 __asm__(QARM_X3) = v->handle;
+        register uint64_t *x4 __asm__(QARM_X4) = samples;
         __asm__ volatile(QARM_PACKET(0x02250000) : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
         if (x0 == 1) return 1;
         if (x0 == 2) return -1;
@@ -587,8 +613,8 @@ static inline int qarm_vsample(qarm_vqe *v, const double *theta, int shots, uint
 
 static inline int qarm_session(int open)
 {
-    register long x0 __asm__("x0") = 0;
-    register long x1 __asm__("x1") = open;
+    register long x0 __asm__(QARM_X0) = 0;
+    register long x1 __asm__(QARM_X1) = open;
     __asm__ volatile(QARM_PACKET(0x02240000) : "+r"(x0) : "r"(x1) : "memory");
     return (int)x0;
 }
@@ -596,8 +622,8 @@ static inline int qarm_session(int open)
 static inline void qarm_vqe_free(qarm_vqe *v)
 {
     if (v->quantum) {
-        register long x0 __asm__("x0") = 0;
-        register long x3 __asm__("x3") = v->handle;
+        register long x0 __asm__(QARM_X0) = 0;
+        register long x3 __asm__(QARM_X3) = v->handle;
         __asm__ volatile(QARM_PACKET(0x02260000) : "+r"(x0) : "r"(x3) : "memory");
     }
     v->quantum = 0;
@@ -606,23 +632,23 @@ static inline void qarm_vqe_free(qarm_vqe *v)
 /* 1: the runtime took the request (state 0: running, 1: done); 0: not executed (no runtime, or not async) */
 static inline int qarm_submit(qarm_request *r)
 {
-    register long x0 __asm__("x0") = 0;
-    register qarm_request *x1 __asm__("x1") = r;
+    register long x0 __asm__(QARM_X0) = 0;
+    register qarm_request *x1 __asm__(QARM_X1) = r;
     r->state = 0;
     __asm__ volatile(QARM_PACKET(0x02120000) : "+r"(x0) : "r"(x1) : "memory");
     return x0 == 1;
 }
 static inline int qarm_poll(qarm_request *r)              /* 1 done, 0 running; never waits */
 {
-    register long x0 __asm__("x0") = 0;
-    register long x1 __asm__("x1") = (long)(intptr_t)r;
+    register long x0 __asm__(QARM_X0) = 0;
+    register long x1 __asm__(QARM_X1) = (long)(intptr_t)r;
     __asm__ volatile(QARM_PACKET(0x02130000) : "+r"(x0), "+r"(x1) : : "memory");
     return x0 == 1 ? (int)x1 : 1;
 }
 static inline void qarm_wait(qarm_request *r)
 {
-    register long x0 __asm__("x0") = 0;
-    register qarm_request *x1 __asm__("x1") = r;
+    register long x0 __asm__(QARM_X0) = 0;
+    register qarm_request *x1 __asm__(QARM_X1) = r;
     __asm__ volatile(QARM_PACKET(0x02140000) : "+r"(x0) : "r"(x1) : "memory");
 }
 #define QARM_HAVE_SUBMIT 1

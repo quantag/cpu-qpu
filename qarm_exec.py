@@ -114,8 +114,9 @@ class Program:
         self.code_segment = (text.virtual_address, text.virtual_size)  # __TEXT: also constant data
 
     def _elf(self, b, lief):
-        if b.header.machine_type != lief.ELF.ARCH.AARCH64:
-            raise QarmError(f"{self.path}: not an AArch64 program")
+        if b.header.machine_type not in (lief.ELF.ARCH.AARCH64, lief.ELF.ARCH.X86_64):
+            raise QarmError(f"{self.path}: neither an AArch64 nor an x86-64 program")
+        self.arch = "x86_64" if b.header.machine_type == lief.ELF.ARCH.X86_64 else "aarch64"
         self.kind = "linux"
         pie = b.header.file_type == lief.ELF.Header.FILE_TYPE.DYN
         self.base = (0x10000000 if self.want_base is None else self.want_base) if pie else 0
@@ -131,9 +132,10 @@ class Program:
         R = lief.ELF.Relocation.TYPE
         for r in b.relocations:
             addr = self.base + r.address
-            if r.type == R.AARCH64_RELATIVE:
+            if r.type in (R.AARCH64_RELATIVE, R.X86_64_RELATIVE):
                 self.rebases.append((addr, self.base + r.addend))
-            elif r.type in (R.AARCH64_JUMP_SLOT, R.AARCH64_GLOB_DAT, R.AARCH64_ABS64) and r.has_symbol:
+            elif r.type in (R.AARCH64_JUMP_SLOT, R.AARCH64_GLOB_DAT, R.AARCH64_ABS64, R.X86_64_JUMP_SLOT,
+                            R.X86_64_GLOB_DAT, R.X86_64_64) and r.has_symbol:
                 if r.symbol.value:                           # defined in the program itself
                     self.rebases.append((addr, self.base + r.symbol.value + r.addend))
                 else:
@@ -989,7 +991,7 @@ def phase_oracle(rt, fn, name, bits, kind="QSEARCH"):
     data = [(a & ~0xFFF, bytes(rt.mu.mem_read(a & ~0xFFF, ((a + s + 0xFFF) & ~0xFFF) - (a & ~0xFFF))), seg)
             for a, s, _, seg in rt.p.segments if not (a <= lo < a + s)]
     image = frontend.Image(code=rt.p.function_bytes(fn, rt.mu), entry=fn, section=section, section_addr=page,
-                           data=data)
+                           data=data, arch=getattr(rt.p, "arch", "aarch64"))
     load = frontend.load
     frontend.load = lambda obj, function: image        # qoracle.build reads this image instead of an object file
     try:
@@ -1082,7 +1084,7 @@ def compute_oracle(rt, fn, name, bits, kind="QMIN"):
     data = [(a & ~0xFFF, bytes(rt.mu.mem_read(a & ~0xFFF, ((a + s + 0xFFF) & ~0xFFF) - (a & ~0xFFF))), seg)
             for a, s, _, seg in rt.p.segments if not (a <= lo < a + s)]
     image = frontend.Image(code=rt.p.function_bytes(fn, rt.mu), entry=fn, section=section, section_addr=page,
-                           data=data)
+                           data=data, arch=getattr(rt.p, "arch", "aarch64"))
     load = frontend.load
     frontend.load = lambda obj, function: image
     try:
@@ -1477,7 +1479,11 @@ def main(argv=None):
                     qpu = qcpu_run.load_config(a.config, a.backend)
                 except qcpu_run.Error as e:
                     raise QarmError(f"--qpu: {e}")
-        rt = Runtime(Program(a.program), [a.program] + a.args, a.quiet, qpu)
+        prog = Program(a.program)
+        if getattr(prog, "arch", "aarch64") != "aarch64":
+            raise QarmError(f"{a.program}: an x86-64 program: run it under qemu-x86_64 with the plugin of runtime/qemu "
+                            "(qarm_exec.py emulates AArch64)")
+        rt = Runtime(prog, [a.program] + a.args, a.quiet, qpu)
         code = rt.run()
     except QarmError as e:
         sys.stdout.flush()

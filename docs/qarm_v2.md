@@ -766,6 +766,25 @@ On macOS the tool patches Mach-O. It adds a `__QARM` segment and re-signs the ou
 
 `qarm_exec.py` finds packets in every executable segment, so it runs patched binaries too.
 
+### x86-64
+
+The same programs build for x86-64 with gcc or clang, unchanged. `qarm.h` emits the packet behind
+`JMP .+32`, with X0..X5 in RAX RDI RSI RDX RCX R8 (`docs/qarm_isa.md`, section 2.1):
+- **Natively on an x86-64 PC**, every packet is jumped over and the classical paths run.
+- **Under `qemu-x86_64`** with the same plugin, the instructions run. qoracle's x86-64 front end builds
+  the oracles from the x86-64 machine code. Shor factors 15 and 21 from the x86-64 build's
+  modular-exponentiation code, and the conformance program passes 15 of 15.
+- **`tools/qarm_patch.py`** patches x86-64 ELF binaries too. After `ENDBR64` the first instructions become
+  a `JMP` to the trampoline and are moved there. `--scan` finds the loops in x86-64 code.
+
+```
+$ gcc -O1 examples/qarm/legacy_search.c -o legacy_search && python3 tools/qarm_patch.py legacy_search --auto -o ls.qarm
+$ ./ls.qarm                                   # natively: the original loops
+$ qemu-x86_64 -plugin libqarm-qemu.so ls.qarm # QSEARCH and QMIN on the x86-64 code's oracles
+```
+
+`qarm_exec.py` stays AArch64 only.
+
 ### CUDA-Q as the coprocessor
 
 `qarm_exec.py --backend cudaq [--cudaq-target nvidia]` (or `"backend": "cudaq"` and `"options":

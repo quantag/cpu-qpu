@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Quantag IT Solutions GmbH
  *
- * The Q-ARM conformance program (docs/qarm_isa.md, section 9). An arm64 program that issues the raw packets of
+ * The Q-ARM conformance program (docs/qarm_isa.md, section 9). An arm64 or x86-64 program that issues the raw packets of
  * every instruction and checks what a runtime does with them, independently of include/qarm.h's fallbacks:
  *
  *   - W0's protocol: 0 is left by a plain CPU; 1 done; 2 refused (each refusal case of the spec is tried);
@@ -19,6 +19,23 @@
 #include <string.h>
 #include "qarm.h"
 
+#if defined(__x86_64__)                  /* registers that are not operands: they must survive every packet */
+#define S9 "rbx"
+#define S10 "r9"
+#define S11 "r10"
+#define S12 "r11"
+#define S13 "r12"
+#define S14 "r13"
+#define S15 "r14"
+#else
+#define S9 "x9"
+#define S10 "x10"
+#define S11 "x11"
+#define S12 "x12"
+#define S13 "x13"
+#define S14 "x14"
+#define S15 "x15"
+#endif
 typedef struct { uint64_t x[6]; double d[2]; } regs;
 #define SENT(i) (0x5157000000000000ULL | (uint64_t)(i) * 0x1111)
 static int clobbered;
@@ -26,14 +43,14 @@ static int clobbered;
 /* the packet with X0..X5, D0, D1 in and out; X9..X15 hold sentinels that must survive */
 #define PACKET(OPW, r)                                                                                               \
     do {                                                                                                             \
-        register uint64_t x0 __asm__("x0") = (r)->x[0], x1 __asm__("x1") = (r)->x[1], x2 __asm__("x2") = (r)->x[2];  \
-        register uint64_t x3 __asm__("x3") = (r)->x[3], x4 __asm__("x4") = (r)->x[4], x5 __asm__("x5") = (r)->x[5];  \
-        register double d0 __asm__("d0") = (r)->d[0], d1 __asm__("d1") = (r)->d[1];                                  \
-        register uint64_t s9 __asm__("x9") = SENT(9), s10 __asm__("x10") = SENT(10), s11 __asm__("x11") = SENT(11);  \
-        register uint64_t s12 __asm__("x12") = SENT(12), s13 __asm__("x13") = SENT(13), s14 __asm__("x14") = SENT(14);\
-        register uint64_t s15 __asm__("x15") = SENT(15);                                                             \
+        register uint64_t x0 __asm__(QARM_X0) = (r)->x[0], x1 __asm__(QARM_X1) = (r)->x[1], x2 __asm__(QARM_X2) = (r)->x[2];  \
+        register uint64_t x3 __asm__(QARM_X3) = (r)->x[3], x4 __asm__(QARM_X4) = (r)->x[4], x5 __asm__(QARM_X5) = (r)->x[5];  \
+        register double d0 __asm__(QARM_D0) = (r)->d[0], d1 __asm__(QARM_D1) = (r)->d[1];                                  \
+        register uint64_t s9 __asm__(S9) = SENT(9), s10 __asm__(S10) = SENT(10), s11 __asm__(S11) = SENT(11);  \
+        register uint64_t s12 __asm__(S12) = SENT(12), s13 __asm__(S13) = SENT(13), s14 __asm__(S14) = SENT(14);\
+        register uint64_t s15 __asm__(S15) = SENT(15);                                                             \
         __asm__ volatile(QARM_PACKET(OPW)                                                                            \
-                         : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+w"(d0), "+w"(d1),           \
+                         : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+" QARM_FP(d0), "+" QARM_FP(d1),           \
                            "+r"(s9), "+r"(s10), "+r"(s11), "+r"(s12), "+r"(s13), "+r"(s14), "+r"(s15)                \
                          :                                                                                           \
                          : "memory");                                                                                \
@@ -58,7 +75,7 @@ static void result(const char *name, int ok)
 }
 #define REQUIRE(c, ...) do { if (!(c)) { snprintf(why, sizeof why, __VA_ARGS__); return 0; } } while (0)
 #define CLEAN() do { clobbered = 0; } while (0)
-#define PRESERVED() REQUIRE(!clobbered, "a register other than the outputs changed (X5, X9-X15)")
+#define PRESERVED() REQUIRE(!clobbered, "a register other than the outputs changed (X5, and X9-X15 or RBX R9-R14)")
 
 /* guarded buffers: 8 bytes of 0xA5 before and after */
 static unsigned char arena[1 << 16];

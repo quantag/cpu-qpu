@@ -23,7 +23,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 | role | what it is | in this repository |
 |---|---|---|
-| **program** | an AArch64 (ARM64) executable or library that contains Q-ARM packets | `examples/qarm/*.c` |
+| **program** | an AArch64 (ARM64) or x86-64 executable or library that contains Q-ARM packets | `examples/qarm/*.c` |
 | **library** | the code that emits the packets and implements each instruction's classical path and checks | `include/qarm.h` (header-only C) |
 | **runtime** | anything that executes packets: an emulator, a binary translator, a CPU extension, a hypervisor | `qarm_exec.py` (Unicorn), `runtime/qemu` (QEMU TCG plugin) |
 | **backend** | where a runtime sends quantum work: a state vector, a noise model, a QPU | libqarm (`runtime/libqarm`): exact, simulator, IBM Quantum |
@@ -55,10 +55,33 @@ a no-op on every AArch64 processor.
   them. They are reserved for operand encodings in later versions.
 - After a packet, execution continues at the instruction after word 7, exactly as on a plain CPU.
 
+### 2.1 x86-64
+
+On x86-64 the packet is the same 32 bytes, with a different word 0:
+
+| bytes | value | meaning |
+|---|---|---|
+| 0–3 | `eb 1e 00 00` | `JMP .+32` (a short jump over the next 30 bytes), then two zero bytes |
+| 4–31 | as words 1–7 above | the magic, `V << 24 \| OP << 16`, five reserved words |
+
+There is no alignment requirement. A runtime recognizes the packet where that `JMP` executes, followed by
+the magic.
+
+The ISA's registers map to x86-64 as follows. The mapping keeps `X1`, `X2` in the first two System V
+argument registers:
+
+| ISA | X0 (W0) | X1 | X2 | X3 (W3) | X4 (W4) | X5 | D0 | D1 |
+|---|---|---|---|---|---|---|---|---|
+| x86-64 | RAX (EAX) | RDI | RSI | RDX (EDX) | RCX (ECX) | R8 | XMM0 low 64 bits | XMM1 low 64 bits |
+
+Function operands follow the System V convention (x in `EDI`, the result in `EAX`). Everything else in
+this document applies unchanged, the layouts included (LP64, little-endian). `qoracle` builds oracles from
+x86-64 machine code, the QEMU plugin runs them in `qemu-x86_64`, and the conformance program passes there too.
+
 ## 3. Execution model
 
 **Operands** are in general-purpose registers `X0`–`X5` and in `D0`, `D1` (the low 64 bits of `V0`, `V1`;
-of `Z0`, `Z1` when SVE is present). Memory operands are virtual addresses in the program's address space.
+of `Z0`, `Z1` when SVE is present; on x86-64 the registers of section 2.1). Memory operands are virtual addresses in the program's address space.
 All data is little-endian with LP64 layouts (section 5).
 
 **The status register.** The library MUST set `X0 = 0` before every packet. A runtime that executes the
@@ -196,6 +219,7 @@ for x in 0 … 2^bits − 1. For the operand to be valid:
 - f's result MUST depend only on x and on constant data.
 - f MUST NOT use SIMD or floating-point instructions. With GCC and clang this means `-O1`, and helpers
   marked `always_inline`.
+- On x86-64, f MUST NOT use the stack (`PUSH`, `POP`, `RSP`- or `RBP`-relative memory) or a jump table.
 
 A runtime's oracle MUST agree with f on every x in the domain. A runtime that cannot establish this
 (an instruction it cannot translate, a resource limit) MUST decline (section 3). It MUST NOT execute
