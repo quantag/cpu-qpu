@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main, qarm-sv-fast]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 jobs:
