@@ -535,6 +535,50 @@ model). The UCCSD path is for exact and shot-noise runs, and for error-corrected
 parameter-shift gradient from libqarm's simulator and from Aer matched the exact gradient to within 0.002
 at 200,000 shots.
 
+### Speed of the state vector, and threads
+
+`include/qarm_sv.h` is the exact backend of the plain CPU, of libqarm and of the QEMU plugin. Five
+changes make it fast:
+
+- **Every kernel works in place, one pass over the vector.** A Pauli rotation pairs |b⟩ with
+  |b ⊕ x⟩, with no copy of the state.
+- **Terms of H that share an X mask share one pass.** For such a group, H's action is X^x times a
+  diagonal f(b), and f does not depend on the state.
+  - When the group's z masks span at most 10 dimensions over GF(2), f is a table of 2^r values indexed
+    by r parities of b.
+  - Otherwise f is computed once and kept, the largest groups first, within `QARM_SV_CACHE_MB`
+    (default 1024).
+- **A UCC excitation is one pass.** Its Pauli rotations share a parameter and an X mask, and they
+  commute: a double is 8 rotations. On each pair (b, b ⊕ x) their sum is a 2×2 block, so
+  exp(−iθA) is exact there. A 2^k-entry table holds the block's values, cosines and sines included.
+- **The adjoint gradient** walks the same blocks backwards.
+- **OpenMP.** With `-fopenmp` (libqarm's CMake turns it on when the compiler has it), every pass of
+  at least `QARM_SV_PAR_MIN` = 2^15 amplitudes runs on all cores, and the sums are OpenMP reductions.
+  Without it the code is the same, serial.
+
+`tools/qarm_sv_bench.c` measures it. The times below are for one energy and its gradient, on a 2-core
+cloud machine (gcc -O2 -march=native; the energies are the same to 10 digits before and after):
+
+| molecule (tools/qarm_molecule.py) | qubits | terms, parameters | before | after, 1 core | after, 2 cores |
+|---|---|---|---|---|---|
+| H₂O, sto-3g, (8e, 6o) | 12 | 550, 92 | 36 ms | 6.4 ms | |
+| H₂O, sto-3g, all orbitals | 14 | 1085, 140 | 245 ms | 35 ms | |
+| BeH₂, sto-3g, all orbitals | 14 | 665, 204 | 317 ms | 47 ms | |
+| LiH, 6-31G, (2e, 9o) | 18 | 3771, 80 | 6.5 s | 0.77 s | 0.57 s |
+| LiH, 6-31G, (2e, 10o) | 20 | 5850, 99 | 41.6 s | 5.5 s | 2.8 s |
+
+Whole VQE runs with `molecule_vqe.c` (L-BFGS on `QGRAD`, natively with libqarm):
+- H₂O (14 qubits) took 32 s before and 7.7 s after on one core, 5.6 s on two. It ended 0.10 mHa from
+  CASCI.
+- LiH in 6-31G (18 qubits, 80 parameters) reached CASCI exactly in 18 s on two cores.
+
+Below 2^15 amplitudes (14 qubits and fewer) a pass is too short for threads, so it stays on one core. From
+there on the passes scale with the cores: 1.9× on two at 18 and 20 qubits. The speedup grows with the
+core count on larger machines.
+
+libqarm now takes up to 24 qubits: six vectors of 2^24 doubles, 768 MB. The plain-CPU path of `qarm.h`
+keeps its static buffers of `QARM_VQE_MAX_QUBITS` (default 12) qubits.
+
 ### Checks
 
 Noise can push an energy below the true ground state, so a measured energy cannot be checked by
@@ -829,8 +873,8 @@ in section 7. Its `ibm` part runs in the export job, which has Qiskit and libcur
 - the QEMU plugin in system mode: Q-ARM as a coprocessor of a whole ARM Linux machine;
 - libqarm: a first run on a real IBM device, recorded here;
   devices with the ECR gate set.
-- VQE: IBM's error mitigation; larger molecules (N₂ active
-  spaces, 16–20 qubits) with a multithreaded state vector.
+- VQE: IBM's error mitigation; more than 255 parameters per ansatz (the table's `param` field is one
+  byte), for molecules such as N₂'s full valence space.
 - Smaller oracles for hardware: qoracle's circuits keep the CPU's register widths, and a 2-bit compare
   becomes 12 Toffolis.
 - Vector instructions in qoracle, so that `-O2` builds work.

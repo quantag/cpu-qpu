@@ -18,7 +18,7 @@
 #include <string.h>
 
 enum { B_EXACT, B_SIMULATOR, B_IBM };
-#define MAX_QUBITS 20
+#define MAX_QUBITS 24                  /* 6 vectors of 2^24 doubles: 768 MB */
 
 typedef struct { uint64_t x, z; double c; } term;
 typedef struct { uint64_t x, z; int nt; term *t; } group;          /* a measurement basis and its terms */
