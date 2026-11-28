@@ -41,6 +41,8 @@ jobs:
         run: python -m tests.test_qcpu_search
       - name: test_qarm_exec (Q-ARM v2)
         run: python -m tests.test_qarm_exec
+      - name: test_qarm_isa (the specification, qarm_isa.h and the implementations agree)
+        run: python -m tests.test_qarm_isa
       - name: test_qarm_sv (the state vector against dense matrices; OpenMP threads)
         run: python -m tests.test_qarm_sv
       - name: test_qarm_patch (Q-ARM put into an ELF binary built without qarm.h)
@@ -97,5 +99,7 @@ jobs:
           ninja install
       - name: test_qarm_qemu (Q-ARM in qemu-aarch64, the plugin of runtime/qemu)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_qemu
+      - name: test_qarm_isa with QEMU (runtime/minimal passes Core and Circuit)
+        run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_isa
       - name: test_qarm_x86 (Q-ARM on x86-64, in qemu-x86_64 with the plugin)
         run: QARM_QEMU_X86=$HOME/qemu/bin/qemu-x86_64 QARM_QEMU_INCLUDE=$HOME/qemu/include python -m tests.test_qarm_x86
