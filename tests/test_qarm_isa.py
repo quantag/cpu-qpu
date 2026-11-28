@@ -42,14 +42,14 @@ WANT = {"qarm_pauli": 24, "qarm_hamiltonian": 24, "qarm_op": 32, "qarm_ansatz": 
 
 
 def header_constants():
-    text = open(os.path.join(INC, "qarm_isa.h")).read()
+    text = open(os.path.join(INC, "qarm_isa.h"), encoding="utf-8").read()
     ops = {m[1]: int(m[2], 0) for m in re.finditer(r"QARM_OPC_(\w+) = (0x[0-9A-Fa-f]+)", text)}
     feats = {m[1]: int(m[2]) for m in re.finditer(r"QARM_F_(\w+) = (\d+)", text)}
     return ops, feats
 
 
 def spec_constants():
-    text = open(SPEC).read()
+    text = open(SPEC, encoding="utf-8").read()
     ops = {}
     for m in re.finditer(r"^\| (0x[0-9A-Fa-f]{2}) \| `(Q[A-Z]+)` \|", text, re.M):
         ops[m[2]] = int(m[1], 16)
@@ -84,7 +84,7 @@ def main():
                 continue
             assert getattr(qarm_exec, "OP_" + name) == v, name
         assert qarm_exec.FEATURES == sum(hfeats.values())
-        plugin = open(os.path.join(ROOT, "runtime", "qemu", "qarm_qemu.c")).read()
+        plugin = open(os.path.join(ROOT, "runtime", "qemu", "qarm_qemu.c"), encoding="utf-8").read()
         for m in re.finditer(r"OP_(Q[A-Z]+) = (0x[0-9A-Fa-f]+)", plugin):
             assert hops[m[1]] == int(m[2], 16), m[0]
         print(f"2) {len(sops)} opcodes and {len(sfeats)} feature bits: the specification, qarm_isa.h, qarm_exec.py and "
@@ -122,7 +122,7 @@ def main():
             p = sh([q86, "-plugin", plug, c86], check=False)
             assert p.returncode == 0 and want in p.stdout, p.stdout
             how = "; on x86-64 too"
-        print(f"3) runtime/minimal ({sum(1 for _ in open(os.path.join(ROOT, 'runtime', 'minimal', 'qarm_minimal.c')))} "
+        print(f"3) runtime/minimal ({sum(1 for _ in open(os.path.join(ROOT, 'runtime', 'minimal', 'qarm_minimal.c'), encoding='utf-8'))} "
               f"lines): conformance Core and Circuit passed, the rest not claimed{how}; ghz.c on it")
     print("PASS")
 
