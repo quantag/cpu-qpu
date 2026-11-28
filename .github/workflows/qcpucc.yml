@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main, isa-1.0]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 jobs:
