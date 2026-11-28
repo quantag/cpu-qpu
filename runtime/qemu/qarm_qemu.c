@@ -56,7 +56,8 @@ enum { OP_QAVAIL = 0x10, OP_QSEARCH = 0x11, OP_QMIN = 0x15, OP_QCOUNT = 0x16, OP
        OP_QBV = 0x1A, OP_QCOLLISION = 0x1B, OP_QSUBMIT = 0x12, OP_QPOLL = 0x13, OP_QWAIT = 0x14, OP_QRAND = 0x1C, OP_QCIRC = 0x30, OP_QCAPS = 0x31, OP_QVLOAD = 0x20, OP_QEXPECT = 0x21, OP_QEXPECTN = 0x22,
        OP_QGRAD = 0x23, OP_QSESSION = 0x24, OP_QVSAMPLE = 0x25, OP_QVFREE = 0x26 };
 
-static struct qemu_plugin_register *reg_x[31], *reg_v[2];
+static struct qemu_plugin_register *reg_x[6], *reg_v[2];   /* X0..X5, D0, D1 of the ISA (docs/qarm_isa.md 3) */
+static int x86;                        /* an x86-64 guest: X0..X5 are RAX RDI RSI RDX RCX R8, D0 D1 XMM0 XMM1 */
 static GMutex lock;
 static int quiet, told_search;
 static char *helper, *python;
@@ -597,7 +598,10 @@ static void tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     for (size_t i = 0; i < qemu_plugin_tb_n_insns(tb); i++) {
         struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
         uint32_t word = 0;
-        if (qemu_plugin_insn_size(insn) == 4 && qemu_plugin_insn_data(insn, &word, 4) == 4 && word == B_32)
+        size_t n = qemu_plugin_insn_size(insn);
+        int jump = x86 ? n == 2 && qemu_plugin_insn_data(insn, &word, 2) == 2 && (word & 0xFFFF) == 0x1EEB   /* JMP +30 */
+                       : n == 4 && qemu_plugin_insn_data(insn, &word, 4) == 4 && word == B_32;
+        if (jump)
             qemu_plugin_register_vcpu_insn_exec_cb(insn, packet, QEMU_PLUGIN_CB_RW_REGS,
                                                    (void *)(uintptr_t)qemu_plugin_insn_vaddr(insn));
     }
@@ -607,18 +611,21 @@ static void vcpu_init(qemu_plugin_id_t id, unsigned int vcpu)
 {
     (void)id; (void)vcpu;
     g_autoptr(GArray) regs = qemu_plugin_get_registers();
+    static const char *a64[6] = {"x0", "x1", "x2", "x3", "x4", "x5"}, *amd64[6] = {"rax", "rdi", "rsi", "rdx", "rcx", "r8"};
+    const char **names = x86 ? amd64 : a64;
     for (guint i = 0; i < regs->len; i++) {
         qemu_plugin_reg_descriptor *r = &g_array_index(regs, qemu_plugin_reg_descriptor, i);
-        if (r->name[0] == 'x') {
-            char *end;
-            long n = strtol(r->name + 1, &end, 10);
-            if (!*end && n >= 0 && n < 31) reg_x[n] = r->handle;
+        for (int n = 0; n < 6; n++)
+            if (!strcmp(r->name, names[n])) reg_x[n] = r->handle;
+        if (x86) {
+            if (!strcmp(r->name, "xmm0")) reg_v[0] = r->handle;
+            else if (!strcmp(r->name, "xmm1")) reg_v[1] = r->handle;
         } else if (!strcmp(r->name, "v0") || (!strcmp(r->name, "z0") && !reg_v[0])) reg_v[0] = r->handle;
         else if (!strcmp(r->name, "v1") || (!strcmp(r->name, "z1") && !reg_v[1])) reg_v[1] = r->handle;
     }
-    for (int n = 0; n < 31; n++)
-        if (!reg_x[n]) { fprintf(stderr, "qarm-qemu: no register x%d: is this an aarch64 guest?\n", n); exit(70); }
-    if (!reg_v[0] || !reg_v[1]) { fprintf(stderr, "qarm-qemu: no registers v0, v1 (or z0, z1)\n"); exit(70); }
+    for (int n = 0; n < 6; n++)
+        if (!reg_x[n]) { fprintf(stderr, "qarm-qemu: no register %s\n", names[n]); exit(70); }
+    if (!reg_v[0] || !reg_v[1]) { fprintf(stderr, "qarm-qemu: no registers %s\n", x86 ? "xmm0, xmm1" : "v0, v1 (or z0, z1)"); exit(70); }
 }
 
 static void at_exit(qemu_plugin_id_t id, void *p)
@@ -629,8 +636,9 @@ static void at_exit(qemu_plugin_id_t id, void *p)
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info, int argc, char **argv)
 {
-    if (strcmp(info->target_name, "aarch64")) {
-        fprintf(stderr, "qarm-qemu: Q-ARM is for aarch64 guests, not %s\n", info->target_name);
+    x86 = !strcmp(info->target_name, "x86_64");
+    if (strcmp(info->target_name, "aarch64") && !x86) {
+        fprintf(stderr, "qarm-qemu: Q-ARM is for aarch64 and x86_64 guests, not %s\n", info->target_name);
         return -1;
     }
     for (int i = 0; i < argc; i++) {

@@ -26,7 +26,7 @@ the instruction it replaces is moved into the trampoline's fallback path, which 
 A PC-relative first instruction (ADR, ADRP, a branch, a literal load) is refused. Every branch is direct (B, BL),
 so BTI-guarded pages need no landing pads, and a signed return address (PACIASP) is authenticated before the
 trampoline returns. The new segment must be within 128 MB of the code (it is placed after the program)."""
-import argparse, struct, sys
+import argparse, os, struct, sys
 
 QSEARCH, QMIN = 0x11, 0x15
 MAGIC, B32 = 0x4d524151, 0x14000008
@@ -274,8 +274,10 @@ def patch(path, out, jobs, note=print):
     binary = lief.parse(path)
     if binary is None or not isinstance(binary, lief.ELF.Binary):
         raise PatchError(f"{path}: neither ELF nor Mach-O")
+    if binary.header.machine_type == lief.ELF.ARCH.X86_64:
+        return patch_x86(binary, out, jobs, note)
     if binary.header.machine_type != lief.ELF.ARCH.AARCH64:
-        raise PatchError(f"{path}: not AArch64")
+        raise PatchError(f"{path}: neither AArch64 nor x86-64")
     for op, func, pred, bits in jobs:                             # refuse before changing anything
         if not 1 <= bits <= 31:
             raise PatchError(f"{bits} bits: 1 to 31")
@@ -311,6 +313,46 @@ def patch(path, out, jobs, note=print):
     return base, code
 
 
+def patch_x86(binary, out, jobs, note):
+    """x86-64 ELF: tools/qarm_patch_x86.py's trampolines in a new r-x segment."""
+    import lief, os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import qarm_patch_x86 as X
+    sizes = {a: s for a, (_, s) in _functions(binary).items()}
+    try:
+        for op, func, pred, bits in jobs:
+            if not 1 <= bits <= 31:
+                raise PatchError(f"{bits} bits: 1 to 31")
+            fa = resolve(binary, func)
+            resolve(binary, pred)
+            X.patch_point(binary, fa, sizes.get(fa))
+        seg = lief.ELF.Segment()
+        seg.type = lief.ELF.Segment.TYPE.LOAD
+        seg.flags = lief.ELF.Segment.FLAGS.R | lief.ELF.Segment.FLAGS.X
+        seg.alignment = 0x1000
+        size = 256 * len(jobs)
+        seg.content = [0] * size
+        seg = binary.add(seg)
+        base = seg.virtual_address
+        sizes = {a: s for a, (_, s) in _functions(binary).items()}      # LIEF may have moved the code
+        blob = b""
+        for op, func, pred, bits in jobs:
+            fa, pa = resolve(binary, func), resolve(binary, pred)
+            at, moved, text, n = X.patch_point(binary, fa, sizes.get(fa))
+            t = base + len(blob)
+            blob += X.trampoline(t, op, pa, bits, moved, at + n)
+            blob += b"\xcc" * (-len(blob) % 16)
+            binary.patch_address(at, list(X.jump_bytes(at, n, t)))
+            note(f"{func} ({fa:#x}): {'QSEARCH' if op == QSEARCH else 'QMIN'} on {pred} ({pa:#x}), {bits} bits; "
+                 f"the instructions at {at:#x} ({text}) moved to the trampoline at {t:#x}")
+    except X.PatchError as e:
+        raise PatchError(str(e))
+    seg.content = list(blob + bytes(size - len(blob)))
+    binary.write(out)
+    os.chmod(out, 0o755)
+    return base, blob
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("program")
@@ -336,7 +378,13 @@ def main(argv=None):
         if b is None:
             print(f"qarm_patch: {a.program}: neither ELF nor Mach-O", file=sys.stderr)
             return 2
-        cands = scan(b)
+        if getattr(b, "header", None) is not None and isinstance(b, lief.ELF.Binary) \
+                and b.header.machine_type == lief.ELF.ARCH.X86_64:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import qarm_patch_x86
+            cands = qarm_patch_x86.scan(b, _functions(b))
+        else:
+            cands = scan(b)
         for op, func, pred, bits, why in cands:
             flag = "--search" if op == QSEARCH else "--min"
             print(f"{func}: {'QSEARCH' if op == QSEARCH else 'QMIN'} on {pred}, {bits} bits ({why}): "

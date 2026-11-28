@@ -15,9 +15,9 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
 | | CUDA-Q | Q-ARM |
 |---|---|---|
 | What the programmer writes | quantum kernels: gates, measurements, control flow (`__qpu__`, `@cudaq.kernel`) | a C function (`int f(int)`), or tables (Hamiltonian, ansatz, circuit), and one call: `qarm_search(f, …)`, `qarm_min`, `qarm_period`, `qarm_expect_n`, … |
-| Oracles | written by hand as kernels | built from the function's compiled AArch64 code (qoracle) and verified on every input |
+| Oracles | written by hand as kernels | built from the function's compiled AArch64 or x86-64 code (qoracle) and verified on every input |
 | Where the quantum part lives | MLIR (Quake) and QIR, produced by `nvq++` or the Python JIT | packets in the program's own machine code: 8 words that a plain CPU branches over |
-| Without quantum hardware or a simulator | a kernel needs a target | the same binary runs on any AArch64 CPU, on its classical path |
+| Without quantum hardware or a simulator | a kernel needs a target | the same binary runs on any AArch64 or x86-64 CPU, on its classical path |
 | Answers | as returned by the target | checked in the program by calling the original function, where a check exists; otherwise the classical path |
 | Binaries you cannot rebuild | — | `tools/qarm_patch.py` turns a brute-force search or minimum in a finished ELF or Mach-O into `QSEARCH` or `QMIN` |
 | Specification | the CUDA-Q language specification (a C++ and Python API) | `docs/qarm_isa.md`: a binary ISA (packet, register ABI, tables, guarantees), a conformance program, profiles |
@@ -50,8 +50,6 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
    correction, dynamics, custom ansätze), the kernel language is the natural form. Q-ARM's `QCIRC` takes
    circuit tables, but it is not a kernel language.
 4. **Maturity.** CUDA-Q has a compiler (MLIR), optimizations, a community and libraries.
-5. **Architectures.** CUDA-Q runs on x86-64 and on ARM. Q-ARM's packets and oracle builder are
-   AArch64 only.
 
 ## What limits Q-ARM today, honestly
 
@@ -60,7 +58,8 @@ where each is ahead, as of November 2026. CUDA-Q facts are from NVIDIA's documen
   evaluated classically. Only small oracles fit today's devices, and even those are deep after routing.
 - **The quantum speedups are asymptotic.** At the sizes that fit a simulator, a classical loop is
   faster. What the examples show is that the same binary is ready for hardware that does not exist yet.
-- **AArch64 only** for oracles and packets, and `-O1` without vector instructions for oracle functions.
+- **AArch64 and x86-64** only, for oracles and packets. Oracle functions need `-O1` without vector
+  instructions; on x86-64 the runtime is the QEMU plugin, since `qarm_exec.py` emulates AArch64.
 
 ## Where they meet
 
