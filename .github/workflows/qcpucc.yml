@@ -4,7 +4,7 @@
 name: qcpucc
 on:
   push:
-    branches: [main]
+    branches: [main, packaging]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -43,6 +43,9 @@ jobs:
         run: python -m tests.test_qarm_exec
       - name: test_qarm_isa (the specification, qarm_isa.h and the implementations agree)
         run: python -m tests.test_qarm_isa
+      - name: test_packaging (the scripts parse; more in the export job)
+        shell: bash
+        run: python -m tests.test_packaging
       - name: test_qarm_evolve (QEVOLVE's error bounds hold; both planners agree)
         run: python -m tests.test_qarm_evolve
       - name: test_qarm_sv (the state vector against dense matrices; OpenMP threads)
@@ -105,5 +108,12 @@ jobs:
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_isa
       - name: test_qarm_evolve with QEMU (quench.c on the plugin, exact and simulator)
         run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_qarm_evolve
+      - name: test_packaging (install.sh with QEMU bundled; qarm-run and qarm-cc)
+        run: QARM_QEMU=$HOME/qemu/bin/qemu-aarch64 python -m tests.test_packaging
       - name: test_qarm_x86 (Q-ARM on x86-64, in qemu-x86_64 with the plugin)
         run: QARM_QEMU_X86=$HOME/qemu/bin/qemu-x86_64 QARM_QEMU_INCLUDE=$HOME/qemu/include python -m tests.test_qarm_x86
+  package:
+    # the release tarballs and the container image, built and tested as release.yml makes them (not published)
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ci-${{ github.run_number }}

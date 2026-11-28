@@ -1,0 +1,36 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
+#
+# qarm-cc: compile a C program with Q-ARM's headers (qarm.h) for AArch64 (the default) or x86-64 Linux.
+#
+#   qarm-cc [--x86-64] [compiler options] file.c ... -o program
+#
+# It adds -O1 (oracle functions must be leaf functions without vector code: docs/qarm_isa.md 5.5), the headers
+# (-iquote <prefix>/include/qarm) and -lm, and picks the compiler: cc on a host of that architecture, else
+# aarch64-linux-gnu-gcc or x86_64-linux-gnu-gcc. QARM_CC overrides it. Options given later win (-O2, ...).
+# Then: qarm-run ./program
+set -e
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
+PREFIX=$(cd "$(dirname "$self")/.." && pwd)
+arch=aarch64
+case $1 in
+    --x86-64|--x86_64) arch=x86_64; shift ;;
+    --aarch64|--arm64) shift ;;
+    -h|--help) sed -n '5,12p' "$self" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+host=$(uname -m)
+[ "$host" = arm64 ] && host=aarch64
+if [ -n "$QARM_CC" ]; then cc=$QARM_CC
+elif [ "$host" = "$arch" ] && command -v cc >/dev/null 2>&1; then cc=cc
+elif command -v "$arch-linux-gnu-gcc" >/dev/null 2>&1; then cc=$arch-linux-gnu-gcc
+else
+    printf 'qarm-cc: no C compiler for %s Linux: install gcc-%s-linux-gnu, or set QARM_CC\n' "$arch" \
+        "$(echo $arch | tr _ -)" >&2
+    exit 2
+fi
+exec $cc -O1 -iquote "$PREFIX/include/qarm" "$@" -lm

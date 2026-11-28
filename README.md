@@ -45,6 +45,7 @@ README uses AArch64 for its examples; see "RISC-V" and "x86-64" below for what d
 | A fast exact state vector on all cores (OpenMP), up to 24 qubits: an 18-qubit LiH gradient in 0.57 s | `include/qarm_sv.h`, `tools/qarm_sv_bench.c` | [speed](docs/qarm_v2.md#speed-of-the-state-vector-and-threads) |
 | The same source natively, on any CPU, with IBM over REST from C | `-DQARM_RUNTIME`, `runtime/libqarm` | [libqarm](#native-libqarm-the-q-arm-runtime-in-c) |
 | The same arm64 binary under QEMU, with the real C library | `qemu-aarch64 -plugin libqarm-qemu.so` | [QEMU](#under-qemu-the-same-arm64-binary-with-the-real-c-library) |
+| **Install Q-ARM in one step**: a Linux tarball with QEMU 10.2.4 and the plugin bundled, or a container image for any OS; `qarm-cc` compiles, `qarm-run` runs | `qarm-cc hello.c -o hello && qarm-run ./hello` | [Install Q-ARM](#install-q-arm-qarm-run-and-qarm-cc) |
 
 ## Quick start
 
@@ -796,6 +797,43 @@ reads the key from that environment variable instead.
 Larger oracles are still too deep for today's noise: Grover on 3 and 4 bits with the circuits
 qoracle makes now. `x == 3` should be one controlled-Z; it is 12 Toffoli gates today, since qoracle
 follows the machine code's comparison literally. Smaller circuits for small functions are the next step.
+
+## Install Q-ARM: `qarm-run` and `qarm-cc`
+
+Each release (tag `v*`) has a tarball for Linux on x86-64 and ARM64, and a container image:
+- **The tarball** holds QEMU 10.2.4's user-mode emulators with plugins, the Q-ARM plugin with libqarm, the
+  headers, the tools and the examples. It runs on Ubuntu 22.04+ and Debian 12+, and needs `libglib2.0-0`,
+  `libcurl4` and `libgomp1`.
+- **The image**, `ghcr.io/quantag/qarm`, adds both cross compilers and the oracle helper. It runs wherever
+  Docker does, macOS and Windows included.
+
+```
+$ curl -fsSL https://github.com/quantag/cpu-qpu/releases/download/v1.1.0/qarm-v1.1.0-linux-$(uname -m).tar.gz | tar xz
+$ export PATH=$PWD/qarm-v1.1.0-linux-$(uname -m)/bin:$PATH
+$ qarm-cc hello.c -o hello          # qarm.h's headers, -O1, -lm; AArch64 by default, --x86-64 for x86-64
+$ qarm-run ./hello                  # the architecture from the ELF header, the matching QEMU, the plugin
+$ qarm-run --info                   # what it found
+
+$ docker run --rm -v "$PWD:/work" ghcr.io/quantag/qarm qarm-cc hello.c -o hello
+$ docker run --rm -v "$PWD:/work" ghcr.io/quantag/qarm qarm-run ./hello
+```
+
+| `qarm-run` option | what it does |
+|---|---|
+| `-b exact\|simulator\|ibm`, `-c config.json` | libqarm's backend (exact by default); IBM Quantum with a config |
+| `-q` | no `[qarm: ...]` reports |
+| `--minimal` | `runtime/minimal`, the 200-line runtime: Core and Circuit only |
+| `--cpu` | QEMU without the plugin, a plain CPU: every packet skipped, the classical paths taken |
+| `--exec` | `qarm_exec.py` (Unicorn) instead of QEMU; also the default for macOS (Mach-O) programs |
+| `--print` | the QEMU command line, not run |
+
+The oracle instructions (`QSEARCH`, `QMIN` and the rest of the Oracle profile) build their oracles with
+qoracle: `python3 -m pip install qoracle lief capstone numpy`. Without it, `qarm-run` does not claim them, and
+programs take their classical paths. The image has it.
+
+Building it yourself: `packaging/build.sh` (QEMU from its release tarball, then the tarball) or
+`packaging/install.sh --prefix DIR --qemu-include DIR` (an existing QEMU 10.1+). The tarball's QEMU is
+unmodified and GPL-2.0. Its complete source, `qemu-10.2.4.tar.xz`, is attached to every release.
 
 ## Q-ARM v2: one binary, quantum instructions with a classical fallback
 

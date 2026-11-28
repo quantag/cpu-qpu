@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Quantag IT Solutions GmbH
+# The release tarballs (packaging/build.sh) for Linux x86-64 and ARM64, smoke-tested on clean Ubuntu 22.04, 24.04
+# and Debian 12 (packaging/smoke.sh), and the container image (packaging/Dockerfile) made from them and tested.
+# Called by qcpucc.yml (test only) and release.yml (publish: the images pushed to ghcr.io/quantag/qarm).
+name: package
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: false
+jobs:
+  tarball:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]     # glibc 2.35: the tarball runs on Ubuntu 22.04+, Debian 12+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build pkg-config libglib2.0-dev libcurl4-openssl-dev xz-utils cmake
+      - name: QEMU's release tarball and build (cached)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/qemu-pkg
+            dist/qemu-10.2.4.tar.xz
+          key: qemu-pkg-10.2.4-${{ matrix.runner }}-1
+      - name: packaging/build.sh
+        run: packaging/build.sh --qemu ~/qemu-pkg --out dist --version "${{ inputs.version }}"
+      - name: Smoke test on clean Ubuntu 22.04, 24.04 and Debian 12
+        run: |
+          t=$(ls dist/qarm-*-linux-*.tar.gz)
+          for img in ubuntu:22.04 ubuntu:24.04 debian:12; do
+            docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD/packaging:/p:ro" $img sh /p/smoke.sh /dist/$(basename $t)
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.runner }}
+          path: |
+            dist/qarm-*
+            dist/qemu-*.tar.xz
+  image:
+    needs: tarball
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64, tarball: tarball-ubuntu-22.04}
+          - {runner: ubuntu-24.04-arm, arch: arm64, tarball: tarball-ubuntu-22.04-arm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.tarball }}
+          path: dist
+      - name: docker build
+        run: docker build -f packaging/Dockerfile -t qarm:test .
+      - name: The image runs the conformance program with every profile, on both architectures
+        run: |
+          docker run --rm qarm:test qarm-run --info
+          for a in aarch64 x86-64; do
+            docker run --rm qarm:test sh -c "qarm-cc --$a /opt/qarm/share/qarm/conformance/qarm_conformance.c -o /tmp/c && qarm-run -q /tmp/c" | tee out.txt
+            grep -q "16 passed, 0 failed, 0 skipped" out.txt
+          done
+      - name: Push ghcr.io/quantag/qarm:${{ inputs.version }}-${{ matrix.arch }}
+        if: inputs.publish
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag qarm:test ghcr.io/quantag/qarm:${{ inputs.version }}-${{ matrix.arch }}
+          docker push ghcr.io/quantag/qarm:${{ inputs.version }}-${{ matrix.arch }}
+  manifest:
+    if: inputs.publish
+    needs: image
+    runs-on: ubuntu-24.04
+    steps:
+      - name: ghcr.io/quantag/qarm:${{ inputs.version }} and :latest, for amd64 and arm64
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          i=ghcr.io/quantag/qarm
+          docker buildx imagetools create -t $i:${{ inputs.version }} -t $i:latest \
+            $i:${{ inputs.version }}-amd64 $i:${{ inputs.version }}-arm64
